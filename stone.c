@@ -109,6 +109,7 @@ typedef void (*FuncPtr)(void*);
 #include "svcbody.h"
 #endif
 #define NO_SNPRINTF
+#define NO_VSNPRINTF
 #define NO_SYSLOG
 #define NO_FORK
 #define NO_SETHOSTENT
@@ -468,6 +469,17 @@ HANDLE FdRinMutex, FdWinMutex, FdEinMutex;
 #ifdef OS2
 HMTX PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HMTX FdRinMutex, FdWinMutex, FdEinMutex;
+#endif
+
+#ifdef NO_VSNPRINTF
+int vsnprintf(char *str, size_t len, char *fmt, va_list ap) {
+    int ret;
+    ret = vsprintf(str, fmt, ap);
+    if (strlen(str) >= len) {
+	fprintf(stderr, "Buffer overrun\n");
+	exit(1);
+    }
+}
 #endif
 
 #ifdef NO_SNPRINTF
