@@ -811,6 +811,18 @@ char *addr2ip6(struct in6_addr *addr, char *str, int len) {
 }
 #endif
 
+char *addr2numeric(struct sockaddr *sa, char *str, int len) {
+    if (sa->sa_family == AF_INET) {
+	addr2ip(&((struct sockaddr_in*)sa)->sin_addr, str, len);
+#ifdef AF_INET6
+    } else if (sa->sa_family == AF_INET6) {
+	addr2ip6(&((struct sockaddr_in6*)sa)->sin6_addr, str, len);
+#endif
+    } else {
+	strncpy(str, "???", len);
+    }
+}
+
 char *ext2str(int flag, int mask, char *str, int len) {
     char sep = '/';
     int i = 0;
@@ -872,6 +884,26 @@ char *ext2str(int flag, int mask, char *str, int len) {
 	break;
     }
     return str;
+}
+
+int islocalhost(struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET) {
+	if (ntohl(((struct sockaddr_in*)sa)->sin_addr.s_addr) == 0x7F000001L)
+	    return 1;	/* localhost */
+	if (ntohl(((struct sockaddr_in*)sa)->sin_addr.s_addr) == 0L)
+	    return -1;	/* null */
+    }
+#ifdef AF_INET6
+    if (sa->sa_family == AF_INET6) {
+	int i;
+	struct in6_addr *addrp = &((struct sockaddr_in6*)sa)->sin6_addr;
+	for (i=0; i < 12; i+=4)
+	    if (*(u_long*)&addrp->s6_addr[i] != 0) return 0;
+	if (*(u_long*)&addrp->s6_addr[i] == ntohl(1)) return 1;	/* localhost */
+	if (*(u_long*)&addrp->s6_addr[i] == 0) return -1;	/* null */
+    }
+#endif
+    return 0;
 }
 
 #ifdef NO_ADDRINFO
@@ -945,15 +977,7 @@ char *addr2str(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
-	if (sa->sa_family == AF_INET) {
-	    addr2ip(&((struct sockaddr_in*)sa)->sin_addr, str, len);
-#ifdef AF_INET6
-	} else if (sa->sa_family == AF_INET6) {
-	    addr2ip6(&((struct sockaddr_in6*)sa)->sin6_addr, str, len);
-#endif
-	} else {
-	    strncpy(str, "???", len);
-	}
+	addr2numeric(sa, str, len);
 	message(LOG_ERR, "Unknown address err=%d errno=%d: %s",
 		err, errno, str);
     }
@@ -969,11 +993,24 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
     str[len-1] = '\0';
     if (AddrFlag) flags |= (NI_NUMERICHOST | NI_NUMERICSERV);
     else if (proto & proto_udp) flags |= NI_DGRAM;
+    if (!(flags & NI_NUMERICHOST) && islocalhost(sa)) flags |= NI_NUMERICHOST;
     if (Debug > 10) {
-	message(LOG_DEBUG, "getnameinfo: family=%d len=%d flags=%d",
+	message(LOG_DEBUG, "getnameinfo: %s family=%d len=%d flags=%d",
+		addr2numeric(sa, serv, STRMAX),
 		sa->sa_family, salen, flags);
     }
     err = getnameinfo(sa, salen, str, len, serv, STRMAX, flags);
+    if (err == EAI_NODATA && !(flags & NI_NUMERICSERV)) {
+	/*
+	  WinSock32 returns EAI_NODATA if serv can't be lookup although
+	  the hostname itself is resolvable.  So we must call again
+	  without looking up serv
+	*/
+	if (Debug > 10)
+	    message(LOG_DEBUG, "getnameinfo: EAI_NODATA flags=%d", flags);
+	flags |= NI_NUMERICSERV;
+	err = getnameinfo(sa, salen, str, len, serv, STRMAX, flags);
+    }
     if (err) {
 	if (sa->sa_family == AF_INET) {
 	    addr2ip(&((struct sockaddr_in*)sa)->sin_addr, str, len);
@@ -3727,24 +3764,6 @@ static char *comm_match(char *buf, char *str) {
 	if (*buf == ' ') buf++;
     }
     return buf;
-}
-
-int islocalhost(struct sockaddr *sa) {
-    if (sa->sa_family == AF_INET) {
-	return ntohl(((struct sockaddr_in*)sa)->sin_addr.s_addr)
-	    == 0x7F000001L;
-    }
-#ifdef AF_INET6
-    if (sa->sa_family == AF_INET6) {
-	int i;
-	struct in6_addr *addrp = &((struct sockaddr_in6*)sa)->sin6_addr;
-	for (i=0; i < 16; i+=4)
-	    if (*(u_long*)&addrp->s6_addr[i] != (i < 12 ? 0 : ntohl(1)))
-		return 0;
-	return 1;
-    }
-#endif
-    return 0;
 }
 
 int doproxy(Pair *pair, char *host, int port) {
