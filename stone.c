@@ -1687,10 +1687,6 @@ void asyncAccept(Stone *stone) {
     p2 = p1->pair;
     p1->next = p2;	/* link pair each other */
     p2->prev = p1;
-    if ((p2->proto & proto_command) == command_ihead) {
-	sprintf(p2->buf,"%s\r%c",stone->p,'\n');
-	p2->start = strlen(p2->buf);
-    }
     if (p2->proto & proto_ohttp_d) {
 	int i = strnparse(p2->buf, p2->bufmax - 5, stone->p, p1);
 	p2->buf[i++] = '\r';
