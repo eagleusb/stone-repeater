@@ -2914,7 +2914,7 @@ int scanPairs(fd_set *rop, fd_set *wop, fd_set *eop) {
 		}
 	    }
 	    if (idle && pair->timeout > 0
-		&& time(&clock), clock - pair->clock > pair->timeout) {
+		&& (time(&clock), clock - pair->clock > pair->timeout)) {
 		if (pair->count > 0 || Debug > 2) {
 		    message(LOG_NOTICE,"TCP %d: idle time exceeds",sd);
 		    message_pair(pair);
