@@ -4438,7 +4438,6 @@ static void freeMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
     if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %lx",
 			   --NewMatchCount, match);
     free(match);
-    CRYPTO_free_ex_data(idx, parent, ad);
 }
 
 static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
