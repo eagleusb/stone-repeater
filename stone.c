@@ -382,6 +382,7 @@ Stone *oldstones = NULL;
 int ReuseAddr = 0;
 Backup *backups = NULL;
 int MinInterval = 0;
+time_t lastScanBackups = 0;
 Pair pairs;
 Pair *trash = NULL;
 Conn conns;
@@ -1744,6 +1745,8 @@ int scanConns(void) {
 #endif
     Conn *conn, *pconn;
     Pair *p1, *p2;
+    time_t now;
+    time(&now);
     pconn = &conns;
     for (conn=conns.next; conn != NULL; conn=conn->next) {
 	p1 = conn->pair;
@@ -1766,7 +1769,10 @@ int scanConns(void) {
 	}
 	pconn = conn;
     }
-    if (backups) ASYNC(asyncScanBackups, NULL);
+    if (backups && now - lastScanBackups >= MinInterval) {
+	lastScanBackups = now;
+	ASYNC(asyncScanBackups, NULL);
+    }
     return 1;
 }
 
