@@ -3406,6 +3406,7 @@ int islocalhost(struct in_addr *addrp) {
     return ntohl(addrp->s_addr) == 0x7F000001L;
 }
 
+#ifdef ADDRCACHE
 unsigned int str2hash(char *str) {
     unsigned int hash = 0;
     while (*str) {
@@ -3451,12 +3452,21 @@ int addrcache(char *name, struct sockaddr_in *sinp) {
     freeMutex(HashMutex);
     return 1;
 }
+#endif
 
 int doproxy(Pair *pair, char *host, int port) {
     struct sockaddr_in sin;
+    short family;
     bzero((char *)&sin, sizeof(sin)); /* clear sin struct */
     sin.sin_port = htons((u_short)port);
+#ifdef ADDRCACHE
     if (!addrcache(host, &sin)) return -1;
+#else
+    if (!host2addr(host, &sin.sin_addr, &family)) {
+	return -1;
+    }
+    sin.sin_family = family;
+#endif
     pair->proto &= ~proto_command;
     if (islocalhost(&sin.sin_addr)) {
 	TimeLog *log = pair->log;
