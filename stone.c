@@ -188,6 +188,9 @@ typedef void *(*aync_start_routine) (void *);
 #ifdef PRCTL
 #include <sys/prctl.h>
 #endif
+#ifdef MEMLEAK_CHECK
+#include <mcheck.h>
+#endif
 typedef int SOCKET;
 #define INVALID_SOCKET		-1
 #define ValidSocket(sd)		((sd) >= 0)
@@ -6199,7 +6202,7 @@ DWORD WINAPI ThreadProc(LPVOID lpParms) {
     initialize(3, lpArgs);
     free(lpArgs[2]);
     do {
-	repeater();    	
+	repeater();
     } while (WAIT_TIMEOUT == WaitForSingleObject(hStopEvent, 1));
     AddToMessageLog("Exiting worker thread");
     ExitThread(0);
@@ -6224,6 +6227,9 @@ int main(int argc, char *argv[]) {
     initialize(argc, argv);
     if (DryRun) return 0;
     clear_args(argc, argv);
+#ifdef MEMLEAK_CHECK
+    mtrace();
+#endif
     for (;;) repeater();
     return 0;
 }
