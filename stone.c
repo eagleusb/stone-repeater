@@ -2922,10 +2922,7 @@ int scanClose(void) {	/* scan close request */
 	if (p) p->next = p1;	/* remove `p2' from list */
 	if (p1) p1->prev = p;
 	p = p2->pair;
-	if (p) {
-	    p->pair = NULL;
-	    doclose(p);
-	}
+	if (p) p->pair = NULL;
 	freeMutex(PairMutex);
 	if (trash.next) trash.next->prev = p2;	/* push `p2' to trash */
 	p2->prev = &trash;
@@ -4118,6 +4115,13 @@ void asyncReadWrite(Pair *pair) {
     ASYNC_END;
 }
 
+void asyncClose(Pair *pair) {
+    ASYNC_BEGIN;
+    if (Debug > 8) message(LOG_DEBUG, "asyncClose...");
+    doclose(pair);
+    ASYNC_END;
+}
+
 int scanPairs(fd_set *rop, fd_set *wop, fd_set *eop) {
 #ifdef PTHREAD
     pthread_t thread;
@@ -4141,7 +4145,13 @@ int scanPairs(fd_set *rop, fd_set *wop, fd_set *eop) {
 		idle = 0;
 		message(priority(pair), "TCP %d: exception", sd);
 		message_pair(pair);
-		doclose(pair);
+		waitMutex(FdRinMutex);
+		waitMutex(FdWinMutex);
+		FD_CLR(sd, &rin);
+		FD_CLR(sd, &win);
+		freeMutex(FdWinMutex);
+		freeMutex(FdRinMutex);
+		ASYNC(asyncClose, pair);
 	    } else {
 		waitMutex(FdRinMutex);
 		waitMutex(FdWinMutex);
@@ -4196,7 +4206,16 @@ int scanPairs(fd_set *rop, fd_set *wop, fd_set *eop) {
 		    message_pair(pair);
 		    if (pair->count > 0) pair->count -= REF_UNIT;
 		}
-		doclose(pair);
+		waitMutex(FdRinMutex);
+		waitMutex(FdWinMutex);
+		waitMutex(FdEinMutex);
+		FD_CLR(sd, &rin);
+		FD_CLR(sd, &win);
+		FD_CLR(sd, &ein);
+		freeMutex(FdEinMutex);
+		freeMutex(FdWinMutex);
+		freeMutex(FdRinMutex);
+		ASYNC(asyncClose, pair);
 	    }
 	}
     }
