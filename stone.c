@@ -2695,6 +2695,8 @@ void asyncReadWrite(Pair *pair) {
 			rPair->proto |= proto_eof;
 			shutdown(wsd, 1);	/* no more sends */
 		    } else {	/* error */
+			if (wPair && (wPair->proto & proto_eof))
+			    doclose(wPair);
 			doclose(rPair);
 		    }
 		} else {
