@@ -705,35 +705,49 @@ int priority(Pair *pair) {
 void packet_dump(char *head, char *buf, int len) {
     char line[BUFMAX];
     int i, j, k, l;
+    int nb = 8;
     k = 0;
     for (i=0; i < len; i += j) {
-	l = 0;
-	line[l++] = ' ';
-	for (j=0; k <= j/10 && i+j < len && l < BUFMAX-10; j++) {
-	    if (' ' <= buf[i+j] && buf[i+j] <= '~')
-		line[l++] = buf[i+j];
-	    else {
-		sprintf(&line[l], "<%02x>", buf[i+j]);
-		l += strlen(&line[l]);
-		if (buf[i+j] == '\n') {
-		    k = 0;
-		    j++;
-		    break;
+	if (PacketDump <= 2) {
+	    nb = 16;
+	    l = 0;
+	    line[l++] = ' ';
+	    for (j=0; k <= j/10 && i+j < len && l < BUFMAX-10; j++) {
+		if (' ' <= buf[i+j] && buf[i+j] <= '~')
+		    line[l++] = buf[i+j];
+		else {
+		    sprintf(&line[l], "<%02x>", buf[i+j]);
+		    l += strlen(&line[l]);
+		    if (buf[i+j] == '\n') {
+			k = 0;
+			j++;
+			break;
+		    }
+		    if (buf[i+j] != '\t' && buf[i+j] != '\r'
+			&& buf[i+j] != '\033')
+			k++;
 		}
-		if (buf[i+j] != '\t' && buf[i+j] != '\r' && buf[i+j] != '\033')
-		    k++;
 	    }
 	}
-	if (k > j/10) {
+	if (k > j/10 || nb < 16) {
 	    j = l = 0;
-	    for (j=0; j < 16 && i+j < len; j++) {
-		if ((PacketDump & 0x1) && (' ' <= buf[i+j] && buf[i+j] <= '~'))
+	    for (j=0; j < nb && i+j < len; j++) {
+		if (PacketDump == 1 && (' ' <= buf[i+j] && buf[i+j] <= '~'))
 		    sprintf(&line[l], " '%c", buf[i+j]);
 		else {
 		    sprintf(&line[l], " %02x", (unsigned char)buf[i+j]);
 		    if (buf[i+j] == '\n') k = 0; else k++;
 		}
 		l += strlen(&line[l]);
+	    }
+	    if (nb < 16) {
+		while (l < (nb * 3) + 2) line[l++] = ' ';
+		for (j=0; j < nb && i+j < len; j++) {
+		    if (' ' <= buf[i+j] && buf[i+j] <= '~')
+			line[l++] = buf[i+j];
+		    else
+			line[l++] = '.';
+		}
 	    }
 	}
 	line[l] = '\0';
