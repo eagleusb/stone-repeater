@@ -335,6 +335,13 @@ typedef struct {
     struct in_addr mask;
 } XHost;
 
+typedef struct {
+#ifdef AF_INET6
+    struct in6_addr addr;
+#endif
+    short mbits;
+} XHost6;
+
 typedef struct _Chat {
     struct _Chat *next;
     char *send;
@@ -497,8 +504,12 @@ const int proto_base_d =	0x20000000;	/*        destination */
 #define proto_dest	(proto_tcp|proto_udp|proto_first_r|proto_first_w|\
 			 proto_ohttp_d|proto_base_d|\
 			 proto_command)
-#define proto_stone_s	(proto_src|proto_v6_s|proto_ssl_s|proto_ident)
-#define proto_stone_d	(proto_dest|proto_v6_d|proto_ssl_d|proto_nobackup)
+#define proto_stone_s	(proto_tcp|proto_udp|proto_source|\
+			 proto_ohttp_s|proto_base_s|\
+			 proto_v6_s|proto_ssl_s|proto_ident)
+#define proto_stone_d	(proto_tcp|proto_udp|proto_command|\
+			 proto_ohttp_d|proto_base_d|\
+			 proto_v6_d|proto_ssl_d|proto_nobackup)
 #define proto_all	(proto_src|proto_dest)
 
 #ifdef USE_SSL
@@ -787,6 +798,7 @@ char *addr2ip(struct in_addr *addr, char *str, int len) {
     return str;
 }
 
+#ifdef AF_INET6
 char *addr2ip6(struct in6_addr *addr, char *str, int len) {
     u_short *s;
     s = (u_short*)addr;
@@ -796,6 +808,7 @@ char *addr2ip6(struct in6_addr *addr, char *str, int len) {
     str[len-1] = '\0';
     return str;
 }
+#endif
 
 char *ext2str(int flag, int mask, char *str, int len) {
     char sep = '/';
@@ -930,8 +943,10 @@ char *addr2str(void *sa, socklen_t salen, char *str, int len, int flags) {
     if (err) {
 	if (((struct sockaddr*)sa)->sa_family == AF_INET) {
 	    addr2ip(&((struct sockaddr_in*)sa)->sin_addr, str, len);
+#ifdef AF_INET6
 	} else if (((struct sockaddr*)sa)->sa_family == AF_INET6) {
 	    addr2ip6(&((struct sockaddr_in6*)sa)->sin6_addr, str, len);
+#endif
 	} else {
 	    strncpy(str, "???", len);
 	}
@@ -959,11 +974,13 @@ char *addrport2str(void *sa, socklen_t salen,
 	    i = strlen(str);
 	    snprintf(str+i, len-i-5, ":%d",
 		     ntohs(((struct sockaddr_in*)sa)->sin_port));
+#ifdef AF_INET6
 	} else if (((struct sockaddr*)sa)->sa_family == AF_INET6) {
 	    addr2ip6(&((struct sockaddr_in6*)sa)->sin6_addr, str, len);
 	    i = strlen(str);
 	    snprintf(str+i, len-i-5, ":%d",
 		     ntohs(((struct sockaddr_in6*)sa)->sin6_port));
+#endif
 	} else {
 	    strncpy(str, "???:?", len);
 	}
@@ -1084,15 +1101,17 @@ int host2sa(char *name, struct sockaddr *sa, socklen_t *salenp,
     int err;
     hint.ai_flags = flags;
     hint.ai_family = sa->sa_family;
-    hint.ai_socktype = *socktypep;
-    hint.ai_protocol = *protocolp;
+    if (socktypep) hint.ai_socktype = *socktypep;
+    else hint.ai_socktype = 0;
+    if (protocolp) hint.ai_protocol = *protocolp;
+    else hint.ai_protocol = 0;
     hint.ai_addrlen = 0;
     hint.ai_addr = NULL;
     hint.ai_canonname = NULL;
     hint.ai_next = NULL;
     if (Debug > 5) {
 	message(LOG_DEBUG, "getaddrinfo: %s family=%d socktype=%d flags=%d",
-		name, sa->sa_family, *socktypep, flags);
+		name, sa->sa_family, hint.ai_socktype, flags);
     }
     err = getaddrinfo(name, NULL, &hint, &ai);
     if (err != 0) {
@@ -1108,8 +1127,8 @@ int host2sa(char *name, struct sockaddr *sa, socklen_t *salenp,
 	goto fail;
     }
     *salenp = ai->ai_addrlen;
-    *socktypep = ai->ai_socktype;
-    *protocolp = ai->ai_protocol;
+    if (socktypep) *socktypep = ai->ai_socktype;
+    if (protocolp) *protocolp = ai->ai_protocol;
     bcopy(ai->ai_addr, sa, *salenp);
     freeaddrinfo(ai);
     return 1;
@@ -1136,6 +1155,33 @@ int checkXhost(Stone *stonep, struct sockaddr *sa, socklen_t salen,
 	}
 	return !match;
     }
+#ifdef AF_INET6
+    else if (sa->sa_family == AF_INET6) {
+	XHost6 *xhosts = (XHost6*)stonep->xhosts;
+	struct in6_addr *addrp;
+	addrp = &((struct sockaddr_in6*)sa)->sin6_addr;
+	for (i=0; i < stonep->nhosts; i++) {
+	    if (xhosts[i].mbits < 0) {
+		match = !match;
+	    } else {
+		int j, k;
+		for (j=0, k=xhosts[i].mbits; k > 0; j++, k -= 32) {
+		    u_long addr, xaddr, mask;
+		    addr = ntohl(addrp->s6_addr32[j]);
+		    xaddr = ntohl(xhosts[i].addr.s6_addr32[j]);
+		    if (k >= 32) mask = (u_long)~0;
+		    else mask = ((u_long)~0 << (32-k));
+		    if (Debug > 12)
+			message(LOG_DEBUG, "compare addr=%lx x=%lx m=%lx",
+				addr, xaddr, mask);
+		    if ((addr & mask) != (xaddr & mask)) break;
+		}
+		if (k <= 0) return match;
+	    }
+	}
+	return !match;
+    }
+#endif
     message(LOG_ERR, "checkXhost: unknown family=%d", sa->sa_family);
     return 0;	/* deny */
 }
@@ -4955,7 +5001,19 @@ Stone *mkstone(
     char xhost[STRMAX], *p;
     int allow;
     int i;
-    stonep = calloc(1, sizeof(Stone)+sizeof(XHost)*nhosts);
+    XHost *xhosts = NULL;
+    XHost6 *xhosts6 = NULL;
+#ifdef AF_INET6
+    if (proto & proto_v6_s) {
+	stonep = calloc(1, sizeof(Stone)+sizeof(XHost6)*nhosts);
+	xhosts6 = (XHost6*)stonep->xhosts;
+    } else {
+#endif
+	stonep = calloc(1, sizeof(Stone)+sizeof(XHost)*nhosts);
+	xhosts = stonep->xhosts;
+#ifdef AF_INET6
+    }
+#endif
     if (!stonep) {
 	message(LOG_CRIT, "Out of memory.");
 	exit(1);
@@ -4972,6 +5030,7 @@ Stone *mkstone(
 	sstype = SOCK_STREAM;
 	ssproto = IPPROTO_TCP;
     }
+#ifdef AF_INET6
     if (proto & proto_v6_s) {
 	struct sockaddr_in6 *sin6p = (struct sockaddr_in6*)&ss;
 	sin6p->sin6_family = AF_INET6;
@@ -4981,7 +5040,9 @@ Stone *mkstone(
 #endif
 	sin6p->sin6_port = htons((u_short)port);
 	ssfamily = sin6p->sin6_family;
-    } else {
+    } else
+#endif
+    {
 	struct sockaddr_in *sinp = (struct sockaddr_in*)&ss;
 	sinp->sin_family = AF_INET;
 #ifdef NO_ADDRINFO
@@ -5089,8 +5150,12 @@ Stone *mkstone(
     allow = 1;
     for (i=0; i < nhosts; i++) {
 	if (!strcmp(hosts[i], "!")) {
-	    stonep->xhosts[i].addr.s_addr = (u_long)~0;
-	    stonep->xhosts[i].mask.s_addr = 0;
+	    if (xhosts) {
+		xhosts[i].addr.s_addr = (u_long)~0;
+		xhosts[i].mask.s_addr = 0;
+	    } else {
+		xhosts6[i].mbits = -1;
+	    }
 	    allow = !allow;
 	    continue;
 	}
@@ -5101,48 +5166,76 @@ Stone *mkstone(
 	    *p++ = '\0';
 	    ndigits = isdigitaddr(p);
 	    if (ndigits == 1) {
+		int bitsmax;
 		int nbits = atoi(p);
-		if (nbits <= 0 || 32 < nbits) {
+		if (xhosts) bitsmax = 32; else bitsmax = 128;
+		if (nbits <= 0 || bitsmax < nbits) {
 		    message(LOG_ERR, "Illegal netmask: %s", p);
 		    exit(1);
 		}
-		stonep->xhosts[i].mask.s_addr
-		    = htonl((u_long)~0 << (32 - nbits));
-	    } else if (!host2addr(p, &stonep->xhosts[i].mask, NULL)) {
+		if (xhosts) {
+		    xhosts[i].mask.s_addr
+			= htonl((u_long)~0 << (bitsmax - nbits));
+		} else {
+		    xhosts6[i].mbits = nbits;
+		}
+	    } else if (!xhosts || !host2addr(p, &xhosts[i].mask, NULL)) {
 		exit(1);
 	    }
 	} else {
-	    stonep->xhosts[i].mask.s_addr = (u_long)~0;
+	    if (xhosts) {
+		xhosts[i].mask.s_addr = (u_long)~0;
+	    } else {
+		xhosts6[i].mbits = 128;
+	    }
 	}
-	if (!host2addr(xhost, &stonep->xhosts[i].addr, NULL)) {
+	if (xhosts) {
+	    if (!host2addr(xhost, &xhosts[i].addr, NULL)) exit(1);
+	} else {
+#ifdef AF_INET6
+	    struct sockaddr_in6 sin6;
+	    int len = sizeof(sin6);
+	    sin6.sin6_family = AF_INET6;
+	    if (!host2sa(xhost, (struct sockaddr*)&sin6, &len,
+			 NULL, NULL, 0)) exit(1);
+	    xhosts6[i].addr = sin6.sin6_addr;
+#else
 	    exit(1);
+#endif
 	}
 	if (Debug > 1) {
-	    addr2ip(&stonep->xhosts[i].addr, xhost, STRMAX);
+	    int pos = 0;
+	    if (xhosts) {
+		addr2ip(&xhosts[i].addr, xhost, STRMAX);
+		pos = strlen(xhost);
+		snprintf(xhost+pos, STRMAX-pos, " (mask %lx)",
+			 ntohl((u_long)xhosts[i].mask.s_addr));
+		pos += strlen(xhost+pos);
+	    } else {
+#ifdef AF_INET6
+		addr2ip6(&xhosts6[i].addr, xhost, STRMAX);
+		pos = strlen(xhost);
+		snprintf(xhost+pos, STRMAX-pos, "/%d", xhosts6[i].mbits);
+		pos += strlen(xhost+pos);
+#else
+		exit(1);
+#endif
+	    }
 	    if ((proto & proto_command) == command_proxy) {
 		message(LOG_DEBUG,
-			"stone %d: %s %s (mask %x) to connecting to proxy",
-			stonep->sd,
-			(allow ? "permit" : "deny"),
-			xhost,
-			ntohl((unsigned long)stonep->xhosts[i].mask.s_addr));
+			"stone %d: %s %s to connecting to proxy",
+			stonep->sd, (allow ? "permit" : "deny"), xhost);
 	    } else if ((proto & proto_command) == command_health) {
 		message(LOG_DEBUG,
-			"stone %d: %s (mask %x) %s check health",
-			stonep->sd,
-			xhost,
-			ntohl((unsigned long)stonep->xhosts[i].mask.s_addr),
-			(allow ? "can" : "can't"));
+			"stone %d: %s %s check health",
+			stonep->sd, xhost, (allow ? "can" : "can't"));
 	    } else {
 		char addrport[STRMAX];
 		addrport2str(stonep->sins, sizeof(stonep->sins[0]),
 			     stonep->proto, proto_stone_d, addrport, STRMAX);
 		message(LOG_DEBUG,
-			"stone %d: %s %s (mask %x) to connecting to %s",
-			stonep->sd,
-			(allow ? "permit" : "deny"),
-			xhost,
-			ntohl((unsigned long)stonep->xhosts[i].mask.s_addr),
+			"stone %d: %s %s to connecting to %s",
+			stonep->sd, (allow ? "permit" : "deny"), xhost,
 			addrport);
 	    }
 	}
@@ -5251,19 +5344,27 @@ void help(char *com) {
 	    "       proxy <sport> [<xhost>...]\n"
 	    "       <host>:<port#>/http <sport> <Request-Line> [<xhost>...]\n"
 	    "       <host>:<port#>/proxy <sport> <header> [<xhost>...]\n"
-	    "port:  <port#>[/udp"
+	    "port:  <port#>[/<ext>[,<ext>]...]\n"
+	    "ext:   tcp | udp"
 #ifdef USE_SSL
-	    " | /ssl"
+	    " | ssl"
+#endif
+#ifdef AF_INET6
+	    " | v6"
 #endif
 #ifdef USE_POP
-	    " | /apop"
+	    " | apop"
 #endif
-	    " | /base | /nobackup]\n"
-	    "sport: [<host>:]<port#>[/udp"
+	    " | base | nobackup\n"
+	    "sport: [<host>:]<port#>[/<exts>[,<exts>]...]\n"
+	    "exts:  tcp | udp"
 #ifdef USE_SSL
-	    " | /ssl"
+	    " | ssl"
 #endif
-	    " | /http | /base | /ident]\n"
+#ifdef AF_INET6
+	    " | v6"
+#endif
+	    " | http | base | ident\n"
 	    "xhost: <host>[/<mask>]\n"
 #ifdef USE_SSL
 	    "SSL:   default          ; reset to default\n"
@@ -5519,16 +5620,13 @@ int getdist(
     top = p;
     port_str = proto_str = NULL;
     while (*p) {
-	if (*p == ':') {
-	    port_str = ++p;
-	} else if (!proto_str && *p == '/') {
-	    *p++ = '\0';
-	    proto_str = p;
-	}
-	p++;
+	if (*p == ':') port_str = ++p;
+	else if (*p == '/') proto_str = ++p;
+	else p++;
     }
     *protop = proto_tcp;	/* default */
     if (proto_str) {
+	*(proto_str-1) = '\0';
 	p = proto_str;
 	do {
 	    if (!strncmp(p, "tcp", 3)) {
@@ -5560,9 +5658,11 @@ int getdist(
 		p += 3;
 		*protop |= proto_ssl;
 #endif
+#ifdef AF_INET6
 	    } else if (!strncmp(p, "v6", 2)) {
 		p += 2;
 		*protop |= proto_v6;
+#endif
 #ifdef USE_POP
 	    } else if (!strncmp(p, "apop", 4)) {
 		p += 4;
