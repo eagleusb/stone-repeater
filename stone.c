@@ -3534,7 +3534,6 @@ FILE *openconfig(void) {
 	    execv(buf,argv);
 	}
 	close(pfd[1]);
-	wait(NULL);
 	return fdopen(pfd[0],"r");
     } else
 #endif
@@ -3578,6 +3577,11 @@ void getconfig(void) {
 	ConfigArgc++;
     } while ((len=gettoken(fp,buf)) > 0);
     fclose(fp);
+#ifdef CPP
+    if (CppCommand != NULL && *CppCommand != '\0') {
+	wait(NULL);
+    }
+#endif
 }
 
 int getdist(
