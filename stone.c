@@ -3528,6 +3528,7 @@ Stone *mkstone(
 	}
 	sin.sin_family = family;
     }
+    stonep->nsins = 1;
     if ((proto & proto_command) != command_proxy) {
 	struct sockaddr_in dsin;
 	LBSet *lbset;
@@ -3547,7 +3548,6 @@ Stone *mkstone(
 		exit(1);
 	    }
 	    bcopy(&dsin, stonep->sins, sizeof(dsin));
-	    stonep->nsins = 1;
 	}
     }
     stonep->proto = proto;
