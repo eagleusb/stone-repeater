@@ -1475,6 +1475,8 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 	if (errno == EINPROGRESS) {
 	    fd_set wout;
 	    struct timeval tv;
+	    int optval;
+	    socklen_t optlen = sizeof(optval);
 	    do {
 		time(&now);
 		if (now - start >= timeout) goto timeout;
@@ -1483,6 +1485,12 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 		FD_ZERO(&wout);
 		FdSet(sd, &wout);
 	    } while (select(FD_SETSIZE, NULL, &wout, NULL, &tv) == 0);
+	    getsockopt(sd, SOL_SOCKET, SO_ERROR, (char*)&optval, &optlen);
+	    if (optval) {
+		message(LOG_ERR, "health check: connect %s getsockopt err=%d",
+			addrport, optval);
+		goto fail;
+	    }
 	} else {
 	    message(LOG_ERR, "health check: connect %s err=%d",
 		    addrport, errno);
@@ -1990,6 +1998,9 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
 	fromlen = sizeof(ss);
     }
     if (fromlenp) fromlen = *fromlenp;
+#ifndef MSG_TRUNC
+#define MSG_TRUNC 0
+#endif
     pkt_len = recvfrom(sd, pb->buf, pb->bufmax, MSG_TRUNC, from, &fromlen);
     if (pkt_len < 0) {
 #ifdef WINDOWS
@@ -2339,6 +2350,7 @@ ExBuf *getExBuf(void) {
 	ret->bufmax = size;
     }
     ret->next = NULL;
+    ret->start = 0;
     ret->len = 0;
     return ret;
 }
@@ -3178,7 +3190,7 @@ Pair *doaccept(Stone *stonep) {
     struct sockaddr *from = (struct sockaddr*)&ss;
     socklen_t fromlen = sizeof(ss);
     SOCKET nsd;
-    int size, len;
+    int len;
     Pair *pair1, *pair2;
 #ifdef ENLARGE
     int prevXferBufMax = XferBufMax;
@@ -3549,6 +3561,15 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
     ExBuf *ex;
     ex = pair->t;	/* top */
     if (!ex) return 0;
+    while (ex->len <= 0 && ex->next) {
+	pair->t = ex->next;
+	pair->nbuf--;
+	if (Debug > 4) message(LOG_DEBUG,
+			       "TCP %d: before dowrite unget ExBuf nbuf=%d",
+			       pair->sd, pair->nbuf);
+	ungetExBuf(ex);
+    }
+    if (ex->len <= 0) return 0;	/* nothing to write */
     if (Debug > 5) message(LOG_DEBUG, "TCP %d: write %d bytes", sd, ex->len);
     if (InvalidSocket(sd)) return -1;
 #ifdef USE_SSL
@@ -3643,7 +3664,8 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
     if (ex->len <= 0 && ex->next) {
 	pair->t = ex->next;
 	pair->nbuf--;
-	if (Debug > 4) message(LOG_DEBUG, "TCP %d: unget ExBuf nbuf=%d",
+	if (Debug > 4) message(LOG_DEBUG,
+			       "TCP %d: after dowrite unget ExBuf nbuf=%d",
 			       pair->sd, pair->nbuf);
 	ungetExBuf(ex);
     }
@@ -4266,7 +4288,7 @@ int healthHELO(Pair *pair, char *parm, int start) {
 	     AsyncCount, nFreePairs, nFreeExBuf, nFreePktBuf);
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
-    commOutput(pair, "200 stone:%s debug=%d %s\r\n",
+    commOutput(pair, "250 stone:%s debug=%d %s\r\n",
 	       VERSION, Debug, str);
     return -2;	/* read more */
 }
@@ -4648,8 +4670,27 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			    sd, len, errno);
 		}
 	    } else if ((p[i]->proto & proto_conninprog) && FD_ISSET(sd, &wo)) {
+		int optval;
+		socklen_t optlen = sizeof(optval);
 		p[i]->proto &= ~proto_conninprog;
-		connected(p[i]);
+		if (getsockopt(sd, SOL_SOCKET, SO_ERROR,
+			       (char*)&optval, &optlen) < 0) {
+#ifdef WINDOWS
+		    errno = WSAGetLastError();
+#endif
+		    message(LOG_ERR, "TCP %d: getsockopt err=%d",
+			    sd, errno);
+		    p[i]->proto |= proto_close;
+		    goto leave;
+		}
+		if (optval) {
+		    message(LOG_ERR, "TCP %d: connect getsockopt err=%d",
+			    sd, optval);
+		    p[i]->proto |= proto_close;
+		    goto leave;
+		} else {	/* succeed in connecting */
+		    connected(p[i]);
+		}
 #ifdef USE_SSL
 	    } else if (((p[i]->ssl_flag & sf_sb_on_r) && FD_ISSET(sd, &ro))
 		       || ((p[i]->ssl_flag & sf_sb_on_w) && FD_ISSET(sd, &wo))
@@ -6346,15 +6387,29 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	break;
     case 'I':
 	++argi;
-	if (!argv[argi]) {
+	if (!argv[argi] || argv[argi][0] == '\0') {
 	    ConnectFrom = NULL;
 	} else {
+	    char host[STRMAX+1];
+	    char port[STRMAX+1];
 	    struct sockaddr_storage ss;
 	    struct sockaddr *sa = (struct sockaddr*)&ss;
 	    socklen_t salen = sizeof(ss);
-	    sa->sa_family = AF_UNSPEC;
-	    if (!host2sa(argv[argi], NULL, sa, &salen, NULL, NULL, 0)) {
-		return -1;
+	    int pos = hostPortExt(argv[argi], host, port);
+	    if (pos < 0) {
+		sa->sa_family = AF_UNSPEC;
+		if (!host2sa(argv[argi], NULL, sa, &salen, NULL, NULL, 0)) {
+		    return -1;
+		}
+	    } else {
+		sa->sa_family = AF_UNSPEC;
+#ifdef AF_INET6
+		if (pos && !strcmp(argv[argi]+pos, "v6"))
+		    sa->sa_family = AF_INET6;
+#endif
+		if (!host2sa(host, port, sa, &salen, NULL, NULL, 0)) {
+		    return -1;
+		}
 	    }
 	    ConnectFrom = saDup(sa, salen);
 	    if (!ConnectFrom) {
@@ -6847,7 +6902,6 @@ void initialize(int argc, char *argv[]) {
     if (RootDir) {
 	char cwd[BUFMAX];
 	int len = strlen(RootDir);
-	int i;
 	getcwd(cwd, BUFMAX-1);
 	if (strncmp(cwd, RootDir, len) != 0) len = -1;
 	if (chroot(RootDir) < 0) {
