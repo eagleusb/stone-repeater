@@ -85,7 +85,7 @@
  * -DNT_SERVICE	  WindowsNT/2000 native service
  * -DUNIX_DAEMON  fork into background and become a UNIX Daemon
  */
-#define VERSION	"2.1w"
+#define VERSION	"2.1x"
 static char *CVS_ID =
 "@(#) $Id$";
 
