@@ -3645,7 +3645,7 @@ int first_read(Pair *pair, fd_set *rinp, fd_set *winp) {
 	    break;
 #endif
 	case command_health:
-	    if (memCheck()) len = -1;
+	    if (!memCheck()) len = -1;
 	    else len = docomm(p, rinp, winp, healthComm);
 	    break;
 	default:
