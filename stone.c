@@ -968,6 +968,7 @@ int host2addr(char *name, struct in_addr *addrp, short *familyp) {
     }
     message(LOG_ERR, "No IP address for %s", name);
  exit:
+    if (temp.s) free(temp.s);
     if (fqdn.s) free(fqdn.s);
     if (addr.s) free(addr.s);
     return ret;
