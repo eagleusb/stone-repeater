@@ -123,7 +123,7 @@ macosx-ssl:
 	$(MAKE) TARGET=macosx SSL=/usr ssl_stone
 
 sun:
-	$(MAKE) CC=gcc FLAGS="-DNO_ADDRINFO -DNO_FAMILY_T -DNO_SNPRINTF -DIGN_SIGTERM -DCPP='\"/usr/lib/cpp\"' $(FLAGS)" stone
+	$(MAKE) CC=gcc FLAGS="-DNO_ADDRINFO -DNO_SNPRINTF -DIGN_SIGTERM -DCPP='\"/usr/lib/cpp\"' $(FLAGS)" stone
 
 sun-pop:
 	$(MAKE) TARGET=sun pop_stone
@@ -174,7 +174,7 @@ mingw.exe: stone.c
 	$(CC) $(FLAGS) -o stone.exe $? $(LIBS)
 
 mingw:
-	$(MAKE) CC=gcc FLAGS="-DWINDOWS -DNO_RINDEX -DNO_FAMILY_T $(FLAGS)" LIBS="-lws2_32 -lregex $(LIBS)" mingw.exe
+	$(MAKE) CC=gcc FLAGS="-DWINDOWS -DNO_RINDEX $(FLAGS)" LIBS="-lws2_32 -lregex $(LIBS)" mingw.exe
 
 mingw-pop:
 	$(MAKE) CC=gcc TARGET=mingw pop_stone
@@ -183,7 +183,7 @@ mingw-ssl:
 	$(MAKE) CC=gcc FLAGS="$(SSL_FLAGS)" SSL_LIBS="-lssl32 -leay32" TARGET=mingw ssl_stone
 
 mingw-svc:
-	$(MAKE) CC=gcc CFLAGS="-DWINDOWS -DNT_SERVICE -DNO_RINDEX -DNO_FAMILY_T $(POP_FLAGS) $(SSL_FLAGS) $(CFLAGS)" SSL_LIBS="-lssl32 -leay32" TARGET=mingw svc_stone
+	$(MAKE) CC=gcc CFLAGS="-DWINDOWS -DNT_SERVICE -DNO_RINDEX $(POP_FLAGS) $(SSL_FLAGS) $(CFLAGS)" SSL_LIBS="-lssl32 -leay32" TARGET=mingw svc_stone
 
 emx:
 	$(MAKE) CC=gcc FLAGS="-DOS2 -Zmts -Zsysv-signals $(FLAGS)" LIBS="$(LIBS) -lsocket" stone.exe

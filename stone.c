@@ -78,7 +78,6 @@
  * -DNO_RINDEX	  without rindex(3)
  * -DNO_THREAD	  without thread
  * -DNO_PID_T	  without pid_t
- * -DNO_FAMILY_T  without sa_family_t
  * -DNO_SOCKLEN_T without socklen_t
  * -DNO_ADDRINFO  without getaddrinfo
  * -DPTHREAD      use Posix Thread
@@ -508,12 +507,6 @@ const int proto_base_d =	0x20000000;	/*        destination */
 #define proto_v6	(proto_v6_s|proto_v6_d)
 #define proto_ohttp	(proto_ohttp_s|proto_ohttp_d)
 #define proto_base	(proto_base_s|proto_base_d)
-#define proto_src	(proto_tcp|proto_udp|proto_first_r|proto_first_w|\
-			 proto_ohttp_s|proto_base_s|\
-			 proto_source)
-#define proto_dest	(proto_tcp|proto_udp|proto_first_r|proto_first_w|\
-			 proto_ohttp_d|proto_base_d|\
-			 proto_command)
 #define proto_stone_s	(proto_tcp|proto_udp|proto_source|\
 			 proto_ohttp_s|proto_base_s|\
 			 proto_v6_s|proto_ssl_s|proto_ident)
@@ -521,8 +514,9 @@ const int proto_base_d =	0x20000000;	/*        destination */
 			 proto_ohttp_d|proto_base_d|\
 			 proto_v6_d|proto_ssl_d|proto_nobackup)
 #define proto_stone	(proto_stone_s|proto_stone_d)
-#define proto_pair	(proto_tcp|proto_udp|\
-			 proto_ohttp_s|proto_base_s|\
+#define proto_pair_s	(proto_tcp|proto_udp|\
+			 proto_ohttp_s|proto_base_s)
+#define proto_pair_d	(proto_tcp|proto_udp|\
 			 proto_ohttp_d|proto_base_d|proto_command)
 
 #ifdef USE_SSL
@@ -570,9 +564,6 @@ uid_t SetUID = 0;
 gid_t SetGID = 0;
 #endif
 char *CoreDumpDir = NULL;
-#ifdef NO_FAMILY_T
-typedef unsigned short sa_family_t;
-#endif
 #ifdef NO_PID_T
 typedef int pid_t;
 #endif
@@ -916,7 +907,7 @@ char *addr2str(struct sockaddr *sa, socklen_t salen,
 }
 
 char *addrport2str(struct sockaddr *sa, socklen_t salen,
-		   int flag, int mask, char *str, int len) {
+		   int proto, int mask, char *str, int len, int flags) {
     struct servent *ent;
     int port;
     int i = 0;
@@ -935,13 +926,13 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
     }
     port = ((struct sockaddr_in*)sa)->sin_port;
     if (!AddrFlag) {
-	ent = getservbyport(port, ((flag & proto_udp) ? "udp" : "tcp"));
+	ent = getservbyport(port, ((proto & proto_udp) ? "udp" : "tcp"));
 	if (ent) strncpy(str+i, ent->s_name, len-i-5);
     }
     if (str[i] == '\0')
 	snprintf(str+i, len-i-5, "%d", ntohs((unsigned short)port));
     i = strlen(str);
-    ext2str(flag, mask, str+i, len-i);
+    ext2str(proto, mask, str+i, len-i);
     return str;
 }
 #else
@@ -970,15 +961,18 @@ char *addr2str(struct sockaddr *sa, socklen_t salen,
 }
 
 char *addrport2str(struct sockaddr *sa, socklen_t salen,
-		   int flag, int mask, char *str, int len) {
+		   int proto, int mask, char *str, int len, int flags) {
     char serv[STRMAX];
-    int flags = 0;
     int err;
     int i;
     if (!str || len <= 1) return "";
     str[len-1] = '\0';
-    if (AddrFlag) flags = (NI_NUMERICHOST | NI_NUMERICSERV);
-    else if (flag & proto_udp) flags = NI_DGRAM;
+    if (AddrFlag) flags |= (NI_NUMERICHOST | NI_NUMERICSERV);
+    else if (proto & proto_udp) flags |= NI_DGRAM;
+    if (Debug > 10) {
+	message(LOG_DEBUG, "getnameinfo: family=%d len=%d flags=%d",
+		sa->sa_family, salen, flags);
+    }
     err = getnameinfo(sa, salen, str, len, serv, STRMAX, flags);
     if (err) {
 	if (sa->sa_family == AF_INET) {
@@ -999,14 +993,14 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
-	message(LOG_ERR, "Unknown node:serv err=%d errno=%d: %s",
-		err, errno, str);
+	message(LOG_ERR, "Unknown node:serv len=%d err=%d errno=%d: %s",
+		salen, err, errno, str);
     } else {
 	i = strlen(str);
 	snprintf(str+i, len-i, ":%s", serv);
     }
     i = strlen(str);
-    ext2str(flag, mask, str+i, len-i);
+    ext2str(proto, mask, str+i, len-i);
     return str;
 }
 #endif
@@ -1141,16 +1135,17 @@ int host2sa(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp,
     hint.ai_flags = flags;
     hint.ai_family = sa->sa_family;
     if (socktypep) hint.ai_socktype = *socktypep;
-    else hint.ai_socktype = 0;
+    else hint.ai_socktype = SOCK_STREAM;
     if (protocolp) hint.ai_protocol = *protocolp;
     else hint.ai_protocol = 0;
     hint.ai_addrlen = 0;
     hint.ai_addr = NULL;
     hint.ai_canonname = NULL;
     hint.ai_next = NULL;
-    if (Debug > 5) {
+    if (Debug > 10) {
 	message(LOG_DEBUG, "getaddrinfo: %s:%s family=%d socktype=%d flags=%d",
-		name, serv, sa->sa_family, hint.ai_socktype, flags);
+		(name ? name : ""), (serv ? serv : ""),
+		sa->sa_family, hint.ai_socktype, flags);
     }
     err = getaddrinfo(name, serv, &hint, &ai);
     if (err != 0) {
@@ -1158,14 +1153,15 @@ int host2sa(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp,
 	errno = WSAGetLastError();
 #endif
 	message(LOG_ERR, "getaddrinfo for %s:%s failed err=%d errno=%d",
-		name, serv, err, errno);
+		(name ? name : ""), (serv ? serv : ""), err, errno);
     fail:
 	if (ai) freeaddrinfo(ai);
 	return 0;
     }
     if (ai->ai_addrlen > *salenp) {
-	message(LOG_ERR, "getaddrinfo for %s returns unexpected addr size=%d",
-		name, ai->ai_addrlen);
+	message(LOG_ERR,
+		"getaddrinfo for %s:%s returns unexpected addr size=%d",
+		(name ? name : ""), (serv ? serv : ""), ai->ai_addrlen);
 	goto fail;
     }
     *salenp = ai->ai_addrlen;
@@ -1244,7 +1240,8 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
 	bp = ((struct sockaddr_in6*)b)->sin6_port;
 	if (ap != bp) return 0;
 	for (i=0; i < 4; i++)
-	    if (an->s6_addr32[i] != bn->s6_addr32[i]) return 0;
+	    if (*(u_long*)&an->s6_addr[i]
+		!= *(u_long*)&bn->s6_addr[i]) return 0;
 	return 1;
     }
 #endif
@@ -1284,8 +1281,8 @@ int checkXhost(Stone *stonep, struct sockaddr *sa, socklen_t salen,
 		int j, k;
 		for (j=0, k=xhosts[i].mbits; k > 0; j++, k -= 32) {
 		    u_long addr, xaddr, mask;
-		    addr = ntohl(addrp->s6_addr32[j]);
-		    xaddr = ntohl(xhosts[i].addr.s6_addr32[j]);
+		    addr = ntohl(*(u_long*)&addrp->s6_addr[j]);
+		    xaddr = ntohl(*(u_long*)&xhosts[i].addr.s6_addr[j]);
 		    if (k >= 32) mask = (u_long)~0;
 		    else mask = ((u_long)~0 << (32-k));
 		    if (Debug > 12)
@@ -1413,7 +1410,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 		errno);
 	return 1;	/* I can't tell the master is healthy or not */
     }
-    addrport2str(sa, salen, proto, proto_dest, addrport, STRMAX);
+    addrport2str(sa, salen, proto, proto_pair_d, addrport, STRMAX, 0);
 #ifdef WINDOWS
     param = 1;
     ioctlsocket(sd, FIONBIO, &param);
@@ -1521,7 +1518,7 @@ void asyncHealthCheck(Backup *b) {
     time(&now);
     b->last = now + 60 * 60;	/* suppress further check */
     addrport2str(&b->check->addr, b->check->len,
-		 b->proto, proto_dest, addrport, STRMAX);
+		 b->proto, proto_pair_d, addrport, STRMAX, 0);
     if (Debug > 8)
 	message(LOG_DEBUG, "asyncHealthCheck %s", addrport);
     if (healthCheck(&b->check->addr, b->check->len,
@@ -1562,9 +1559,9 @@ Backup *findBackup(struct sockaddr *sa, int proto) {
 		char mhostport[STRMAX];
 		char bhostport[STRMAX];
 		addrport2str(&b->master->addr, b->master->len,
-			     b->proto, proto_dest, mhostport, STRMAX);
+			     b->proto, proto_pair_d, mhostport, STRMAX, 0);
 		addrport2str(&b->backup->addr, b->backup->len,
-			     b->proto, proto_dest, bhostport, STRMAX);
+			     b->proto, proto_pair_d, bhostport, STRMAX, 0);
 		message(LOG_DEBUG, "master %s backup %s interval %d",
 			mhostport, bhostport, b->interval);
 	    }
@@ -1782,7 +1779,8 @@ LBSet *findLBSet(struct sockaddr *sa, int proto) {
 		for (i=0; i < s->ndsts; i++) {
 		    buf[len++] = ' ';
 		    addrport2str(&s->dsts[i]->addr, s->dsts[i]->len,
-				 s->proto, proto_dest, buf+len, BUFMAX-len);
+				 s->proto, proto_pair_d,
+				 buf+len, BUFMAX-len, 0);
 		    len += strlen(buf+len);
 		}
 		message(LOG_DEBUG, "%s", buf);
@@ -1855,7 +1853,8 @@ void message_origin(int pri, Origin *origin) {
 		message(LOG_DEBUG, "UDP %d: Can't get socket's name err=%d",
 			origin->sd, errno);
 	} else {
-	    addrport2str(name, namelen, proto_udp, 0, str+i, BUFMAX-i),
+	    addrport2str(name, namelen, proto_udp, proto_udp,
+			 str+i, BUFMAX-i, 0),
 	    i = strlen(str);
 	    if (i < BUFMAX-2) str[i++] = ' ';
 	}
@@ -1866,7 +1865,7 @@ void message_origin(int pri, Origin *origin) {
     if (stone) sd = stone->sd;
     else sd = INVALID_SOCKET;
     addrport2str(&origin->from->addr, origin->from->len,
-		 proto_udp, proto_pair, str+i, STRMAX-i);
+		 proto_udp, proto_udp, str+i, STRMAX-i, 0);
     message(pri, "UDP%3d:%3d %s", origin->sd, sd, str);
 }
 
@@ -1889,7 +1888,7 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
 	return pkt_len;
     }
     if (fromlenp) *fromlenp = fromlen;
-    addrport2str(from, fromlen, proto_udp, proto_pair, addrport, STRMAX);
+    addrport2str(from, fromlen, proto_udp, proto_udp, addrport, STRMAX, 0);
     if (Debug > 4)
 	message(LOG_DEBUG, "UDP %d: %d bytes received from %s",
 		sd, pkt_len, addrport);
@@ -1905,7 +1904,7 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
 static int sendUDP(SOCKET sd, struct sockaddr *sa, socklen_t salen,
 		   int len, char *pkt_buf) {
     char addrport[STRMAX];
-    addrport2str(sa, salen, proto_udp, 0, addrport, STRMAX);
+    addrport2str(sa, salen, proto_udp, proto_udp, addrport, STRMAX, 0);
     if (sendto(sd, pkt_buf, len, 0, sa, salen) != len) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -2113,7 +2112,7 @@ void asyncUDP(Stone *stonep) {
     if (len <= 0) goto end;	/* drop */
     if (!checkXhost(stonep, from, fromlen, NULL)) {
 	addrport2str(from, fromlen,
-		     stonep->proto, proto_stone_s, addrport, STRMAX);
+		     stonep->proto, proto_stone_s, addrport, STRMAX, 0);
 	message(LOG_WARNING, "stone %d: recv UDP denied: from %s",
 		stonep->sd, addrport);
 	goto end;
@@ -2161,7 +2160,7 @@ void message_pair(int pri, Pair *pair) {
 		message(LOG_DEBUG, "TCP %d: Can't get socket's name err=%d",
 			sd, errno);
 	} else {
-	    addrport2str(name, namelen, pair->proto, 0, str+i, BUFMAX-i);
+	    addrport2str(name, namelen, pair->proto, 0, str+i, BUFMAX-i, 0);
 	    i = strlen(str);
 	    if (i < BUFMAX-2) str[i++] = ' ';
 	}
@@ -2174,8 +2173,7 @@ void message_pair(int pri, Pair *pair) {
 		message(LOG_DEBUG, "TCP %d: Can't get peer's name err=%d",
 			sd, errno);
 	} else {
-	    addrport2str(name, namelen,
-			 pair->proto, proto_pair, str+i, BUFMAX-i);
+	    addrport2str(name, namelen, pair->proto, 0, str+i, BUFMAX-i, 0);
 	    i += strlen(str+i);
 	}
     }
@@ -2572,7 +2570,7 @@ void message_conn(int pri, Conn *conn) {
 	if (p2) sd = p2->sd;
     }
     addrport2str(&conn->dst->addr, conn->dst->len,
-		 proto, proto_pair, str+i, BUFMAX-i);
+		 proto, proto_pair_d, str+i, BUFMAX-i, 0);
     i = strlen(str);
     if (i >= BUFMAX) i = BUFMAX-1;
     str[i] = '\0';
@@ -2684,7 +2682,7 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 #else
     fcntl(p1->sd, F_SETFL, O_NONBLOCK);
 #endif
-    addrport2str(dst, dstlen, p1->proto, proto_pair, addrport, STRMAX);
+    addrport2str(dst, dstlen, p1->proto, proto_pair_d, addrport, STRMAX, 0);
     if (Debug > 2)
 	message(LOG_DEBUG, "TCP %d: connecting to TCP %d %s",
 		p2->sd, p1->sd, addrport);
@@ -3016,7 +3014,7 @@ Pair *doaccept(Stone *stonep) {
 	ident[0] = '\0';
     }
     addrport2str(from, fromlen,
-		 stonep->proto, proto_stone_s, fromstr+len, STRMAX*2-len);
+		 stonep->proto, proto_stone_s, fromstr+len, STRMAX*2-len, 0);
     if (!checkXhost(stonep, from, fromlen, ident)) {
 	message(LOG_WARNING, "stone %d: access denied: from %s",
 		stonep->sd, fromstr);
@@ -3071,9 +3069,9 @@ Pair *doaccept(Stone *stonep) {
     pair1->stone = pair2->stone = stonep;
     pair1->sd = nsd;
     pair2->sd = INVALID_SOCKET;
-    pair1->proto = ((stonep->proto & proto_src) |
+    pair1->proto = ((stonep->proto & proto_stone_s) |
 		    proto_first_r | proto_first_w | proto_source);
-    pair2->proto = ((stonep->proto & proto_dest) |
+    pair2->proto = ((stonep->proto & proto_stone_d) |
 		    proto_first_r | proto_first_w);
     pair1->count = pair2->count = 0;
     pair1->start = pair2->start = 0;
@@ -3131,7 +3129,7 @@ Pair *doaccept(Stone *stonep) {
 #endif
 	    message(LOG_ERR, "stone %d: can't bind %s err=%d", stonep->sd,
 		    addrport2str(&stonep->from->addr, stonep->from->len,
-				 0, 0, str, STRMAX), errno);
+				 0, 0, str, STRMAX, 0), errno);
 	}
     }
     pair2->pair = pair1;
@@ -3153,7 +3151,7 @@ int strnPeerAddr(char *buf, int limit, SOCKET sd, int isport) {
 	}
     } else {
 	if (isport) {
-	    addrport2str(name, namelen, 0, 0, str, STRMAX);
+	    addrport2str(name, namelen, 0, 0, str, STRMAX, 0);
 	} else {
 	    addr2str(name, namelen, str, STRMAX, 0);
 	}
@@ -3741,7 +3739,8 @@ int islocalhost(struct sockaddr *sa) {
 	int i;
 	struct in6_addr *addrp = &((struct sockaddr_in6*)sa)->sin6_addr;
 	for (i=0; i < 4; i++)
-	    if (addrp->s6_addr32[i] != (i < 3 ? 0 : ntohl(1))) return 0;
+	    if (*(u_long*)&addrp->s6_addr[i] != (i < 3 ? 0 : ntohl(1)))
+		return 0;
 	return 1;
     }
 #endif
@@ -5140,7 +5139,6 @@ Stone *mkstone(
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
     int salen = sizeof(ss);
-    sa_family_t safamily;
     int satype;
     int saproto = 0;
     char xhost[STRMAX], *p;
@@ -5176,19 +5174,17 @@ Stone *mkstone(
 #ifdef AF_INET6
     if (proto & proto_v6_s) {
 	struct sockaddr_in6 *sin6p = (struct sockaddr_in6*)sa;
-	sin6p->sin6_family = AF_INET6;
+	sa->sa_family = AF_INET6;
 	if (!host2sa(host, serv, sa, &salen, &satype, &saproto, AI_PASSIVE))
 	    exit(1);
-	safamily = sin6p->sin6_family;
 	stonep->port = ntohs(sin6p->sin6_port);
     } else
 #endif
     {
 	struct sockaddr_in *sinp = (struct sockaddr_in*)sa;
-	sinp->sin_family = AF_INET;
+	sa->sa_family = AF_INET;
 	if (!host2sa(host, serv, sa, &salen, &satype, &saproto, AI_PASSIVE))
 	    exit(1);
-	safamily = sinp->sin_family;
 	stonep->port = ntohs(sinp->sin_port);
     }
     if ((proto & proto_command) == command_proxy
@@ -5207,7 +5203,7 @@ Stone *mkstone(
 	else
 #endif
 	    dsa->sa_family = AF_INET;
-	if (!host2sa(dhost, dserv, dsa, &dsalen, NULL, NULL, 0)) {
+	if (!host2sa(dhost, dserv, dsa, &dsalen, &satype, &saproto, 0)) {
 	    exit(1);
 	}
 	lbset = findLBSet(dsa, proto);
@@ -5229,7 +5225,7 @@ Stone *mkstone(
     stonep->proto = proto;
     stonep->from = ConnectFrom;
     if (!reusestone(stonep)) {	/* recycle stone */
-	stonep->sd = socket(safamily, satype, saproto);
+	stonep->sd = socket(sa->sa_family, satype, saproto);
 	if (InvalidSocket(stonep->sd)) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
@@ -5250,7 +5246,8 @@ Stone *mkstone(
 		errno = WSAGetLastError();
 #endif
 		message(LOG_ERR, "stone %d: Can't bind %s err=%d.", stonep->sd,
-			addrport2str(sa, salen, 0, 0, str, STRMAX), errno);
+			addrport2str(sa, salen, 0, 0, str, STRMAX, 0),
+			errno);
 		exit(1);
 	    }
 #ifndef NO_FORK
@@ -5382,7 +5379,8 @@ Stone *mkstone(
 	    } else {
 		char addrport[STRMAX];
 		addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-			     stonep->proto, proto_stone_d, addrport, STRMAX);
+			     stonep->proto, proto_stone_d,
+			     addrport, STRMAX, 0);
 		message(LOG_DEBUG,
 			"stone %d: %s %s to connecting to %s",
 			stonep->sd, (allow ? "permit" : "deny"), xhost,
@@ -5390,7 +5388,7 @@ Stone *mkstone(
 	    }
 	}
     }
-    addrport2str(sa, salen, stonep->proto, proto_stone_s, xhost, STRMAX);
+    addrport2str(sa, salen, stonep->proto, proto_stone_s, xhost, STRMAX, 0);
     if ((proto & proto_command) == command_proxy) {
 	message(LOG_INFO, "stone %d: proxy <- %s",
 		stonep->sd,
@@ -5402,7 +5400,7 @@ Stone *mkstone(
     } else {
 	char addrport[STRMAX];
 	addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-		     stonep->proto, proto_stone_d, addrport, STRMAX),
+		     stonep->proto, proto_stone_d, addrport, STRMAX, 0),
 	message(LOG_INFO, "stone %d: %s <- %s",
 		stonep->sd, addrport, xhost);
     }
