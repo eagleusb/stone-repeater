@@ -86,7 +86,7 @@
  * -DUNIX_DAEMON  fork into background and become a UNIX Daemon
  * -DPRCTL	  with prctl(2) - operations on a process
  */
-#define VERSION	"2.2a"
+#define VERSION	"2.2b"
 static char *CVS_ID =
 "@(#) $Id$";
 
