@@ -1239,7 +1239,7 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
 	ap = ((struct sockaddr_in6*)a)->sin6_port;
 	bp = ((struct sockaddr_in6*)b)->sin6_port;
 	if (ap != bp) return 0;
-	for (i=0; i < 4; i++)
+	for (i=0; i < 16; i+=4)
 	    if (*(u_long*)&an->s6_addr[i]
 		!= *(u_long*)&bn->s6_addr[i]) return 0;
 	return 1;
@@ -1279,7 +1279,7 @@ int checkXhost(Stone *stonep, struct sockaddr *sa, socklen_t salen,
 		match = !match;
 	    } else {
 		int j, k;
-		for (j=0, k=xhosts[i].mbits; k > 0; j++, k -= 32) {
+		for (j=0, k=xhosts[i].mbits; k > 0; j+=4, k -= 32) {
 		    u_long addr, xaddr, mask;
 		    addr = ntohl(*(u_long*)&addrp->s6_addr[j]);
 		    xaddr = ntohl(*(u_long*)&xhosts[i].addr.s6_addr[j]);
@@ -3738,8 +3738,8 @@ int islocalhost(struct sockaddr *sa) {
     if (sa->sa_family == AF_INET6) {
 	int i;
 	struct in6_addr *addrp = &((struct sockaddr_in6*)sa)->sin6_addr;
-	for (i=0; i < 4; i++)
-	    if (*(u_long*)&addrp->s6_addr[i] != (i < 3 ? 0 : ntohl(1)))
+	for (i=0; i < 16; i+=4)
+	    if (*(u_long*)&addrp->s6_addr[i] != (i < 12 ? 0 : ntohl(1)))
 		return 0;
 	return 1;
     }
