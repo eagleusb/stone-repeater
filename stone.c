@@ -2527,7 +2527,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 		    if (Debug > 0)
 			message(LOG_DEBUG, "ident: connect to %s, timeout",
 				addr);
-		    goto error;
+		    goto noconnect;
 		}
 		tv.tv_sec = 1;
 		tv.tv_usec = 0;
@@ -2538,7 +2538,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 	    if (Debug > 0)
 		message(LOG_DEBUG, "ident: can't connect to %s, err=%d",
 			addr, errno);
-	error:
+	noconnect:
 	    closesocket(sd);
 	    return 0;
 	}
@@ -2554,15 +2554,34 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 	    message(LOG_DEBUG,
 		    "ident: can't send  to %s, ret=%d, err=%d, buf=%s",
 		    addr, ret, errno, buf);
+    error:
+	shutdown(sd, 2);
 	closesocket(sd);
 	return 0;
-    }
-    ret = recv(sd, buf, BUFMAX-1, 0);
-    if (ret <= 0) {
-	if (Debug > 0)
-	    message(LOG_DEBUG, "ident: can't read from %s, ret=%d", addr, ret);
+    } else {
+	fd_set rout;
+	struct timeval tv;
+	do {
+	    time(&now);
+	    if (now - start >= CONN_TIMEOUT) {
+		if (Debug > 0)
+		    message(LOG_DEBUG, "ident: read from %s, timeout", addr);
+		goto error;
+	    }
+	    tv.tv_sec = 1;
+	    tv.tv_usec = 0;
+	    FD_ZERO(&rout);
+	    FdSet(sd, &rout);
+	} while (select(FD_SETSIZE, &rout, NULL, NULL, &tv) == 0);
+	ret = recv(sd, buf, BUFMAX-1, 0);
+	if (ret <= 0) {
+	    if (Debug > 0)
+		message(LOG_DEBUG, "ident: can't read from %s, ret=%d",
+			addr, ret);
+	    goto error;
+	}
+	shutdown(sd, 2);
 	closesocket(sd);
-	return 0;
     }
     do {
 	ret--;
@@ -2585,7 +2604,6 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 	    str[i] = '\0';
 	}
     }
-    closesocket(sd);
     return 1;
 }
 
