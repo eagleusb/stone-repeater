@@ -926,7 +926,7 @@ int host2addr(char *name, struct in_addr *addrp, short *familyp) {
 	goto fail;
     }
     *addrp = ((struct sockaddr_in*)ai->ai_addr)->sin_addr;
-    *familyp = ai->ai_family;
+    if (familyp) *familyp = ai->ai_family;
     freeaddrinfo(ai);
     return 1;
 }
