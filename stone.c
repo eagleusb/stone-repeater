@@ -2156,6 +2156,7 @@ void freePair(Pair *pair) {
 	    message(LOG_ERR, "TCP %d: SSL close notify was not sent", sd);
 	    SSL_set_shutdown(ssl, (state | SSL_SENT_SHUTDOWN));
 	}
+	CRYPTO_free_ex_data(PairIndex, ssl, &ssl->ex_data);
 	SSL_free(ssl);
     }
 #endif
