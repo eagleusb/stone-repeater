@@ -1,6 +1,6 @@
 /*
  * stone.c	simple repeater
- * Copyright(c)1995-2001 by Hiroaki Sengoku <sengoku@gcd.org>
+ * Copyright(c)1995-2003 by Hiroaki Sengoku <sengoku@gcd.org>
  * Version 1.0	Jan 28, 1995
  * Version 1.1	Jun  7, 1995
  * Version 1.2	Aug 20, 1995
@@ -11,7 +11,7 @@
  * Version 1.8	Oct 18, 1997	pseudo parallel using SIGALRM
  * Version 2.0	Nov  3, 1997	http proxy & over http
  * Version 2.1	Nov 14, 1998	respawn & pop
- * Version 2.2			Posix Thread, XferBufMax, no ALRM, SSL verify
+ * Version 2.2	May 25, 2003	Posix Thread, XferBufMax, no ALRM, SSL verify
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -85,7 +85,7 @@
  * -DNT_SERVICE	  WindowsNT/2000 native service
  * -DUNIX_DAEMON  fork into background and become a UNIX Daemon
  */
-#define VERSION	"2.1x"
+#define VERSION	"2.2"
 static char *CVS_ID =
 "@(#) $Id$";
 
