@@ -251,7 +251,6 @@ int FdSetBug = 0;
 #define LONGSTRMAX	1024
 #define STRMAX		127	/* > 38 */
 #define CONN_TIMEOUT	60	/* 1 min */
-#define CACHE_TIMEOUT	180	/* 3 min */
 #define	LB_MAX		100
 
 #ifndef MAXHOSTNAMELEN
@@ -453,6 +452,12 @@ typedef struct _Origin {
     struct _Origin *next;
 } Origin;
 
+typedef struct _PktBuf {	/* packet buffer */
+    struct _PktBuf *next;
+    int bufmax;		/* buffer size */
+    char buf[BUFMAX];
+} PktBuf;
+
 typedef struct _Comm {
     char *str;
     int (*func)(Pair*, char*, int);
@@ -476,7 +481,9 @@ ExBuf *freeExBuf = NULL;
 int nFreeExBuf = 0;
 Conn conns;
 Origin origins;
-int OriginMax = 10;
+int OriginMax = 100;
+PktBuf *freePktBuf = NULL;
+int nFreePktBuf = 0;
 fd_set rin, win, ein;
 int PairTimeOut = 10 * 60;	/* 10 min */
 int AsyncCount = 0;
@@ -582,7 +589,7 @@ int Debug = 0;		/* debugging level */
 int PacketDump = 0;
 #ifdef PTHREAD
 pthread_mutex_t FastMutex = PTHREAD_MUTEX_INITIALIZER;
-char FastMutexs[9];
+char FastMutexs[10];
 #define PairMutex	0
 #define ConnMutex	1
 #define OrigMutex	2
@@ -592,16 +599,17 @@ char FastMutexs[9];
 #define FdEinMutex	6
 #define ExBufMutex	7
 #define FPairMutex	8
+#define	PkBufMutex	9
 #endif
 #ifdef WINDOWS
 HANDLE PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HANDLE FdRinMutex, FdWinMutex, FdEinMutex;
-HANDLE ExBufMutex, FPairMutex;
+HANDLE ExBufMutex, FPairMutex, PkBufMutex;
 #endif
 #ifdef OS2
 HMTX PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HMTX FdRinMutex, FdWinMutex, FdEinMutex;
-HMTX ExBufMutex, FPairMutex;
+HMTX ExBufMutex, FPairMutex, PkBufMutex;
 #endif
 
 #ifdef NO_VSNPRINTF
@@ -1932,8 +1940,48 @@ void message_origin(int pri, Origin *origin) {
     message(pri, "UDP%3d:%3d %s", origin->sd, sd, str);
 }
 
+void ungetPktBuf(PktBuf *pb) {
+    if (pb->bufmax < pkt_len_max) {
+	free(pb);	/* never reuse short buffer */
+	return;
+    }
+    waitMutex(PkBufMutex);
+    pb->next = freePktBuf;
+    freePktBuf = pb;
+    nFreePktBuf++;
+    freeMutex(PkBufMutex);
+}
+
+PktBuf *getPktBuf(void) {
+    PktBuf *ret = NULL;
+    waitMutex(PkBufMutex);
+    if (freePktBuf) {
+	ret = freePktBuf;
+	freePktBuf = ret->next;
+	nFreePktBuf--;
+    }
+    freeMutex(PkBufMutex);
+    if (ret && ret->bufmax < pkt_len_max) {
+	free(ret);	/* discard short buffer */
+	ret = NULL;
+    }
+    if (!ret) {
+	int size = pkt_len_max;
+	do {
+	    ret = malloc(sizeof(PktBuf) + size - BUFMAX);
+	} while (!ret && pkt_len_max > BUFMAX && (pkt_len_max /= 2));
+	if (!ret) {
+	    message(LOG_CRIT, "Out of memory, no ExBuf");
+	    return ret;
+	}
+	ret->bufmax = size;
+    }
+    ret->next = NULL;
+    return ret;
+}
+
 static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
-		   char *pkt_buf) {
+		   PktBuf *pb) {
     struct sockaddr_storage ss;
     int fromlen, pkt_len;
     char addrport[STRMAX+1];
@@ -1942,7 +1990,7 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
 	fromlen = sizeof(ss);
     }
     if (fromlenp) fromlen = *fromlenp;
-    pkt_len = recvfrom(sd, pkt_buf, pkt_len_max, 0, from, &fromlen);
+    pkt_len = recvfrom(sd, pb->buf, pb->bufmax, MSG_TRUNC, from, &fromlen);
     if (pkt_len < 0) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -1956,7 +2004,7 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
     if (Debug > 4)
 	message(LOG_DEBUG, "UDP %d: %d bytes received from %s",
 		sd, pkt_len, addrport);
-    if (pkt_len >= pkt_len_max) {
+    if (pkt_len >= pb->bufmax) {
 	message(LOG_NOTICE, "UDP %d: recvfrom failed: larger packet "
 		"(%d bytes) arrived from %s", sd, pkt_len, addrport);
 	pkt_len_max <<= 1;
@@ -1966,11 +2014,11 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
 }
 
 static int sendUDP(SOCKET sd, struct sockaddr *sa, socklen_t salen,
-		   int len, char *pkt_buf) {
+		   int len, PktBuf *pb) {
     char addrport[STRMAX+1];
     addrport2str(sa, salen, proto_udp, addrport, STRMAX, 0);
     addrport[STRMAX] = '\0';
-    if (sendto(sd, pkt_buf, len, 0, sa, salen) != len) {
+    if (sendto(sd, pb->buf, len, 0, sa, salen) != len) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
@@ -1985,7 +2033,7 @@ static int sendUDP(SOCKET sd, struct sockaddr *sa, socklen_t salen,
 	char head[STRMAX+1];
 	snprintf(head, STRMAX, "UDP %d:", sd);
 	head[STRMAX] = '\0';
-	packet_dump(head, pkt_buf, len);
+	packet_dump(head, pb->buf, len);
     }
     return len;
 }
@@ -2031,6 +2079,11 @@ static Origin *getOrigins(struct sockaddr *from, socklen_t fromlen,
     return origin;
 }
 
+void freeOrigin(Origin *origin) {
+    if (origin->from) free(origin->from);
+    free(origin);
+}
+
 void docloseUDP(Origin *origin, int wait) {
     if (Debug > 2) message(LOG_DEBUG, "UDP %d: close", origin->sd);
     if (wait) {
@@ -2050,24 +2103,20 @@ void asyncOrg(Origin *origin) {
     int len;
     SOCKET sd;
     Stone *stone = origin->stone;
-    char *pkt_buf;
+    PktBuf *pb = NULL;
     ASYNC_BEGIN;
     if (Debug > 8) message(LOG_DEBUG, "asyncOrg");
     if (stone) sd = stone->sd;
     else goto end;
-    pkt_buf = malloc(pkt_len_max);
-    if (!pkt_buf) {
-	message(LOG_CRIT, "UDP %d: Out of memory to allocate %d bytes",
-		sd, pkt_len_max);
-	goto end;
-    }
-    len = recvUDP(origin->sd, NULL, NULL, pkt_buf);
+    pb = getPktBuf();
+    if (!pb) goto end;
+    len = recvUDP(origin->sd, NULL, NULL, pb);
     if (Debug > 4)
 	message(LOG_DEBUG, "UDP %d: send %d bytes to %d",
 		origin->sd, len, sd);
     if (len > 0
 	&& sendUDP(stone->sd, &origin->from->addr, origin->from->len,
-		   len, pkt_buf) > 0) {
+		   len, pb) > 0) {
 	time(&origin->clock);
 	waitMutex(FdRinMutex);
 	waitMutex(FdEinMutex);
@@ -2079,7 +2128,7 @@ void asyncOrg(Origin *origin) {
 	docloseUDP(origin, 1);	/* wait mutex */
     }
  end:
-    if (pkt_buf) free(pkt_buf);
+    if (pb) ungetPktBuf(pb);
     ASYNC_END;
 }
 
@@ -2090,6 +2139,8 @@ int scanUDP(fd_set *rop, fd_set *eop) {
 #endif
     Origin *origin, *prev;
     int n = 0;
+    time_t now;
+    time(&now);
     prev = &origins;
     for (origin=origins.next; origin != NULL;
 	 prev=origin, origin=origin->next) {
@@ -2101,7 +2152,7 @@ int scanUDP(fd_set *rop, fd_set *eop) {
 		origin = prev;
 		origin->next = old->next;	/* remove `old' from list */
 		if (InvalidSocket(old->sd)) {
-		    free(old);
+		    freeOrigin(old);
 		} else {
 		    old->lock = 0;
 		    old->next = origins.next;	/* insert old on top */
@@ -2146,7 +2197,8 @@ int scanUDP(fd_set *rop, fd_set *eop) {
 	    ASYNC(asyncOrg, origin);
 	    goto next;
 	}
-	if (++n >= OriginMax) docloseUDP(origin, 1);	/* wait mutex */
+	if (++n >= OriginMax || now - origin->clock > CONN_TIMEOUT)
+	    docloseUDP(origin, 1);	/* wait mutex */
       next:
 	;
     }
@@ -2162,16 +2214,12 @@ void asyncUDP(Stone *stonep) {
     int len;
     Origin *origin;
     char addrport[STRMAX+1];
-    char *pkt_buf;
+    PktBuf *pb = NULL;
     ASYNC_BEGIN;
     if (Debug > 8) message(LOG_DEBUG, "asyncUDP");
-    pkt_buf = malloc(pkt_len_max);
-    if (!pkt_buf) {
-	message(LOG_CRIT, "UDP %d: Out of memory to allocate %d bytes",
-		stonep->sd, pkt_len_max);
-	goto end;
-    }
-    len = recvUDP(stonep->sd, from, &fromlen, pkt_buf);
+    pb = getPktBuf();
+    if (!pb) goto end;
+    len = recvUDP(stonep->sd, from, &fromlen, pb);
     waitMutex(FdRinMutex);
     FdSet(stonep->sd, &rin);
     freeMutex(FdRinMutex);
@@ -2198,10 +2246,10 @@ void asyncUDP(Stone *stonep) {
 	message(LOG_DEBUG, "UDP %d: send %d bytes to %d",
 		stonep->sd, len, dsd);
     if (sendUDP(dsd, &stonep->dsts[0]->addr, stonep->dsts[0]->len,
-		len, pkt_buf) <= 0)
+		len, pb) <= 0)
 	docloseUDP(origin, 1);	/* wait mutex */
  end:
-    if (pkt_buf) free(pkt_buf);
+    if (pb) ungetPktBuf(pb);
     ASYNC_END;
 }
 
@@ -2887,6 +2935,11 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     return 1;
 }
 
+void freeConn(Conn *conn) {
+    if (conn->dst) free(conn->dst);
+    free(conn);
+}
+
 int reqconn(Pair *pair,		/* request pair to connect to destination */
 	    struct sockaddr *dst, socklen_t dstlen) {	/* connect to */
     int ret;
@@ -2974,7 +3027,7 @@ int scanConns(void) {
 	    waitMutex(ConnMutex);
 	    if (pconn->next == conn && conn->lock <= 0) {
 		pconn->next = conn->next;	/* remove conn */
-		free(conn);
+		freeConn(conn);
 		conn = pconn;
 	    }
 	    freeMutex(ConnMutex);
@@ -4140,6 +4193,13 @@ int nConns(void) {
     return n;
 }
 
+int nOrigins(void) {
+    int n = 0;
+    Origin *origin;
+    for (origin=origins.next; origin != NULL; origin=origin->next) n++;
+    return n;
+}
+
 int limitCommon(Pair *pair, int var, int limit, char *str) {
     if (Debug) message(LOG_DEBUG, ": LIMIT %s %d: %d", str, limit, var);
     if (var < limit) {
@@ -4197,11 +4257,13 @@ int healthHELO(Pair *pair, char *parm, int start) {
     time_t now;
     time(&now);
     snprintf(str, LONGSTRMAX,
-	     "stone=%d pair=%d trash=%d conn=%d established=%d readwrite=%d "
-	     "async=%d fpair=%d nfexbuf=%d",
+	     "stone=%d pair=%d trash=%d conn=%d origin=%d "
+	     "established=%d readwrite=%d "
+	     "async=%d fpair=%d nfexbuf=%d nfpktbuf=%d",
 	     nStones(), nPairs(pairs.next), nPairs(trash.next), nConns(),
+	     nOrigins(),
 	     (int)(now - lastEstablished), (int)(now - lastReadWrite),
-	     AsyncCount, nFreePairs, nFreeExBuf);
+	     AsyncCount, nFreePairs, nFreeExBuf, nFreePktBuf);
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
     commOutput(pair, "200 stone:%s debug=%d %s\r\n",
@@ -4689,10 +4751,9 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			    && !(rPair->proto & proto_close)) {
 			    /* (wPair->proto & proto_eof) may be true */
 			    wPair->proto |= proto_select_w;
-
-			    /* always bufferfing only for debug */
+#ifdef ALWAYS_BUFFERING
 			    rPair->proto |= proto_select_r;
-
+#endif
 			} else {
 			    goto leave;
 			}
@@ -6416,6 +6477,8 @@ void doargs(int argc, int i, char *argv[]) {
 	for (; i < argc; i++, j++) if (!strcmp(argv[i], "--")) break;
 	if ((dproto & proto_udp) || (sproto & proto_udp)) {
 	    proto |= proto_udp;
+	    if (sproto & proto_v6) proto |= proto_v6_s;
+	    if (dproto & proto_v6) proto |= proto_v6_d;
 	} else {
 	    if (sproto & proto_ohttp) proto |= proto_ohttp_s;
 	    if (sproto & proto_ssl) proto |= proto_ssl_s;
@@ -6753,7 +6816,8 @@ void initialize(int argc, char *argv[]) {
 	!(FdWinMutex=CreateMutex(NULL, FALSE, NULL)) ||
 	!(FdEinMutex=CreateMutex(NULL, FALSE, NULL)) ||
 	!(ExBufMutex=CreateMutex(NULL, FALSE, NULL)) ||
-	!(FPairMutex=CreateMutex(NULL, FALSE, NULL))) {
+	!(FPairMutex=CreateMutex(NULL, FALSE, NULL)) ||
+	!(PkBufMutex=CreateMutex(NULL, FALSE, NULL))) {
 	message(LOG_ERR, "Can't create Mutex err=%d", GetLastError());
     }
 #endif
@@ -6767,7 +6831,8 @@ void initialize(int argc, char *argv[]) {
 	(j=DosCreateMutexSem(NULL, &FdWinMutex, 0, FALSE)) ||
 	(j=DosCreateMutexSem(NULL, &FdEinMutex, 0, FALSE)) ||
 	(j=DosCreateMutexSem(NULL, &ExBufMutex, 0, FALSE)) ||
-	(j=DosCreateMutexSem(NULL, &FPairMutex, 0, FALSE))) {
+	(j=DosCreateMutexSem(NULL, &FPairMutex, 0, FALSE)) ||
+	(j=DosCreateMutexSem(NULL, &PkBufMutex, 0, FALSE))) {
 	message(LOG_ERR, "Can't create Mutex err=%d", j);
     }
 #endif
