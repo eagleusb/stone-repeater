@@ -1899,7 +1899,7 @@ int doSSL_accept(Pair *pair) {
 		    pair->sd, ret, SSL_state(ssl), SSL_is_init_finished(ssl),
 		    SSL_in_init(ssl), SSL_in_accept_init(ssl));
 	if (ret <= 0) err = SSL_get_error(ssl, ret);
-	else err = SSL_ERROR_NONE;
+	else break;
 	FD_ZERO(&rout);
 	FD_ZERO(&wout);
 	if (err == SSL_ERROR_WANT_READ) FdSet(pair->sd, &rout);
@@ -1962,9 +1962,15 @@ int doSSL_connect(Pair *pair) {
     SSL_set_fd(ssl, pair->sd);
     pair->ssl = ssl;
     do {
+	time_t now;
 	ret = SSL_connect(ssl);	/* blocking I/O */
 	if (ret <= 0) err = SSL_get_error(ssl, ret);
-	else err = SSL_ERROR_NONE;
+	else break;
+	time(&now);
+	if (now - pair->clock >= CONN_TIMEOUT) {
+	    message(priority(pair), "TCP %d: SSL_connect timeout", pair->sd);
+	    return -1;
+	}
 	FD_ZERO(&rout);
 	FD_ZERO(&wout);
 	if (err == SSL_ERROR_WANT_READ) FdSet(pair->sd, &rout);
