@@ -2207,7 +2207,7 @@ void freePair(Pair *pair) {
 	if (pair->stone->proto & proto_ssl_s) {
 	    ctx = pair->stone->ssl_server->ctx;
 	}
-	if (ctx) SSL_CTX_flush_sessions(ctx, time(NULL));
+	if (ctx) SSL_CTX_flush_sessions(ctx, pair->clock);
     }
 #endif
     if (ValidSocket(sd)) closesocket(sd);
