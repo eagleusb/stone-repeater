@@ -2170,6 +2170,7 @@ void asyncConn(Conn *conn) {
     time(&clock);
     if (Debug > 8) message(LOG_DEBUG, "asyncConn...");
 #ifdef USE_SSL
+    ssl = p2->ssl;
     if (ssl) {
 	SSL_SESSION *sess = SSL_get1_session(ssl);
 	if (sess) {
