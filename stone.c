@@ -727,8 +727,8 @@ void packet_dump(char *head, char *buf, int len) {
 	if (k > j/10) {
 	    j = l = 0;
 	    for (j=0; j < 16 && i+j < len; j++) {
-		if (' ' <= buf[i+j] && buf[i+j] <= '~')
-		    sprintf(&line[l], " %c ", buf[i+j]);
+		if ((PacketDump & 0x1) && (' ' <= buf[i+j] && buf[i+j] <= '~'))
+		    sprintf(&line[l], " '%c", buf[i+j]);
 		else {
 		    sprintf(&line[l], " %02x", (unsigned char)buf[i+j]);
 		    if (buf[i+j] == '\n') k = 0; else k++;
@@ -5598,7 +5598,7 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	Debug++;
 	break;
     case 'p':
-	PacketDump = 1;
+	PacketDump++;
 	break;
 #ifndef NO_SYSLOG
     case 'l':
