@@ -4028,6 +4028,7 @@ void doargs(int argc, int i, char *argv[]) {
 	}
 	stone->next = stones;
 	stones = stone;
+	proto = sproto = dproto = proto_tcp;	/* default: TCP */
     }
     for (stone=stones; stone != NULL; stone=stone->next) {
 	FdSet(stone->sd,&rin);
