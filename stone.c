@@ -3471,7 +3471,7 @@ void repeater(void) {
 	if (errno != EINTR) {
 	    message(LOG_ERR, "select error err=%d", errno);
 	    if (++nerrs >= NERRS_MAX) {
-		message(LOG_ERR, "select error %d times, exiting...");
+		message(LOG_ERR, "select error %d times, exiting...", nerrs);
 		exit(1);
 	    }
 	}
@@ -3528,8 +3528,10 @@ Stone *mkstone(
 	}
 	sin.sin_family = family;
     }
-    stonep->nsins = 1;
-    if ((proto & proto_command) != command_proxy) {
+    if ((proto & proto_command) == command_proxy) {
+	stonep->nsins = 1;
+	stonep->sins = malloc(sizeof(struct sockaddr_in));	/* dummy */
+    } else {
 	struct sockaddr_in dsin;
 	LBSet *lbset;
 	if (!host2addr(dhost, &dsin.sin_addr, &family)) {
@@ -3539,9 +3541,10 @@ Stone *mkstone(
 	dsin.sin_port = htons((u_short)dport);
 	lbset = findLBSet(&dsin, proto);
 	if (lbset) {
-	    stonep->sins = lbset->sins;
 	    stonep->nsins = lbset->nsins;
+	    stonep->sins = lbset->sins;
 	} else {
+	    stonep->nsins = 1;
 	    stonep->sins = malloc(sizeof(dsin));
 	    if (!stonep->sins) {
 		message(LOG_ERR, "Out of memory");
