@@ -36,6 +36,10 @@ and UDP from inside to outside of a firewall, or from outside to inside.
 	With stone and a mailer that does not support APOP, you can
 	access to an APOP server.
 
+6.  Stone supports IPv6.
+	Stone can convert IP and IPv6 each other.  With stone, you can
+	use IP-only software on IPv6 network.
+
 
 HOWTO USE
 

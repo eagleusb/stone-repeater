@@ -63,17 +63,8 @@ pop_stone: $(POP_LIBS)
 ssl_stone:
 	$(MAKE) FLAGS="$(POP_FLAGS) $(SSL_FLAGS)" LIBS="$(LIBS) $(SSL_LIBS)" $(TARGET)
 
-logmsg.rc: logmsg.mc
-	mc $?
-
-logmsg.o: logmsg.rc
-	windres $? -o $@
-
-svc_stone: logmsg.rc stone.o $(SVC_LIBS)
-	$(CC) -o stone.exe stone.o $(SVC_LIBS) $(SSL_LIBS) -lws2_32 -lregex -ladvapi32 -luser32 -lgdi32 -lshell32 -lkernel32
-
 stone.exe: stone.c
-	$(CC) $(FLAGS) $? $(LIBS)
+	$(CC) $(CFLAGS) $(FLAGS) $? $(LIBS)
 
 pop_stone.exe: md5c.obj
 	$(MAKE) FLAGS=-DUSE_POP LIBS="md5c.obj" $(TARGET)
@@ -84,6 +75,15 @@ ssl_stone.exe:
 
 svc_stone.exe: logmsg.res service.obj svcbody.obj
 	$(MAKE) FLAGS="/DNT_SERVICE $(FLAGS)" LIBS="logmsg.res service.obj svcbody.obj advapi32.lib user32.lib gdi32.lib shell32.lib kernel32.lib" $(TARGET)
+
+logmsg.rc: logmsg.mc
+	mc $?
+
+logmsg.o: logmsg.rc
+	windres $? -o $@
+
+svc_stone: logmsg.rc $(SVC_LIBS)
+	$(MAKE) FLAGS="-DNT_SERVICE $(FLAGS) $(POP_FLAGS) $(SSL_FLAGS)" LIBS="$(LIBS) $(SSL_LIBS) $(SVC_LIBS) -ladvapi32 -luser32 -lgdi32 -lshell32 -lkernel32" $(TARGET)
 
 linux:
 	$(MAKE) FLAGS="-DCPP='\"/usr/bin/cpp -traditional\"' -DPTHREAD -DUNIX_DAEMON -DPRCTL $(FLAGS)" LIBS="-lpthread $(LIBS)" stone
@@ -171,10 +171,10 @@ win-svc:
 	$(MAKE) TARGET=win svc_stone.exe
 
 mingw.exe: stone.c
-	$(CC) $(FLAGS) -o stone.exe $? $(LIBS)
+	$(CC) $(CFLAGS) $(FLAGS) -o stone.exe $? $(LIBS)
 
 mingw:
-	$(MAKE) CC=gcc FLAGS="-DWINDOWS -DNO_RINDEX -DNO_ADDRINFO $(FLAGS)" LIBS="-lws2_32 -lregex $(LIBS)" mingw.exe
+	$(MAKE) CC=gcc FLAGS="-DWINDOWS -DNO_RINDEX $(FLAGS)" LIBS="-lws2_32 -lregex $(LIBS)" mingw.exe
 
 mingw-pop:
 	$(MAKE) CC=gcc TARGET=mingw pop_stone
@@ -183,7 +183,7 @@ mingw-ssl: cryptoapi.o
 	$(MAKE) CC=gcc SSL_FLAGS="$(SSL_FLAGS) -DCRYPTOAPI" SSL_LIBS="cryptoapi.o -lcrypt32 -lssl32 -leay32" TARGET=mingw ssl_stone
 
 mingw-svc:
-	$(MAKE) CC=gcc CFLAGS="-DWINDOWS -DNT_SERVICE -DNO_RINDEX $(POP_FLAGS) $(SSL_FLAGS) $(CFLAGS)" SSL_LIBS="-lssl32 -leay32" TARGET=mingw svc_stone
+	$(MAKE) CC=gcc SSL_FLAGS="$(SSL_FLAGS) -DCRYPTOAPI" SSL_LIBS="cryptoapi.o -lcrypt32 -lssl32 -leay32" TARGET=mingw svc_stone
 
 emx:
 	$(MAKE) CC=gcc FLAGS="-DOS2 -Zmts -Zsysv-signals $(FLAGS)" LIBS="$(LIBS) -lsocket" stone.exe
