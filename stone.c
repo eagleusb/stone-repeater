@@ -4590,11 +4590,16 @@ static void handler(int sig) {
 	if (CoreDumpDir) {
 	    message(LOG_ERR, "Signal %d, core dumping to %s",
 		    sig, CoreDumpDir);
-	    chdir(CoreDumpDir);
+	    if (chdir(CoreDumpDir) < 0) {
+		message(LOG_ERR, "Can't chdir to %s err=%d",
+			CoreDumpDir, errno);
+	    } else {
+		abort();
+	    }
 	} else {
-	    message(LOG_ERR, "Signal %d, abort");
+	    message(LOG_ERR, "Signal %d, exiting...");
 	}
-	abort();
+	exit(1);
 	break;
     default:
 	message(LOG_INFO, "signal %d. Debug level: %d", sig, Debug);
