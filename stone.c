@@ -80,6 +80,7 @@
  * -DNO_RINDEX	  without rindex(3)
  * -DNO_THREAD	  without thread
  * -DNO_PID_T	  without pid_t
+ * -DNO_FAMILY_T  without sa_family_t
  * -DNO_ADDRINFO  without getaddrinfo
  * -DPTHREAD      use Posix Thread
  * -DPRCTL	  use prctl(2) - operations on a process
@@ -538,6 +539,9 @@ unsigned long SetUID = 0;
 unsigned long SetGID = 0;
 #endif
 char *CoreDumpDir = NULL;
+#ifdef NO_FAMILY_T
+typedef unsigned short sa_family_t;
+#endif
 #ifdef NO_PID_T
 typedef int pid_t;
 #endif
@@ -962,7 +966,7 @@ int isdigitaddr(char *name) {
 }
 
 #ifdef NO_ADDRINFO
-int host2addr(char *name, struct in_addr *addrp, short *familyp) {
+int host2addr(char *name, struct in_addr *addrp, sa_family_t *familyp) {
     struct hostent *hp;
     int ntry = NTRY_MAX;
     if (isdigitaddr(name)) {
@@ -984,7 +988,7 @@ int host2addr(char *name, struct in_addr *addrp, short *familyp) {
     return 0;
 }
 #else
-int host2addr(char *name, struct in_addr *addrp, short *familyp) {
+int host2addr(char *name, struct in_addr *addrp, sa_family_t *familyp) {
     struct addrinfo *ai = NULL;
     struct addrinfo hint;
     int err;
@@ -1295,7 +1299,7 @@ int hostPort(char *str, struct sockaddr_in *sinp, int proto) {
     for (i=0; i < STRMAX-1; i++) {
 	if (! str[i]) return 0;	/* illegal format */
 	if (str[i] == ':') {
-	    short family;
+	    sa_family_t family;
 	    host[i] = '\0';
 	    if (!host2addr(host, &sinp->sin_addr, &family)) {
 		return 0;	/* unknown host */
@@ -1347,7 +1351,7 @@ int gcd(int a, int b) {
 int mkBackup(int argc, int argi, char *argv[]) {
     char *host = NULL;
     int port = -1;
-    short family;
+    sa_family_t family;
     Backup *b = malloc(sizeof(Backup));
     argi++;
     for ( ; argi < argc; argi++) {
@@ -3461,7 +3465,7 @@ int addrcache(char *name, struct sockaddr_in *sinp) {
 
 int doproxy(Pair *pair, char *host, int port) {
     struct sockaddr_in sin;
-    short family;
+    sa_family_t family;
     bzero((char *)&sin, sizeof(sin)); /* clear sin struct */
     sin.sin_port = htons((u_short)port);
 #ifdef ADDRCACHE
@@ -4836,7 +4840,7 @@ Stone *mkstone(
     Stone *stonep;
     struct sockaddr_in sin;
     char xhost[STRMAX], *p;
-    short family;
+    sa_family_t family;
     int allow;
     int i;
     stonep = calloc(1, sizeof(Stone)+sizeof(XHost)*nhosts);
