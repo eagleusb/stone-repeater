@@ -249,6 +249,8 @@ int FdSetBug = 0;
 #define BUFMAX		2048
 #define STRMAX		30	/* > 16 */
 #define CONN_TIMEOUT	60	/* 1 min */
+#define CACHE_TIMEOUT	180	/* 3 min */
+#define HASHMAX		181
 #define	LB_MAX		100
 
 #ifndef MAXHOSTNAMELEN
@@ -548,7 +550,7 @@ int Debug = 0;		/* debugging level */
 int PacketDump = 0;
 #ifdef PTHREAD
 pthread_mutex_t FastMutex = PTHREAD_MUTEX_INITIALIZER;
-char FastMutexs[7];
+char FastMutexs[8];
 #define PairMutex	0
 #define ConnMutex	1
 #define OrigMutex	2
@@ -556,14 +558,17 @@ char FastMutexs[7];
 #define FdRinMutex	4
 #define FdWinMutex	5
 #define FdEinMutex	6
+#define HashMutex	7
 #endif
 #ifdef WINDOWS
 HANDLE PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HANDLE FdRinMutex, FdWinMutex, FdEinMutex;
+HANDLE HashMutex;
 #endif
 #ifdef OS2
 HMTX PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HMTX FdRinMutex, FdWinMutex, FdEinMutex;
+HMTX HashMutex;
 #endif
 
 #ifdef NO_VSNPRINTF
@@ -3381,15 +3386,57 @@ int islocalhost(struct in_addr *addrp) {
     return ntohl(addrp->s_addr) == 0x7F000001L;
 }
 
+unsigned int str2hash(char *str) {
+    unsigned int hash = 0;
+    while (*str) {
+	hash  = hash * 7 + *str;
+	str++;
+    }
+    return hash;
+}
+
+struct hashtable {
+    char *str;
+    time_t clock;
+    struct in_addr addr;
+} hashtable[HASHMAX];
+
+int addrcache(char *name, struct sockaddr_in *sinp) {
+    struct hashtable *t;
+    time_t now;
+    time(&now);
+    t = &hashtable[str2hash(name) % HASHMAX];
+    waitMutex(HashMutex);
+    if (t->str && strcmp(t->str, name) == 0
+	&& now - t->clock < CACHE_TIMEOUT) {
+	sinp->sin_addr = t->addr;
+	freeMutex(HashMutex);
+	sinp->sin_family = AF_INET;
+	if (Debug > 5) message(LOG_DEBUG, "addrcache hit: %s %d",
+			       name, now - t->clock);
+	return 1;
+    }
+    freeMutex(HashMutex);
+    if (!host2addr(name, &sinp->sin_addr, &sinp->sin_family)) {
+	return 0;
+    }
+    waitMutex(HashMutex);
+    if (t->str && strcmp(t->str, name) != 0) {
+	free(t->str);
+	t->str = NULL;
+    }
+    if (!t->str) t->str = strdup(name);
+    t->addr = sinp->sin_addr;
+    t->clock = now;
+    freeMutex(HashMutex);
+    return 1;
+}
+
 int doproxy(Pair *pair, char *host, int port) {
     struct sockaddr_in sin;
-    short family;
     bzero((char *)&sin, sizeof(sin)); /* clear sin struct */
     sin.sin_port = htons((u_short)port);
-    if (!host2addr(host, &sin.sin_addr, &family)) {
-	return -1;
-    }
-    sin.sin_family = family;
+    if (!addrcache(host, &sin)) return -1;
     pair->proto &= ~proto_command;
     if (islocalhost(&sin.sin_addr)) {
 	TimeLog *log = pair->log;
@@ -6119,7 +6166,8 @@ void initialize(int argc, char *argv[]) {
 	!(AsyncMutex=CreateMutex(NULL, FALSE, NULL)) ||
 	!(FdRinMutex=CreateMutex(NULL, FALSE, NULL)) ||
 	!(FdWinMutex=CreateMutex(NULL, FALSE, NULL)) ||
-	!(FdEinMutex=CreateMutex(NULL, FALSE, NULL))) {
+	!(FdEinMutex=CreateMutex(NULL, FALSE, NULL)) ||
+	!(HashMutex=CreateMutex(NULL, FALSE, NULL))) {
 	message(LOG_ERR, "Can't create Mutex err=%d", GetLastError());
     }
 #endif
@@ -6131,7 +6179,8 @@ void initialize(int argc, char *argv[]) {
 	(j=DosCreateMutexSem(NULL, &AsyncMutex, 0, FALSE)) ||
 	(j=DosCreateMutexSem(NULL, &FdRinMutex, 0, FALSE)) ||
 	(j=DosCreateMutexSem(NULL, &FdWinMutex, 0, FALSE)) ||
-	(j=DosCreateMutexSem(NULL, &FdEinMutex, 0, FALSE))) {
+	(j=DosCreateMutexSem(NULL, &FdEinMutex, 0, FALSE)) ||
+	(j=DosCreateMutexSem(NULL, &HashMutex, 0, FALSE))) {
 	message(LOG_ERR, "Can't create Mutex err=%d", j);
     }
 #endif
