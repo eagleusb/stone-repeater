@@ -1942,9 +1942,9 @@ void asyncConn(Conn *conn) {
 		FdSet(p1->sd, &win);
 		set1 = 1;
 	    }
-	} else {
+	} else if (!(p1->proto & proto_ohttp_d)) {
 	    if (Debug > 8)
-		message(LOG_DEBUG, "TCP %d: request to read", p2->sd);
+		message(LOG_DEBUG, "TCP %d: request to read 1st", p2->sd);
 	    if (!(p2->proto & proto_eof)) {
 		FdSet(p2->sd, &rin);
 		set2 = 1;
@@ -3292,6 +3292,12 @@ int first_read(Pair *pair, fd_set *rinp, fd_set *winp) {
 	    if (pair->proto & proto_ohttp_s) {
 		commOutput(p, winp, "HTTP/1.0 200 OK\r\n\r\n");
 		pair->proto &= ~proto_ohttp_s;
+	    } else if (pair->proto & proto_ohttp_d) {
+		if (Debug > 3)
+		    message(LOG_DEBUG, "TCP %d: request to read, "
+			    "because response header from %d finished",
+			    psd, sd);
+		FdSet(psd , rinp);
 	    }
 	}
     }
