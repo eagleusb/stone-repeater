@@ -2038,6 +2038,7 @@ int scanClose(void) {	/* scan close request */
     while (p1 != NULL) {
 	p2 = p1;
 	p1 = p1->next;
+	message_time_log(p2);	/* free(p2->log) if p2->log != NULL */
 	free(p2);
     }
     p1 = pairs.next;
