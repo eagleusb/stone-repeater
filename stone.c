@@ -3684,6 +3684,8 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->caFile = opts->caPath = NULL;
     opts->cipherList = getenv("SSL_CIPHER");
     for (i=0; i < DEPTH_MAX; i++) opts->regexp[i] = NULL;
+    opts->lbmod = 0;
+    opts->lbparm = 0;
 }
 
 int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
