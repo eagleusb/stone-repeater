@@ -3751,6 +3751,15 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	    ss->re[i] = NULL;
 	}
     }
+    if (isserver) {
+	char str[SSL_MAX_SSL_SESSION_ID_LENGTH+1];
+	snprintf(str, SSL_MAX_SSL_SESSION_ID_LENGTH, "%lx",
+		 (long)ss->ctx ^ (long)&stones);	/* randomize */
+	SSL_CTX_set_session_id_context(ss->ctx, str, strlen(str));
+	if (Debug > 4) {
+	    message(LOG_DEBUG, "SSL session ID: %s", str);
+	}
+    }
     return ss;
  error:
     if (opts->verbose)
