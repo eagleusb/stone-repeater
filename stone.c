@@ -79,6 +79,7 @@
  * -DNO_SNPRINTF  without snprintf(3)
  * -DNO_SYSLOG	  without syslog(2)
  * -DNO_THREAD	  without thread
+ * -DNO_PID_T	  without pid_t
  * -DPTHREAD      use Posix Thread
  * -DOS2	  OS/2 with EMX
  * -DWINDOWS	  Windows95/98/NT
@@ -496,6 +497,9 @@ unsigned long SetUID = 0;
 unsigned long SetGID = 0;
 #endif
 char *CoreDumpDir = NULL;
+#ifdef NO_PID_T
+typedef int pid_t;
+#endif
 pid_t MyPid;
 #ifndef NO_FORK
 int NForks = 0;
