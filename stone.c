@@ -2449,7 +2449,8 @@ int insheader(Pair *pair) {	/* insert header */
     pair->buf[i++] = '\r';
     pair->buf[i++] = '\n';
     if (Debug > 5) {
-	message(LOG_DEBUG,"TCP %d: insheader %d, %d, %d, %d",
+	message(LOG_DEBUG,
+		"TCP %d: insheader start=%d, ins=%d, rest=%d, max=%d",
 		pair->sd, pair->start, i-pair->start, len, pair->bufmax);
     }
     if (len > 0) bcopy(buf, &pair->buf[i], len);	/* restore */
