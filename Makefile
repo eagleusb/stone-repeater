@@ -179,7 +179,7 @@ mingw:
 mingw-pop:
 	$(MAKE) CC=gcc TARGET=mingw pop_stone
 
-mingw-ssl:
+mingw-ssl: cryptoapi.o
 	$(MAKE) CC=gcc SSL_FLAGS="$(SSL_FLAGS) -DCRYPTOAPI" SSL_LIBS="cryptoapi.o -lcrypt32 -lssl32 -leay32" TARGET=mingw ssl_stone
 
 mingw-svc:

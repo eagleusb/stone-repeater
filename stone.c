@@ -5221,7 +5221,8 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     if (opts->certStore) {
 	if (!SSL_CTX_use_CryptoAPI_certificate(ss->ctx, opts->certStore)) {
 	    message(LOG_ERR, "Can't load certificate \"%s\" "
-		    "from Microsoft Certificate Store", opts->certStore);
+		    "from Microsoft Certificate Store, %s",
+		    opts->certStore, ERR_error_string(ERR_get_error(), NULL));
 	    goto error;
         }
     }
@@ -5585,6 +5586,7 @@ Stone *mkstone(
 #endif
     allow = 1;
     for (i=0; i < nhosts; i++) {
+	if (Debug > 10) message(LOG_DEBUG, "xhost[%d]=\"%s\"", i, hosts[i]);
 	if (!strcmp(hosts[i], "!")) {
 	    if (xhosts) {
 		xhosts[i].addr.s_addr = (u_long)~0;
@@ -5617,6 +5619,8 @@ Stone *mkstone(
 		}
 	    } else if (!xhosts
 		       || (xhosts[i].mask.s_addr = inet_addr(p)) == -1) {
+		message(LOG_ERR, "Illegal netmask: \"%s\" in \"%s/%s\"",
+			p, xhost, p);
 		exit(1);
 	    }
 	} else {
