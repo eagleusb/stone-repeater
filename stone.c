@@ -948,13 +948,14 @@ int isdigitaddr(char *name) {
 
 #ifdef DJBDNS
 int host2addr(char *name, struct in_addr *addrp, short *familyp) {
-    stralloc temp;
+    stralloc temp = {0};
     stralloc fqdn = {0};
     stralloc addr = {0};
     int ret = 0;
-    temp.s = name;
-    temp.len = strlen(name);
-    temp.a = temp.len + 1;
+    if (!stralloc_copys(&temp, name)) {
+	message(LOG_ERR, "Out of memory in host2addr");
+	goto exit;
+    }
     if (dns_ip4_qualify(&addr, &fqdn, &temp) == -1) {
 	message(LOG_ERR, "Unknown host: %s", name);
 	goto exit;
