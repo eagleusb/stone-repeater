@@ -1991,6 +1991,11 @@ int doSSL_accept(Pair *pair) {
 		    sd, pair->ssl_flag, ERR_error_string(e, NULL));
 	}
 	return ret;
+    } else if (err == SSL_ERROR_SSL) {
+	unsigned long e = ERR_get_error();
+	message(priority(pair), "TCP %d: SSL_accept lib %s",
+		sd, ERR_error_string(e, NULL));
+	return ret;
     }
     if (Debug > 4)
 	message(LOG_DEBUG, "TCP %d: SSL_accept interrupted sf=%x err=%d",
