@@ -5563,6 +5563,7 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
     return i;
 }
 
+#ifndef NO_THREAD
 /* SSL callback */
 unsigned long sslthread_id_callback(void) {
     unsigned long ret;
@@ -5623,6 +5624,7 @@ int sslthread_initialize(void) {
     CRYPTO_set_locking_callback(sslthread_lock_callback);
     return 1;
 }
+#endif
 #endif
 
 int dohyphen(char opt, int argc, char *argv[], int argi) {
@@ -6222,10 +6224,12 @@ void initialize(int argc, char *argv[]) {
 	message(LOG_ERR, "Can't create Mutex err=%d", j);
     }
 #endif
+#ifndef NO_THREAD
 #ifdef USE_SSL
     if (sslthread_initialize() < 0) {
 	message(LOG_ERR, "Fail to initialize SSL callback");
     }
+#endif
 #endif
 #ifndef NO_CHROOT
     if (RootDir) {
