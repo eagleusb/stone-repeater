@@ -1,0 +1,106 @@
+#!/bin/sh
+case "$1" in
+    [0-9].[0-9][a-z]-[0-9].[0-9][0-9][0-9])	ver=$1	;;
+    [0-9].[0-9][a-z])	ver=$1	;;
+    [0-9].[0-9])	ver=$1	;;
+    *)	echo "Usage dist <version> [<time stamp>]"
+	exit 1
+	;;
+esac
+shift
+stone=stone22
+stones=stone22s
+stonent=stone22nt
+stonez=stone22z
+if [ -n "$1" ]
+then	stamp=$1
+fi
+rm -rf stone-$ver stone-$ver.lzh stones-$ver.lzh stonent-$ver.lzh \
+	stone_${ver}_arm stone_${ver}_arm.ipk
+
+nkf_s() {
+	nkf -sc $1 > $2/$1
+	tscopy $1 $2/$1
+}
+
+nkf_s	README.txt	$stone
+nkf_s	README.en.txt	$stone
+nkf_s	stone.c		$stone
+nkf_s	Makefile	$stone
+nkf_s	GPL.txt		$stone
+nkf_s	logmsg.mc	$stone
+nkf_s	service.c	$stone
+nkf_s	service.h	$stone
+nkf_s	svcbody.c	$stone
+nkf_s	svcbody.h	$stone
+nkf_s	README.txt	$stones
+nkf_s	README.en.txt	$stones
+nkf_s	stone.c		$stones
+nkf_s	Makefile	$stones
+nkf_s	GPL.txt		$stones
+nkf_s	logmsg.mc	$stones
+nkf_s	service.c	$stones
+nkf_s	service.h	$stones
+nkf_s	svcbody.c	$stones
+nkf_s	svcbody.h	$stones
+nkf_s	README.txt	$stonent
+nkf_s	README.en.txt	$stonent
+nkf_s	stone.c		$stonent
+nkf_s	Makefile	$stonent
+nkf_s	GPL.txt		$stonent
+nkf_s	logmsg.mc	$stonent
+nkf_s	service.c	$stonent
+nkf_s	service.h	$stonent
+nkf_s	svcbody.c	$stonent
+nkf_s	svcbody.h	$stonent
+mkdir stone-$ver
+cp -p README.en.txt stone.1 README.txt stone.1.ja stone.c Makefile GPL.txt logmsg.mc service.c service.h svcbody.c svcbody.h stone-$ver/.
+sed -e "s/^Version: .*/Version: $ver/" stone.spec > stone-$ver/stone.spec
+
+mkdir -p stone_${ver}_arm/CONTROL
+cat > stone_${ver}_arm/CONTROL/control <<EOF
+Package: stone
+Version: $ver
+Architecture: arm
+Section: net
+Priority: optional
+Depends: openssl (>=0.9.7)
+Maintainer: Hiroaki Sengoku <sengoku@gcd.org>
+Description: TCP/UDP repeater
+	Stone is a TCP/IP packet repeater in the application layer.
+	It repeats TCP and UDP packets from inside to outside of a firewall,
+	or from outside to inside.  Refer http://www.gcd.org/sengoku/stone/
+EOF
+mkdir -p stone_${ver}_arm/usr/local/bin
+cp -p $stonez/stone stone_${ver}_arm/usr/local/bin/stone
+
+if [ -n "$stamp" ]
+then	touch -t $stamp  \
+		$stone/README.*  $stones/README.*  $stonent/README.*  \
+		$stone/stone.c   $stones/stone.c   $stonent/stone.c   \
+		$stone/stone.exe $stones/stone.exe $stonent/stone.exe \
+		$stone/Makefile  $stones/Makefile  $stonent/Makefile  \
+		$stone/logmsg.mc $stones/logmsg.mc $stonent/logmsg.mc \
+		$stone/service.c $stones/service.c $stonent/service.c \
+		$stone/service.h $stones/service.h $stonent/service.h \
+		$stone/svcbody.c $stones/svcbody.c $stonent/svcbody.c \
+		$stone/svcbody.h $stones/svcbody.h $stonent/svcbody.h \
+		stone-$ver/README.* stone-$ver/stone.c stone-$ver/Makefile \
+		stone-$ver/stone.spec \
+		stone-$ver/logmsg.mc \
+		stone-$ver/service.c stone-$ver/service.h \
+		stone-$ver/svcbody.c stone-$ver/svcbody.h \
+		README.* stone.c Makefile \
+		stone_${ver}_arm/CONTROL/control \
+		stone_${ver}_arm/usr/local/bin/stone
+	find $stone $stones $stonent stone-$ver stone_${ver}_arm -type d \
+		| xargs touch -t $stamp
+	tar czf stone-$ver.tar.gz stone-$ver
+	lha u stone-$ver.lzh $stone
+	lha u stones-$ver.lzh $stones
+	lha u stonent-$ver.lzh $stonent
+	ipkg-build stone_${ver}_arm
+	touch -t $stamp stone-$ver.tar.gz \
+		stone-$ver.lzh stones-$ver.lzh stonent-$ver.lzh \
+		stone_${ver}_arm.ipk
+fi
