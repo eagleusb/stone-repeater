@@ -3158,7 +3158,7 @@ Stone *mkstone(
 	    if (ReuseAddr && ValidSocket(stonep->sd)) {
 		i = 1;
 		setsockopt(stonep->sd, SOL_SOCKET, SO_REUSEADDR,
-			   &i, sizeof(i));
+			   (char*)&i, sizeof(i));
 	    }
 	}
 	if (InvalidSocket(stonep->sd)) {
