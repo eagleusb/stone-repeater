@@ -432,7 +432,9 @@ typedef struct _Pair {
     int tx;		/* sent bytes */
     int rx;		/* received bytes */
     int loop;		/* loop count */
-    ExBuf e;
+    int nbuf;
+    ExBuf *t;	/* top */
+    ExBuf *b;	/* bottom */
 } Pair;
 
 typedef struct _Conn {
@@ -468,7 +470,10 @@ time_t lastEstablished = 0;
 time_t lastReadWrite = 0;
 Pair pairs;
 Pair trash;
+Pair *freePairs = NULL;
+int nFreePairs = 0;
 ExBuf *freeExBuf = NULL;
+int nFreeExBuf = 0;
 Conn conns;
 Origin origins;
 int OriginMax = 10;
@@ -577,7 +582,7 @@ int Debug = 0;		/* debugging level */
 int PacketDump = 0;
 #ifdef PTHREAD
 pthread_mutex_t FastMutex = PTHREAD_MUTEX_INITIALIZER;
-char FastMutexs[8];
+char FastMutexs[9];
 #define PairMutex	0
 #define ConnMutex	1
 #define OrigMutex	2
@@ -586,16 +591,17 @@ char FastMutexs[8];
 #define FdWinMutex	5
 #define FdEinMutex	6
 #define ExBufMutex	7
+#define FPairMutex	8
 #endif
 #ifdef WINDOWS
 HANDLE PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HANDLE FdRinMutex, FdWinMutex, FdEinMutex;
-HANDLE ExBufMutex;
+HANDLE ExBufMutex, FPairMutex;
 #endif
 #ifdef OS2
 HMTX PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HMTX FdRinMutex, FdWinMutex, FdEinMutex;
-HMTX ExBufMutex;
+HMTX ExBufMutex, FPairMutex;
 #endif
 
 #ifdef NO_VSNPRINTF
@@ -2260,6 +2266,7 @@ void ungetExBuf(ExBuf *ex) {
     waitMutex(ExBufMutex);
     ex->next = freeExBuf;
     freeExBuf = ex;
+    nFreeExBuf++;
     freeMutex(ExBufMutex);
 }
 
@@ -2269,11 +2276,14 @@ ExBuf *getExBuf(void) {
     if (freeExBuf) {
 	ret = freeExBuf;
 	freeExBuf = ret->next;
+	nFreeExBuf--;
     }
     freeMutex(ExBufMutex);
     if (!ret) {
 	int size = XferBufMax;
-	ret = malloc(sizeof(ExBuf) + size - BUFMAX);
+	do {
+	    ret = malloc(sizeof(ExBuf) + size - BUFMAX);
+	} while (!ret && XferBufMax > BUFMAX && (XferBufMax /= 2));
 	if (!ret) {
 	    message(LOG_CRIT, "Out of memory, no ExBuf");
 	    return ret;
@@ -2540,6 +2550,44 @@ void doshutdown(Pair *pair, int how) {
 #endif
 }
 
+Pair *newPair(void) {
+    Pair *pair = NULL;
+    waitMutex(FPairMutex);
+    if (freePairs) {
+	pair = freePairs;
+	freePairs = pair->next;
+	nFreePairs--;
+    }
+    freeMutex(FPairMutex);
+    if (!pair) pair = malloc(sizeof(Pair));
+    if (pair) {
+	pair->t = getExBuf();
+	if (!pair->t) {
+	    free(pair);
+	    return NULL;
+	}
+	pair->nbuf = 1;
+	pair->sd = INVALID_SOCKET;
+	pair->stone = NULL;
+	pair->proto = 0;
+	pair->timeout = PairTimeOut;
+	pair->count = 0;
+	pair->b = pair->t;
+	pair->p = NULL;
+	pair->log = NULL;
+	pair->tx = 0;
+	pair->rx = 0;
+	pair->loop = 0;
+	time(&pair->clock);
+	pair->pair = NULL;
+#ifdef USE_SSL
+	pair->ssl = NULL;
+	pair->ssl_flag = 0;
+#endif
+    }
+    return pair;
+}
+
 void freePair(Pair *pair) {
     SOCKET sd;
     char *p;
@@ -2584,15 +2632,21 @@ void freePair(Pair *pair) {
 	if (ctx) SSL_CTX_flush_sessions(ctx, pair->clock);
     }
 #endif
-    ex = pair->e.next;
+    pair->b = NULL;
+    ex = pair->t;
     while (ex) {
 	ExBuf *f = ex;
 	ex = ex->next;
+	pair->nbuf--;
 	if (Debug > 4) message(LOG_DEBUG, "TCP %d: freePair unget ExBuf", sd);
 	ungetExBuf(f);
     }
     if (ValidSocket(sd)) closesocket(sd);
-    free(pair);
+    waitMutex(FPairMutex);
+    pair->next = freePairs;
+    freePairs = pair;
+    nFreePairs++;
+    freeMutex(FPairMutex);
 }
 
 void message_time_log(Pair *pair) {
@@ -2632,10 +2686,10 @@ void connected(Pair *pair) {
       SSL connection may not be established yet,
       but we can prepare for read/write
     */
-    if (pair->e.len > 0) {
+    if (pair->t->len > 0) {
 	if (Debug > 8)
 	    message(LOG_DEBUG, "TCP %d: waiting %d bytes to write",
-		    pair->sd, pair->e.len);
+		    pair->sd, pair->t->len);
 	if (!(pair->proto & proto_shutdown)) pair->proto |= proto_select_w;
     } else if (!(pair->proto & proto_ohttp_d)) {
 	if (Debug > 8)
@@ -2643,10 +2697,10 @@ void connected(Pair *pair) {
 	if (!(p->proto & proto_eof)) p->proto |= proto_select_r;
     }
     if (!(p->proto & proto_ohttp_s)) {
-	if (p->e.len > 0) {
+	if (p->t->len > 0) {
 	    if (Debug > 8)
 		message(LOG_DEBUG, "TCP %d: waiting %d bytes to write",
-			p->sd, p->e.len);
+			p->sd, p->t->len);
 	    if (!(p->proto & proto_shutdown)) p->proto |= proto_select_w;
 	} else {
 	    if (Debug > 8)
@@ -3154,22 +3208,8 @@ Pair *doaccept(Stone *stonep) {
     if (Debug > 1)
 	message(LOG_DEBUG, "stone %d: accepted TCP %d from %s",
 		stonep->sd, nsd, fromstr);
-    do {
-	size = XferBufMax;
-	pair1 = malloc(sizeof(Pair) + size - BUFMAX);
-    } while (!pair1 && XferBufMax > BUFMAX && (XferBufMax /= 2));
-    if (pair1) pair1->e.bufmax = size;
-    do {
-	size = XferBufMax;
-	pair2 = malloc(sizeof(Pair) + size - BUFMAX);
-    } while (!pair2 && XferBufMax > BUFMAX && (XferBufMax /= 2));
-    if (pair2) pair2->e.bufmax = size;
-#ifdef ENLARGE
-    if (XferBufMax < prevXferBufMax) {
-	message(LOG_NOTICE, "stone %d TCP %d: XferBufMax becomes %d byte",
-		stonep->sd, nsd, XferBufMax);
-    }
-#endif
+    pair1 = newPair();
+    pair2 = newPair();
     if (!pair1 || !pair2) {
 	message(LOG_CRIT, "stone %d: out of memory, closing TCP %d",
 		stonep->sd, nsd);
@@ -3180,27 +3220,11 @@ Pair *doaccept(Stone *stonep) {
     }
     pair1->stone = pair2->stone = stonep;
     pair1->sd = nsd;
-    pair2->sd = INVALID_SOCKET;
     pair1->proto = ((stonep->proto & proto_stone_s & ~proto_command) |
 		    proto_first_r | proto_first_w | command_source);
     pair2->proto = ((stonep->proto & proto_stone_d) |
 		    proto_first_r | proto_first_w);
-    pair1->count = pair2->count = 0;
-    pair1->e.next = pair2->e.next = NULL;
-    pair1->e.start = pair2->e.start = 0;
-    pair1->e.len = pair2->e.len = 0;
-    pair1->p = pair2->p = NULL;
-    pair1->log = pair2->log = NULL;
-    pair1->tx = pair2->tx = 0;
-    pair1->rx = pair2->rx = 0;
-    pair1->loop = pair2->loop = 0;
-    time(&pair1->clock);
-    time(&pair2->clock);
     pair1->timeout = pair2->timeout = stonep->timeout;
-    pair1->pair = pair2->pair = NULL;
-#ifdef USE_SSL
-    pair1->ssl = pair2->ssl = NULL;
-    pair1->ssl_flag = pair2->ssl_flag = 0;
     /* now successfully accepted */
 #ifdef WINDOWS
     param = 1;
@@ -3208,6 +3232,7 @@ Pair *doaccept(Stone *stonep) {
 #else
     fcntl(pair1->sd, F_SETFL, O_NONBLOCK);
 #endif
+#ifdef USE_SSL
     if (stonep->proto & proto_ssl_s) {
 	if (doSSL_accept(pair1) < 0) goto error;
     } else
@@ -3429,7 +3454,7 @@ void message_buf(Pair *pair, int len, char *str) {	/* dump for debug */
     } else {
 	snprintf(head, STRMAX, "%s%d>%d", str, p->sd, pair->sd);
     }
-    packet_dump(head, pair->e.buf + pair->e.start, len);
+    packet_dump(head, pair->t->buf + pair->t->start, len);
 }
 
 void message_pairs(int pri) {	/* dump for debug */
@@ -3464,25 +3489,15 @@ void setclose(Pair *pair, int flag) {	/* set close flag */
     }
 }
 
-int dowrite(Pair *pair) {	/* write from buf from pair->e.start */
+int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
     SOCKET sd = pair->sd;
     Pair *p;
     int len;
     ExBuf *ex;
-    if (Debug > 5) message(LOG_DEBUG, "TCP %d: write %d bytes",
-			   sd, pair->e.len);
+    ex = pair->t;	/* top */
+    if (!ex) return 0;
+    if (Debug > 5) message(LOG_DEBUG, "TCP %d: write %d bytes", sd, ex->len);
     if (InvalidSocket(sd)) return -1;
-    ex = &pair->e;
-    if ((ex->start + ex->len) <= 0 && ex->next) {
-	ex = ex->next;
-	while (ex && (ex->start + ex->len) <= 0) {	/* while empty */
-	    ExBuf *f = ex;
-	    ex = ex->next;
-	    if (Debug > 4) message(LOG_DEBUG, "TCP %d: unget ExBuf", pair->sd);
-	    ungetExBuf(f);
-	}
-	if (!ex) return 0;
-    }
 #ifdef USE_SSL
     if (pair->ssl) {
 	len = SSL_write(pair->ssl, &ex->buf[ex->start], ex->len);
@@ -3572,6 +3587,13 @@ int dowrite(Pair *pair) {	/* write from buf from pair->e.start */
 	message_pair(LOG_NOTICE, pair);
     }
     ex->len -= len;
+    if (ex->len <= 0 && ex->next) {
+	pair->t = ex->next;
+	pair->nbuf--;
+	if (Debug > 4) message(LOG_DEBUG, "TCP %d: unget ExBuf nbuf=%d",
+			       pair->sd, pair->nbuf);
+	ungetExBuf(ex);
+    }
     pair->tx += len;
     if ((p->proto & proto_command) != command_health)
 	lastReadWrite = pair->clock;
@@ -3661,7 +3683,7 @@ int baseDecode(unsigned char *buf, int len, char *rest) {
     return blen;
 }
 
-int doread(Pair *pair) {	/* read into buf from pair->pair->e.start */
+int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
     SOCKET sd = pair->sd;
     Pair *p;
     int len, i;
@@ -3688,14 +3710,15 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->e.start */
 	}
 	return len;
     }
-    ex = &p->e;
-    while ((ex->start + ex->len) > 0) {	/* while not empty */
-	if (!ex->next) {
-	    ex->next = getExBuf();
-	    if (!ex->next) return -1;	/* out of memory */
-	    if (Debug > 4) message(LOG_DEBUG, "TCP %d: get ExBuf", p->sd);
-	}
-	ex = ex->next;
+    ex = p->b;	/* bottom */
+    if (ex->len > 0) {	/* not emply */
+	ex = getExBuf();
+	if (!ex) return -1;	/* out of memory */
+	p->b->next = ex;
+	p->b = ex;
+	p->nbuf++;
+	if (Debug > 4) message(LOG_DEBUG, "TCP %d: get ExBuf nbuf=%d",
+			       p->sd, p->nbuf);
     }
     bufmax = ex->bufmax - ex->start;
     start = ex->start;
@@ -3785,51 +3808,54 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->e.start */
 #ifdef USE_SSL
     }
 #endif
-    if (len == 0) {
+    if (len > 0) {
+	pair->rx += len;
+#ifdef ENLARGE
+	if (len > ex->bufmax - 10
+	    && XferBufMax < ex->bufmax * 2) {
+	    XferBufMax = ex->bufmax * 2;
+	    message(LOG_NOTICE, "TCP %d: XferBufMax becomes %d byte",
+		    sd, XferBufMax);
+	}
+#endif
+	ex->len = start + len - ex->start;
+	if (Debug > 4) {
+	    SOCKET psd = p->sd;
+	    if (start > ex->start) {
+		message(LOG_DEBUG, "TCP %d: read %d+%d bytes to %d",
+			sd, len, start - ex->start, psd);
+	    } else {
+		message(LOG_DEBUG, "TCP %d: read %d bytes to %d",
+			sd, ex->len, psd);
+	    }
+	}
+	time(&pair->clock);
+	p->clock = pair->clock;
+	if (p->proto & proto_base) {
+	    ex->len = baseEncode(&ex->buf[ex->start], ex->len,
+				 ex->bufmax - ex->start);
+	} else if (pair->proto & proto_base) {
+	    ex->len = baseDecode(&ex->buf[ex->start], ex->len,
+				 ex->buf+ex->bufmax-1);
+	    len = *(ex->buf+ex->bufmax-1);
+	    if (Debug > 4 && len > 0) {	/* len < 4 */
+		char str[STRMAX+1];
+		for (i=0; i < len; i++)
+		    sprintf(&str[i*3], " %02x", ex->buf[ex->bufmax-2-i]);
+		str[0] = '(';
+		message(LOG_DEBUG, "TCP %d: save %d bytes \"%s\")",
+			sd, len, str);
+	    }
+	}
+	if ((p->proto & proto_command) != command_health)
+	    lastReadWrite = pair->clock;
+    }
+    if (p->t->len <= 0) {	/* top */
 	message_time_log(pair);
 	if (Debug > 2) message(LOG_DEBUG, "TCP %d: EOF", sd);
 	return -2;	/* EOF w/ pair */
     }
-    pair->rx += len;
-#ifdef ENLARGE
-    if (len > pair->e.bufmax - 10
-	&& XferBufMax < pair->e.bufmax * 2) {
-	XferBufMax = pair->e.bufmax * 2;
-	message(LOG_NOTICE, "TCP %d: XferBufMax becomes %d byte",
-		sd, XferBufMax);
-    }
-#endif
-    ex->len = start + len - ex->start;
-    if (Debug > 4) {
-	SOCKET psd = p->sd;
-	if (start > ex->start) {
-	    message(LOG_DEBUG, "TCP %d: read %d+%d bytes to %d",
-		    sd, len, start - ex->start, psd);
-	} else {
-	    message(LOG_DEBUG, "TCP %d: read %d bytes to %d",
-		    sd, ex->len, psd);
-	}
-    }
-    time(&pair->clock);
-    p->clock = pair->clock;
-    if (p->proto & proto_base) {
-	ex->len = baseEncode(&ex->buf[ex->start], ex->len,
-			     ex->bufmax - ex->start);
-    } else if (pair->proto & proto_base) {
-	ex->len = baseDecode(&ex->buf[ex->start], ex->len,
-			     ex->buf+ex->bufmax-1);
-	len = *(ex->buf+ex->bufmax-1);
-	if (Debug > 4 && len > 0) {	/* len < 4 */
-	    char str[STRMAX+1];
-	    for (i=0; i < len; i++)
-		sprintf(&str[i*3], " %02x", ex->buf[ex->bufmax-2-i]);
-	    str[0] = '(';
-	    message(LOG_DEBUG, "TCP %d: save %d bytes \"%s\")", sd, len, str);
-	}
-    }
-    if ((p->proto & proto_command) != command_health)
-	lastReadWrite = pair->clock;
-    return ex->len;
+    return p->t->len;
 }
 
 /* http */
@@ -3838,6 +3864,7 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->e.start */
 
 int commOutput(Pair *pair, char *fmt, ...) {
     Pair *p = pair->pair;
+    ExBuf *ex;
     SOCKET psd;
     char *str;
     va_list ap;
@@ -3845,17 +3872,18 @@ int commOutput(Pair *pair, char *fmt, ...) {
     psd = p->sd;
     if ((p->proto & (proto_shutdown | proto_close)) || InvalidSocket(psd))
 	return -1;
-    str = &p->e.buf[p->e.start + p->e.len];
-    p->e.buf[p->e.bufmax-1] = '\0';
+    ex = p->b;	/* bottom */
+    str = &ex->buf[ex->start + ex->len];
+    ex->buf[ex->bufmax-1] = '\0';
     va_start(ap, fmt);
-    vsnprintf(str, p->e.bufmax-1 - (p->e.start + p->e.len), fmt, ap);
+    vsnprintf(str, ex->bufmax-1 - (ex->start + ex->len), fmt, ap);
     va_end(ap);
     if (p->proto & proto_base)
-	p->e.len += baseEncode(str, strlen(str),
-			       p->e.bufmax-1 - (p->e.start + p->e.len));
-    else p->e.len += strlen(str);
+	ex->len += baseEncode(str, strlen(str),
+			       ex->bufmax-1 - (ex->start + ex->len));
+    else ex->len += strlen(str);
     p->proto |= proto_select_w;	/* need to write */
-    return p->e.len;
+    return ex->len;
 }
 
 static char *comm_match(char *buf, char *str) {
@@ -3920,8 +3948,8 @@ int proxyCONNECT(Pair *pair, char *parm, int start) {
 	port = q + 1;
 	*q = '\0';
     }
-    pair->e.len += pair->e.start;
-    pair->e.start = 0;
+    pair->b->len += pair->b->start;
+    pair->b->start = 0;
     p = pair->pair;
     if (p) p->proto |= proto_ohttp_s;	/* remove request header */
     return doproxy(pair, parm, port);
@@ -3930,9 +3958,12 @@ int proxyCONNECT(Pair *pair, char *parm, int start) {
 int proxyCommon(Pair *pair, char *parm, int start) {
     char *port = "80";	/* default port of http:// */
     char *host;
-    char *top = &pair->e.buf[start];
+    ExBuf *ex;
+    char *top;
     char *p, *q;
     int i;
+    ex = pair->b;	/* bottom */
+    top = &ex->buf[start];
     for (i=0; i < METHOD_LEN_MAX; i++) {
 	if (parm[i] == ':') break;
     }
@@ -3961,9 +3992,9 @@ int proxyCommon(Pair *pair, char *parm, int start) {
     while (isspace(*p)) p++;	/* now p points url */
     q = p + i;			/* now q points path */
     if (*q != '/') *--q = '/';
-    bcopy(q, p, pair->e.start + pair->e.len - (q - top));
-    pair->e.len = pair->e.start + pair->e.len - (q - p);
-    pair->e.start = 0;
+    bcopy(q, p, ex->start + ex->len - (q - top));
+    ex->len = ex->start + ex->len - (q - p);
+    ex->start = 0;
     if (Debug > 1) {
 	Pair *r = pair->pair;
 	message(LOG_DEBUG, "proxy %d -> http://%s:%d",
@@ -4020,6 +4051,7 @@ int popPASS(Pair *pair, char *parm, int start) {
     char *str;
     int ulen, tlen, plen, i;
     int state = (pair->proto & state_mask);
+    ExBuf *ex = pair->b;	/* bottom */
     char *p = pair->p;
     pair->p = NULL;
     if (Debug > 5) message(LOG_DEBUG, ": PASS %s", parm);
@@ -4036,19 +4068,19 @@ int popPASS(Pair *pair, char *parm, int start) {
 	return -1;
     }
     strcat(str, parm);
-    sprintf(pair->e.buf, "APOP %s ", p);
-    ulen = strlen(pair->e.buf);
+    sprintf(ex->buf, "APOP %s ", p);
+    ulen = strlen(ex->buf);
     MD5Init(&context);
     MD5Update(&context, str, tlen + plen);
     MD5Final(digest, &context);
     free(p);
     for (i=0; i < DIGEST_LEN; i++) {
-	sprintf(pair->e.buf + ulen + i*2, "%02x", digest[i]);
+	sprintf(ex->buf + ulen + i*2, "%02x", digest[i]);
     }
-    message_time(pair, LOG_INFO, "POP -> %s", pair->e.buf);
-    strcat(pair->e.buf, "\r\n");
-    pair->e.start = 0;
-    pair->e.len = strlen(pair->e.buf);
+    message_time(pair, LOG_INFO, "POP -> %s", ex->buf);
+    strcat(ex->buf, "\r\n");
+    ex->start = 0;
+    ex->len = strlen(ex->buf);
     return 0;
 }
 
@@ -4065,9 +4097,10 @@ int popCAPA(Pair *pair, char *parm, int start) {
 }
 
 int popAPOP(Pair *pair, char *parm, int start) {
+    ExBuf *ex = pair->b;	/* bottom */
     message_time(pair, LOG_INFO, "APOP %s", parm);
-    pair->e.len += pair->e.start - start;
-    pair->e.start = start;
+    ex->len += ex->start - start;
+    ex->start = start;
     return 0;
 }
 
@@ -4164,10 +4197,11 @@ int healthHELO(Pair *pair, char *parm, int start) {
     time_t now;
     time(&now);
     snprintf(str, LONGSTRMAX,
-	     "stone=%d pair=%d trash=%d conn=%d established=%d readwrite=%d async=%d",
+	     "stone=%d pair=%d trash=%d conn=%d established=%d readwrite=%d "
+	     "async=%d fpair=%d nfexbuf=%d",
 	     nStones(), nPairs(pairs.next), nPairs(trash.next), nConns(),
 	     (int)(now - lastEstablished), (int)(now - lastReadWrite),
-	     AsyncCount);
+	     AsyncCount, nFreePairs, nFreeExBuf);
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
     commOutput(pair, "200 stone:%s debug=%d %s\r\n",
@@ -4220,34 +4254,35 @@ int memCheck(void) {
 }
 
 int docomm(Pair *pair, Comm *comm) {
+    ExBuf *ex = pair->b;	/* bottom */
     char buf[BUFMAX];
     char *p;
-    char *q = &pair->e.buf[pair->e.start + pair->e.len];
+    char *q = &ex->buf[ex->start + ex->len];
     int start, i;
-    for (p=&pair->e.buf[pair->e.start]; p < q; p++) {
+    for (p=&ex->buf[ex->start]; p < q; p++) {
 	if (*p == '\r' || *p == '\n') break;
     }
-    if (p >= q && p < &pair->e.buf[pair->e.bufmax]) {
-	pair->e.start += pair->e.len;
-	pair->e.len = 0;
+    if (p >= q && p < &ex->buf[ex->bufmax]) {
+	ex->start += ex->len;
+	ex->len = 0;
 	return -2;	/* read more */
     }
-    for (start=p-pair->e.buf-1; start >= 0; start--) {
-	if (pair->e.buf[start] == '\r' || pair->e.buf[start] == '\n') break;
+    for (start=p-ex->buf-1; start >= 0; start--) {
+	if (ex->buf[start] == '\r' || ex->buf[start] == '\n') break;
     }
     start++;
     while ((*p == '\r' || *p == '\n') && p < q) p++;
-    pair->e.start = p - pair->e.buf;
+    ex->start = p - ex->buf;
     if (p < q) {
-	pair->e.len = q - p;
+	ex->len = q - p;
     } else {
-	pair->e.len = 0;
+	ex->len = 0;
     }
     while (comm->str) {
-	if ((q=comm_match(&pair->e.buf[start], comm->str)) != NULL) break;
+	if ((q=comm_match(&ex->buf[start], comm->str)) != NULL) break;
 	comm++;
     }
-    if (q == NULL) q = &pair->e.buf[start];
+    if (q == NULL) q = &ex->buf[start];
     for (i=0; q < p && i < BUFMAX-1; i++) {
 	if (*q == '\r' || *q == '\n') break;
 	buf[i] = *q++;
@@ -4257,12 +4292,13 @@ int docomm(Pair *pair, Comm *comm) {
 }
 
 int insheader(Pair *pair) {	/* insert header */
+    ExBuf *ex = pair->b;	/* bottom */
     char *p;
-    int bufmax = pair->e.bufmax;
+    int bufmax = ex->bufmax;
     int len, i;
-    len = pair->e.start + pair->e.len;
-    for (i=pair->e.start; i < len; i++) {
-	if (pair->e.buf[i] == '\n') break;
+    len = ex->start + ex->len;
+    for (i=ex->start; i < len; i++) {
+	if (ex->buf[i] == '\n') break;
     }
     if (i >= len) {
 	if (Debug > 3)
@@ -4274,29 +4310,30 @@ int insheader(Pair *pair) {	/* insert header */
     if (len > 0) {
 	bufmax -= len;		/* reserve */
 	/* save rest header */
-	bcopy(&pair->e.buf[i], &pair->e.buf[bufmax], len);
+	bcopy(&ex->buf[i], &ex->buf[bufmax], len);
     }
     p = pair->stone->p;
-    i += strnparse(&pair->e.buf[i], bufmax - i, &p, pair->pair, 0xFF);
-    pair->e.buf[i++] = '\r';
-    pair->e.buf[i++] = '\n';
+    i += strnparse(&ex->buf[i], bufmax - i, &p, pair->pair, 0xFF);
+    ex->buf[i++] = '\r';
+    ex->buf[i++] = '\n';
     if (Debug > 5) {
 	message(LOG_DEBUG,
 		"TCP %d: insheader start=%d, ins=%d, rest=%d, max=%d",
-		pair->sd, pair->e.start, i-pair->e.start, len, pair->e.bufmax);
+		pair->sd, ex->start, i-ex->start, len, ex->bufmax);
     }
     if (len > 0)	/* restore */
-	bcopy(&pair->e.buf[bufmax], &pair->e.buf[i], len);
-    pair->e.len = i - pair->e.start + len;
-    return pair->e.len;
+	bcopy(&ex->buf[bufmax], &ex->buf[i], len);
+    ex->len = i - ex->start + len;
+    return ex->len;
 }
 
 int rmheader(Pair *pair) {	/* remove header */
+    ExBuf *ex = pair->b;	/* bottom */
     char *p;
-    char *q = &pair->e.buf[pair->e.start+pair->e.len];
+    char *q = &ex->buf[ex->start+ex->len];
     int state = (pair->proto & state_mask);
-    if (Debug > 3) message_buf(pair, pair->e.len, "rm");
-    for (p=&pair->e.buf[pair->e.start]; p < q; p++) {
+    if (Debug > 3) message_buf(pair, ex->len, "rm");
+    for (p=&ex->buf[ex->start]; p < q; p++) {
 	if (*p == '\r') continue;
 	if (*p == '\n') {
 	    state++;
@@ -4309,25 +4346,27 @@ int rmheader(Pair *pair) {	/* remove header */
 	}
     }
     if (state < 3) {
-	pair->e.len = pair->e.start = 0;
+	ex->len = ex->start = 0;
 	pair->proto = ((pair->proto & ~state_mask) | state);
 	return -2;	/* header will continue... */
     }
-    pair->e.len = q - p;	/* remove header */
-    pair->e.start = p - pair->e.buf;
+    ex->len = q - p;	/* remove header */
+    ex->start = p - ex->buf;
     pair->proto &= ~state_mask;
-    return pair->e.len;
+    return ex->len;
 }
 
 int first_read(Pair *pair) {
     SOCKET sd = pair->sd;
     SOCKET psd;
     Pair *p = pair->pair;
+    ExBuf *ex;
     int len;
     if (p == NULL || (p->proto & (proto_shutdown | proto_close))
 	|| InvalidSocket(sd)) return -1;
+    ex = p->b;	/* bottom */
     psd = p->sd;
-    len = p->e.len;
+    len = ex->len;
     pair->proto &= ~proto_first_r;
     if (p->proto & proto_command) {	/* proxy */
 	switch(p->proto & proto_command) {
@@ -4359,7 +4398,7 @@ int first_read(Pair *pair) {
 	    }
 	    return -1;
 	} else {
-	    len = p->e.len;
+	    len = ex->len;
 	}
     }
     if (pair->proto & proto_ohttp) {	/* over http */
@@ -4382,16 +4421,16 @@ int first_read(Pair *pair) {
 	&& pair->p == NULL) {
 	int i;
 	char *q;
-	for (i=p->e.start; i < p->e.start + p->e.len; i++) {
-	    if (p->e.buf[i] == '<') {	/* time stamp of APOP banner */
+	for (i=ex->start; i < ex->start + ex->len; i++) {
+	    if (ex->buf[i] == '<') {	/* time stamp of APOP banner */
 		q = pair->p = malloc(BUFMAX);
 		if (!q) {
 		    message(LOG_CRIT, "TCP %d: out of memory", sd);
 		    break;
 		}
-		for (; i < p->e.start + p->e.len; i++) {
-		    *q++ = p->e.buf[i];
-		    if (p->e.buf[i] == '>') break;
+		for (; i < ex->start + ex->len; i++) {
+		    *q++ = ex->buf[i];
+		    if (ex->buf[i] == '>') break;
 		}
 		*q = '\0';
 		break;
@@ -4650,6 +4689,10 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			    && !(rPair->proto & proto_close)) {
 			    /* (wPair->proto & proto_eof) may be true */
 			    wPair->proto |= proto_select_w;
+
+			    /* always bufferfing only for debug */
+			    rPair->proto |= proto_select_r;
+
 			} else {
 			    goto leave;
 			}
@@ -4689,8 +4732,10 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			doshutdown(wPair, 2);
 		    setclose(wPair, proto_shutdown);
 		} else {
+		    ExBuf *ex;
+		    ex = wPair->t;	/* top */
 		    /* (wPair->proto & proto_eof) may be true */
-		    if (wPair->e.len <= 0) {	/* all written */
+		    if (ex->len <= 0) {	/* all written */
 			if (wPair->proto & proto_first_w)
 			    wPair->proto &= ~proto_first_w;
 			if (rPair && ValidSocket(rsd)
@@ -4748,12 +4793,13 @@ void asyncAccept(Stone *stone) {
     if (p2->proto & proto_ohttp_d) {
 	int i;
 	char *p = stone->p;
-	i = strnparse(p2->e.buf, p2->e.bufmax - 5, &p, p1, 0xFF);
-	p2->e.buf[i++] = '\r';
-	p2->e.buf[i++] = '\n';
-	p2->e.buf[i++] = '\r';
-	p2->e.buf[i++] = '\n';
-	p2->e.len = i;
+	ExBuf *ex = p2->b;	/* bottom */
+	i = strnparse(ex->buf, ex->bufmax - 5, &p, p1, 0xFF);
+	ex->buf[i++] = '\r';
+	ex->buf[i++] = '\n';
+	ex->buf[i++] = '\r';
+	ex->buf[i++] = '\n';
+	ex->len = i;
     }
     ret = -1;
     if (p1->proto & proto_connect) {
@@ -6706,7 +6752,8 @@ void initialize(int argc, char *argv[]) {
 	!(FdRinMutex=CreateMutex(NULL, FALSE, NULL)) ||
 	!(FdWinMutex=CreateMutex(NULL, FALSE, NULL)) ||
 	!(FdEinMutex=CreateMutex(NULL, FALSE, NULL)) ||
-	!(ExBufMutex=CreateMutex(NULL, FALSE, NULL))) {
+	!(ExBufMutex=CreateMutex(NULL, FALSE, NULL)) ||
+	!(FPairMutex=CreateMutex(NULL, FALSE, NULL))) {
 	message(LOG_ERR, "Can't create Mutex err=%d", GetLastError());
     }
 #endif
@@ -6719,7 +6766,8 @@ void initialize(int argc, char *argv[]) {
 	(j=DosCreateMutexSem(NULL, &FdRinMutex, 0, FALSE)) ||
 	(j=DosCreateMutexSem(NULL, &FdWinMutex, 0, FALSE)) ||
 	(j=DosCreateMutexSem(NULL, &FdEinMutex, 0, FALSE)) ||
-	(j=DosCreateMutexSem(NULL, &ExBufMutex, 0, FALSE))) {
+	(j=DosCreateMutexSem(NULL, &ExBufMutex, 0, FALSE)) ||
+	(j=DosCreateMutexSem(NULL, &FPairMutex, 0, FALSE))) {
 	message(LOG_ERR, "Can't create Mutex err=%d", j);
     }
 #endif
