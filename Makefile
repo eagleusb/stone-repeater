@@ -123,7 +123,7 @@ macosx-ssl:
 	$(MAKE) TARGET=macosx SSL=/usr ssl_stone
 
 sun:
-	$(MAKE) CC=gcc FLAGS="-DNO_SNPRINTF -DIGN_SIGTERM -DCPP='\"/usr/lib/cpp\"' $(FLAGS)" stone
+	$(MAKE) CC=gcc FLAGS="-DNO_ADDRINFO -DNO_SNPRINTF -DIGN_SIGTERM -DCPP='\"/usr/lib/cpp\"' $(FLAGS)" stone
 
 sun-pop:
 	$(MAKE) TARGET=sun pop_stone

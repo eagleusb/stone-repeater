@@ -640,40 +640,47 @@ char *strntime(char *str, int len, time_t *clock) {
 }
 
 void message(int pri, char *fmt, ...) {
-    char str[BUFMAX];
+    char str[BUFMAX+1];
+    int pos = 0;
     va_list ap;
 #ifndef NO_SYSLOG
+    if (!Syslog)
+#endif
+    {
+	time_t clock;
+	time(&clock);
+	strntime(str+pos, BUFMAX-pos, &clock);
+	pos = strlen(str);
+    }
+    va_start(ap, fmt);
+    vsnprintf(str+pos, BUFMAX-pos, fmt, ap);
+    va_end(ap);
+#ifndef NO_SYSLOG
     if (Syslog) {
-	va_start(ap, fmt);
-	vsnprintf(str, BUFMAX, fmt, ap);
-	va_end(ap);
 	if (Syslog == 1
 	    || pri != LOG_DEBUG) syslog(pri, "%s", str);
-	if (Syslog > 1) fprintf(stdout, "%s\n", str);	/* daemontools */
-    } else {
+	if (Syslog > 1) {	/* daemontools */
+	    unsigned long thid = 0;
+#ifdef WINDOWS
+	    thid = (unsigned long)GetCurrentThreadId();
+#else
+#ifdef PTHREAD
+	    thid = (unsigned long)pthread_self();
 #endif
-	time_t clock;
-	int i;
-	time(&clock);
-	strntime(str, BUFMAX, &clock);
-	i = strlen(str);
-#ifndef NO_FORK
-	if (NForks) {
-	    snprintf(&str[i], BUFMAX-i, "[%d] ", MyPid);
-	    i = strlen(str);
+#endif
+	    if (thid) {
+		fprintf(stdout, "%lu %s\n", thid, str);
+	    } else {
+		fprintf(stdout, "%s\n", str);
+	    }
 	}
+    } else
 #endif
-	va_start(ap, fmt);
-	vsnprintf(&str[i], BUFMAX-i-2, fmt, ap);
-	va_end(ap);
 #ifdef NT_SERVICE
 	if (FALSE == bSvcDebug) AddToMessageLog(str);
 	else
 #endif
-	if (LogFp) fprintf(LogFp, "%s\n", str);
-#ifndef NO_SYSLOG
-    }
-#endif
+	    if (LogFp) fprintf(LogFp, "%s\n", str);
 }
 
 void message_time(Pair *pair, int pri, char *fmt, ...) {
@@ -5620,9 +5627,13 @@ int sslthread_initialize(void) {
 #endif
 #endif
     }
+#if defined(WINDOWS) || defined(PTHREAD)
     CRYPTO_set_id_callback(sslthread_id_callback);
     CRYPTO_set_locking_callback(sslthread_lock_callback);
     return 1;
+#else
+    return 0;
+#endif
 }
 #endif
 #endif
