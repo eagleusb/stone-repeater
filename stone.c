@@ -4364,7 +4364,7 @@ void help(char *com) {
 	    "       no_ssl2          ; turn off SSLv2\n"
 	    "       bugs             ; SSL implementation bug workarounds\n"
 	    "       serverpref       ; use server's cipher preferences (SSLv2)\n"
-	    "       sid_ctx=<str>     ; set session ID context\n"
+	    "       sid_ctx=<str>    ; set session ID context\n"
 	    "       key=<file>       ; key file\n"
 	    "       cert=<file>      ; certificate file\n"
 	    "       CAfile=<file>    ; certificate file of CA\n"
