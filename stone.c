@@ -238,7 +238,7 @@ typedef int SOCKET;
 #include <openssl/bio.h>
 #include <openssl/err.h>
 SSL_CTX *ssl_ctx_server, *ssl_ctx_client;
-char *keyfile, *certfile;
+char *keyfile, *certfile, *CAfile=NULL;
 char ssl_file_path[BUFMAX];
 int ssl_verbose_flag = 0;
 int ssl_verify_flag = SSL_VERIFY_NONE;
@@ -3464,6 +3464,8 @@ char *argv[];
 	cipher_list = strdup(argv[i]+7);
     } else if (!strcmp(argv[i],"verbose")) {
 	ssl_verbose_flag++;
+    } else if (!strncmp(argv[i],"CAfile=",7)) {
+	CAfile = strdup(argv[i]+7);
     } else {
 	message(LOG_ERR,"Invalid SSL Option: %s",argv[i]);
 	help(argv[0]);
@@ -3909,6 +3911,12 @@ char *argv[];
     SSL_CTX_set_mode(ssl_ctx_server,SSL_MODE_ENABLE_PARTIAL_WRITE);
     SSL_CTX_set_mode(ssl_ctx_client,SSL_MODE_ENABLE_PARTIAL_WRITE);
     if (!cipher_list) cipher_list = getenv("SSL_CIPHER");
+    if (CAfile)
+        if (!SSL_CTX_load_verify_locations(ssl_ctx_server,CAfile,NULL)) {
+            message(LOG_ERR,"SSL_CTX_load_verify_locations(%s) error",CAfile);
+            if (ssl_verbose_flag)
+	        message(LOG_INFO,"%s",ERR_error_string(ERR_get_error(),NULL));
+        }
 #endif
     pairs.next = NULL;
     conns.next = NULL;
