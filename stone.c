@@ -1311,12 +1311,10 @@ int hostPort(char *str, struct sockaddr_in *sinp, int proto) {
     for (i=0; i < STRMAX-1; i++) {
 	if (! str[i]) return 0;	/* illegal format */
 	if (str[i] == ':') {
-	    sa_family_t family;
 	    host[i] = '\0';
-	    if (!host2addr(host, &sinp->sin_addr, &family)) {
+	    if (!host2addr(host, &sinp->sin_addr, &sinp->sin_family)) {
 		return 0;	/* unknown host */
 	    }
-	    sinp->sin_family = family;
 	    sinp->sin_port = htons(str2port(&str[++i], proto));
 	    return 1;	/* success */
 	}
@@ -1363,7 +1361,6 @@ int gcd(int a, int b) {
 int mkBackup(int argc, int argi, char *argv[]) {
     char *host = NULL;
     int port = -1;
-    sa_family_t family;
     Backup *b = malloc(sizeof(Backup));
     argi++;
     for ( ; argi < argc; argi++) {
@@ -1400,8 +1397,7 @@ int mkBackup(int argc, int argi, char *argv[]) {
 	return argi;
     }
     b->check = b->master;
-    if (host && host2addr(host, &b->check.sin_addr, &family))
-	b->check.sin_family = family;
+    if (host) host2addr(host, &b->check.sin_addr, &b->check.sin_family);
     if (port >= 0) b->check.sin_port = htons(port);
     b->chat = healthChat;
     b->last = 0;
@@ -2195,6 +2191,7 @@ void freePair(Pair *pair) {
 #ifdef USE_SSL
     ssl = pair->ssl;
     if (ssl) {
+	SSL_CTX *ctx = NULL;
 	int state;
 	pair->ssl = NULL;
 	state = SSL_get_shutdown(ssl);
@@ -2207,6 +2204,10 @@ void freePair(Pair *pair) {
 	    SSL_set_shutdown(ssl, (state | SSL_SENT_SHUTDOWN));
 	}
 	SSL_free(ssl);
+	if (pair->stone->proto & proto_ssl_d) {
+	    ctx = pair->stone->ssl_server->ctx;
+	}
+	if (ctx) SSL_CTX_flush_sessions(ctx, time(NULL));
     }
 #endif
     if (ValidSocket(sd)) closesocket(sd);
@@ -3489,16 +3490,14 @@ int addrcache(char *name, struct sockaddr_in *sinp) {
 
 int doproxy(Pair *pair, char *host, int port) {
     struct sockaddr_in sin;
-    sa_family_t family;
     bzero((char *)&sin, sizeof(sin)); /* clear sin struct */
     sin.sin_port = htons((u_short)port);
 #ifdef ADDRCACHE
     if (!addrcache(host, &sin)) return -1;
 #else
-    if (!host2addr(host, &sin.sin_addr, &family)) {
+    if (!host2addr(host, &sin.sin_addr, &sin.sin_family)) {
 	return -1;
     }
-    sin.sin_family = family;
 #endif
     pair->proto &= ~proto_command;
     if (islocalhost(&sin.sin_addr)) {
@@ -4642,7 +4641,9 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 			opts->sid_ctx);
 	    }
 	}
-	SSL_CTX_set_session_cache_mode(ss->ctx, SSL_SESS_CACHE_SERVER);
+	SSL_CTX_set_session_cache_mode(ss->ctx,
+				       (SSL_SESS_CACHE_SERVER
+					   | SSL_SESS_CACHE_NO_AUTO_CLEAR));
     }
     if (opts->keyFile
 	&& !SSL_CTX_use_PrivateKey_file
@@ -4864,7 +4865,6 @@ Stone *mkstone(
     Stone *stonep;
     struct sockaddr_in sin;
     char xhost[STRMAX], *p;
-    sa_family_t family;
     int allow;
     int i;
     stonep = calloc(1, sizeof(Stone)+sizeof(XHost)*nhosts);
@@ -4880,10 +4880,9 @@ Stone *mkstone(
     sin.sin_family = AF_INET;
     sin.sin_port = htons((u_short)port);/* convert to network byte order */
     if (host) {
-	if (!host2addr(host, &sin.sin_addr, &family)) {
+	if (!host2addr(host, &sin.sin_addr, &sin.sin_family)) {
 	    exit(1);
 	}
-	sin.sin_family = family;
     }
     if ((proto & proto_command) == command_proxy
 	|| (proto & proto_command) == command_health) {
@@ -4892,10 +4891,9 @@ Stone *mkstone(
     } else {
 	struct sockaddr_in dsin;
 	LBSet *lbset;
-	if (!host2addr(dhost, &dsin.sin_addr, &family)) {
+	if (!host2addr(dhost, &dsin.sin_addr, &dsin.sin_family)) {
 	    exit(1);
 	}
-	dsin.sin_family = family;
 	dsin.sin_port = htons((u_short)dport);
 	lbset = findLBSet(&dsin, proto);
 	if (lbset) {
