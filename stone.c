@@ -462,11 +462,12 @@ HMTX FdRinMutex, FdWinMutex, FdEinMutex;
 #endif
 
 #ifdef NO_BCOPY
-void bcopy(char *b1, char *b2, int len) {
-    if (b1 < b2 && b2 < b1 + len) {	/* overlapping */
+void bcopy(void *b1, void *b2, int len) {
+    if (b1 < b2 && (char*)b2 < (char*)b1 + len) {	/* overlapping */
 	char *p;
-	b2 = b2 + len - 1;
-	for (p=b1+len-1; b1 <= p; p--, b2--) *b2 = *p;
+	b2 = (char*)b2 + len - 1;
+	for (p=(char*)b1+len-1; (char*)b1 <= p; p--, ((char*)b2)--)
+	    *(char*)b2 = *p;
     } else {
 	memcpy(b2,b1,len);
     }
