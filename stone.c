@@ -2542,10 +2542,27 @@ int dowrite(Pair *pair) {	/* write from buf from pair->start */
 		pair->ssl_flag |= sf_wb_on_r;
 		return 0;	/* EINTR */
 	    }
-	    if (err != SSL_ERROR_ZERO_RETURN) {
+	    if (err == SSL_ERROR_SYSCALL) {
+		unsigned long e = ERR_get_error();
+		if (e == 0) {
+#ifdef WINDOWS
+		    errno = WSAGetLastError();
+#endif
+		    message(priority(pair),
+			    "TCP %d: SSL_write I/O error err=%d, closing",
+			    sd, errno);
+		    message_pair(pair);
+		} else {
+		    message(priority(pair),
+			    "TCP %d: SSL_write I/O %s, closing",
+			    sd, ERR_error_string(e, NULL));
+		    message_pair(pair);
+		}
+		return -1;	/* error */
+	    } else if (err != SSL_ERROR_ZERO_RETURN) {
 		message(priority(pair),
-			"TCP %d: SSL_write error err=%d, closing",
-			sd, err);
+			"TCP %d: SSL_write err=%d %s, closing",
+			sd, err, ERR_error_string(ERR_get_error(), NULL));
 		message_pair(pair);
 		return len;	/* error */
 	    }
@@ -2739,18 +2756,26 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->start */
 		return 0;	/* EINTR */
 	    }
 	    if (err == SSL_ERROR_SYSCALL) {
+		unsigned long e = ERR_get_error();
+		if (e == 0) {
 #ifdef WINDOWS
-		errno = WSAGetLastError();
+		    errno = WSAGetLastError();
 #endif
-		message(priority(pair),
-			"TCP %d: SSL_read I/O error err=%d, closing",
-			sd, errno);
-		message_pair(pair);
+		    message(priority(pair),
+			    "TCP %d: SSL_read I/O error err=%d, closing",
+			    sd, errno);
+		    message_pair(pair);
+		} else {
+		    message(priority(pair),
+			    "TCP %d: SSL_read I/O %s, closing",
+			    sd, ERR_error_string(e, NULL));
+		    message_pair(pair);
+		}
 		return -1;	/* error */
 	    } else if (err != SSL_ERROR_ZERO_RETURN) {
 		message(priority(pair),
-			"TCP %d: SSL_read error err=%d, closing",
-			sd, err);
+			"TCP %d: SSL_read err=%d %s, closing",
+			sd, err, ERR_error_string(ERR_get_error(), NULL));
 		message_pair(pair);
 		return -1;	/* error */
 	    }
