@@ -4203,7 +4203,7 @@ void help(char *com) {
 #ifdef USE_SSL
 	    " | /ssl"
 #endif
-	    " | /http | /base]\n"
+	    " | /http | /base | /ident]\n"
 	    "xhost: <host>[/<mask>]\n"
 #ifdef USE_SSL
 	    "SSL:   default          ; reset to default\n"
