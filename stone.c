@@ -1030,7 +1030,11 @@ Stone *stonep;
     SOCKET dsd;
     int len;
     Origin *origin;
-    if ((len=recvUDP(stonep->sd,&from)) <= 0) return NULL;	/* drop */
+    len = recvUDP(stonep->sd,&from);
+    waitMutex(FdRinMutex);
+    FD_SET(stonep->sd,&rin);
+    freeMutex(FdRinMutex);
+    if (len <= 0) return NULL;	/* drop */
     if (!checkXhost(stonep,&from.sin_addr)) {
 	message(LOG_WARNING,"stone %d: recv UDP denied: from %s:%s",
 		stonep->sd,
