@@ -951,6 +951,9 @@ char *addr2str(struct sockaddr *sa, socklen_t salen,
     if (AddrFlag) flags |= NI_NUMERICHOST;
     err = getnameinfo(sa, salen, str, len, NULL, 0, flags);
     if (err) {
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
 	if (sa->sa_family == AF_INET) {
 	    addr2ip(&((struct sockaddr_in*)sa)->sin_addr, str, len);
 #ifdef AF_INET6
@@ -993,7 +996,10 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
 	} else {
 	    strncpy(str, "???:?", len);
 	}
-	message(LOG_ERR, "Unknown address err=%d errno=%d: %s",
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	message(LOG_ERR, "Unknown node:serv err=%d errno=%d: %s",
 		err, errno, str);
     } else {
 	i = strlen(str);
@@ -1143,13 +1149,16 @@ int host2sa(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp,
     hint.ai_canonname = NULL;
     hint.ai_next = NULL;
     if (Debug > 5) {
-	message(LOG_DEBUG, "getaddrinfo: %s family=%d socktype=%d flags=%d",
-		name, sa->sa_family, hint.ai_socktype, flags);
+	message(LOG_DEBUG, "getaddrinfo: %s:%s family=%d socktype=%d flags=%d",
+		name, serv, sa->sa_family, hint.ai_socktype, flags);
     }
     err = getaddrinfo(name, serv, &hint, &ai);
     if (err != 0) {
-	message(LOG_ERR, "getaddrinfo for %s failed err=%d errno=%d",
-		name, err, errno);
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	message(LOG_ERR, "getaddrinfo for %s:%s failed err=%d errno=%d",
+		name, serv, err, errno);
     fail:
 	if (ai) freeaddrinfo(ai);
 	return 0;
