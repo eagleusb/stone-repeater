@@ -1354,8 +1354,11 @@ struct sockaddr_in *sinp;	/* connect to */
 		if (Debug > 4)
 		    message(LOG_DEBUG,"TCP %d: connect interrupted",pair->sd);
 		return 0;
-	    } else if (errno == EALREADY
-		       || errno == EISCONN || errno == EADDRINUSE) {
+	    } else if (errno == EISCONN || errno == EADDRINUSE
+#ifdef EALREADY
+			|| errno == EALREADY
+#endif
+		) {
 		if (Debug > 4) {	/* SunOS's bug ? */
 		    message(LOG_INFO,"TCP %d: connect bug err=%d",
 			    pair->sd,errno);
