@@ -150,11 +150,10 @@
 
 	(1)	<host>:<port> <sport> [<xhost>...]
 	(2)	<host>:<port> <shost>:<sport> [<xhost>...]
-	(3)	<display> [<xhost>...]
-	(4)	proxy <sport> [<xhost>...]
-	(5)	<host>:<port>/http <request> [<xhost>...]
-	(6)	<host>:<port>/proxy <header> [<xhost>...]
-	(7)	health <sport> [<xhost>...]
+	(3)	proxy <sport> [<xhost>...]
+	(4)	<host>:<port>/http <request> [<xhost>...]
+	(5)	<host>:<port>/proxy <header> [<xhost>...]
+	(6)	health <sport> [<xhost>...]
 
 	stone を実行しているマシンのポート <sport> への接続を、他のマシ
 	ン <host> のポート <port> へ中継します。インタフェースを複数持つ
@@ -162,14 +161,10 @@
 	することにより、特定のインタフェースへの接続のみを転送することが
 	できます。
 
-	(3) は、X プロトコル中継のための省略記法です。ディスプレイ番号 
-	<display> への接続を、環境変数 DISPLAY で指定した X サーバへ転送
-	します。
-
-	(4) は、http proxy です。WWW ブラウザの http proxy の設定で、
+	(3) は、http proxy です。WWW ブラウザの http proxy の設定で、
 	stone を実行しているマシンおよびポート <sport> を指定します。
 
-	(5) は、http リクエストにのせて中継します。<request> は HTTP 1.0 
+	(4) は、http リクエストにのせて中継します。<request> は HTTP 1.0 
 	で規定されるリクエストです。リクエスト文字列中、「\」はエスケー
 	プ文字であり、次のような置き換えが行なわれます。
 
@@ -186,10 +181,10 @@
 			もし \1 (\2 - \9 も同様) の文字列が、空文字列で
 			なければ <then>、空文字列であれば <else>
 
-	(6) は、http リクエストヘッダの先頭に <header> を追加して中継し
-	ます。(5) と同様のエスケープを使うことができます。
+	(5) は、http リクエストヘッダの先頭に <header> を追加して中継し
+	ます。(4) と同様のエスケープを使うことができます。
 
-	(7) は、stone が正常に動作しているか検査するためのポートの指定で
+	(6) は、stone が正常に動作しているか検査するためのポートの指定で
 	す。<sport> で指定したポートに接続して以下のコマンドを送信すると、
 	stone の状態が返されます。
 
@@ -267,10 +262,6 @@
 	outer: ファイアウォールの外側にあるマシン
 	inner: ファイアウォールの内側にあるマシン
 	fwall: ファイアウォール. このマシン上で stone を実行
-
-	stone 7 outer
-		DISPLAY で指定した X server へ X プロトコルを中継
-		outer で DISPLAY=inner:7 と設定して X クライアントを実行
 
 	stone outer:telnet 10023
 		outer へ telnet プロトコルを中継

@@ -156,10 +156,9 @@ HOWTO USE
 
 	(1)	<host>:<port> <sport> [<xhost>...]
 	(2)	<host>:<port> <shost>:<sport> [<xhost>...]
-	(3)	<display> [<xhost>...]
-	(4)	proxy <sport> [<xhost>...]
-	(5)	<host>:<port>/http <request> [<hosts>...]
-	(6)	<host>:<port>/proxy <header> [<hosts>...]
+	(3)	proxy <sport> [<xhost>...]
+	(4)	<host>:<port>/http <request> [<hosts>...]
+	(5)	<host>:<port>/proxy <header> [<hosts>...]
 
 	The program repeats the connection on port ``<sport>'' to the
 	other machine ``<host>'' port ``<port>''.  If the machine, on
@@ -167,15 +166,11 @@ HOWTO USE
 	be used to repeat the connection on the specified interface
 	``<shost>''.
 
-	Type (3) is the abbreviating notation.  The program repeats the
-	connection on display number ``<display>'' to the X server
-	designated by the environment variable ``DISPLAY''.
-
-	Type (4) is a http proxy.  Specify the machine, on which the
+	Type (3) is a http proxy.  Specify the machine, on which the
 	program runs, and port ``<sport>'' in the http proxy settings of
 	your WWW browser.
 
-	Type (5) relays stream over http request.  ``<request>'' is the
+	Type (4) relays stream over http request.  ``<request>'' is the
 	request specified in HTTP 1.0.  In the ``<request>'', ``\'' is
 	the escape character, and the following substitution occurs.
 
@@ -191,7 +186,7 @@ HOWTO USE
 			if \1 (\2 - \9 in a similar way) is not null,
 			<then>, otherwise <else>.
 
-	Type (6) repeats http request with ``<header>'' in the top of
+	Type (5) repeats http request with ``<header>'' in the top of
 	request headers.  The above escapes can be also used.
 
 	If the ``<xhost>'' are used, only machines ``<xhost>'' can
@@ -252,11 +247,6 @@ EXAMPLES
 	outer: a machine in the outside of the firewall
 	inner: a machine in the inside of the firewall
 	fwall: the firewall on which the stone is executed
-
-	stone 7 outer
-		Repeats the X protocol to the machine designated by the
-		environmental variable ``DISPLAY''.  Run X clients under
-		``DISPLAY=inner:7'' on ``outer''.
 
 	stone outer:telnet 10023
 		Repeats the telnet protocol to ``outer''.

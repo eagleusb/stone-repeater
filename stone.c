@@ -31,8 +31,7 @@
  *              [-o <n>] [-g <n>] [-t <dir>] [-z <SSL>] [-D]
  *              [-C <file>] [-P <command>]
  *              <st> [-- <st>]...
- * <st> := <display> [<xhost>...]
- *        | <host>:<port> <sport> [<xhost>...]
+ * <st> :=  <host>:<port> <sport> [<xhost>...]
  *        | proxy <sport> [<xhost>...]
  *        | <host>:<port#>/http <sport> <request> [<xhost>...]
  *        | <host>:<port#>/proxy <sport> <header> [<xhost>...]
@@ -40,7 +39,6 @@
  * <sport> := [<host>:]<port#>[/udp | /ssl | /http]
  * <xhost> := <host>[/<mask>]
  *
- *     Any packets received by <display> are passed to DISPLAY
  *     Any packets received by <sport> are passed to <host>:<port>
  *     as long as these packets are sent from <xhost>...
  *     if <xhost> are not given, any hosts are welcome.
@@ -81,6 +79,7 @@
  * -DNO_THREAD	  without thread
  * -DNO_PID_T	  without pid_t
  * -DNO_FAMILY_T  without sa_family_t
+ * -DNO_SOCKLEN_T without socklen_t
  * -DNO_ADDRINFO  without getaddrinfo
  * -DPTHREAD      use Posix Thread
  * -DPRCTL	  use prctl(2) - operations on a process
@@ -332,7 +331,7 @@ char *CppCommand = CPP;
 char *CppOptions = NULL;
 #endif
 
-#ifdef NO_ADDRINFO
+#ifdef NO_SOCKLEN_T
 typedef int socklen_t;
 #endif
 
@@ -560,8 +559,6 @@ int ConfigArgc = 0;
 int OldConfigArgc = 0;
 char **ConfigArgv = NULL;
 char **OldConfigArgv = NULL;
-char *DispHost;
-int DispPort;
 #ifdef UNIX_DAEMON
 int DaemonMode = 0;
 #endif
@@ -1068,21 +1065,27 @@ void saPort(struct sockaddr *sa, u_short port) {
 }
 
 #ifdef NO_ADDRINFO
-int host2sa(char *name, struct sockaddr *sa, socklen_t *salenp,
+int host2sa(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp,
 	    int *socktypep, int *protocolp, int flags) {
     struct hostent *hp;
     int ntry = NTRY_MAX;
-    struct sockaddr_in *sinp = sa;
+    int port = -1;
+    struct sockaddr_in *sinp = (struct sockaddr_in*)sa;
     struct in_addr *addrp = &sinp->sin_addr;
     if (*salenp < sizeof(struct sockaddr_in)) {
 	message(LOG_ERR, "host2sa: too small salen=%d", *salenp);
 	return 0;	/* too small */
     }
     *salenp = sizeof(struct sockaddr_in);
+    if (!name) {
+	bzero(sa, *salenp);
+	sa->sa_family = AF_INET;
+	goto hostok;
+    }
     if (isdigitaddr(name)) {
 	if ((addrp->s_addr=inet_addr(name)) != -1) {
 	    sa->sa_family = AF_INET;
-	    return 1;
+	    goto hostok;
 	}
     } else {
 	do {
@@ -1090,6 +1093,15 @@ int host2sa(char *name, struct sockaddr *sa, socklen_t *salenp,
 	    if (hp) {
 		bcopy(hp->h_addr, (char *)addrp, hp->h_length);
 		sa->sa_family = hp->h_addrtype;
+	    hostok:
+		if (serv) {
+		    port = str2port(serv, 0);
+		    if (port < 0) {
+			message(LOG_ERR, "Unknown service: %s", serv);
+			return 0;
+		    }
+		    saPort(sa, port);
+		}
 		return 1;
 	    }
 	} while (h_errno == TRY_AGAIN && ntry-- > 0);
@@ -1101,25 +1113,21 @@ int host2sa(char *name, struct sockaddr *sa, socklen_t *salenp,
 int hostPort2sa(char *str, struct sockaddr *sa, socklen_t *salenp, int proto) {
     char host[STRMAX];
     int i;
-    struct sockaddr_in *sinp = sa;
+    struct sockaddr_in *sinp = (struct sockaddr_in*)sa;
     if (*salenp < sizeof(struct sockaddr_in)) return 0;	/* too small */
     *salenp = sizeof(struct sockaddr_in);
     for (i=0; i < STRMAX-1; i++) {
 	if (! str[i]) return 0;	/* illegal format */
 	if (str[i] == ':') {
 	    host[i] = '\0';
-	    if (!host2sa(host, sa, salenp, NULL, NULL)) {
-		return 0;	/* unknown host */
-	    }
-	    saPort(sa, str2port(&str[++i], proto));
-	    return 1;	/* success */
+	    return host2sa(host, &str[++i], sa, salenp, NULL, NULL, 0);
 	}
 	host[i] = str[i];
     }
     return 0;	/* fail */
 }
 #else
-int host2sa(char *name, struct sockaddr *sa, socklen_t *salenp,
+int host2sa(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp,
 	    int *socktypep, int *protocolp, int flags) {
     struct addrinfo *ai = NULL;
     struct addrinfo hint;
@@ -1138,7 +1146,7 @@ int host2sa(char *name, struct sockaddr *sa, socklen_t *salenp,
 	message(LOG_DEBUG, "getaddrinfo: %s family=%d socktype=%d flags=%d",
 		name, sa->sa_family, hint.ai_socktype, flags);
     }
-    err = getaddrinfo(name, NULL, &hint, &ai);
+    err = getaddrinfo(name, serv, &hint, &ai);
     if (err != 0) {
 	message(LOG_ERR, "getaddrinfo for %s failed err=%d errno=%d",
 		name, err, errno);
@@ -1164,9 +1172,7 @@ int hostPort2sa(char *str, struct sockaddr *sa, socklen_t *salenp, int proto) {
     char port[STRMAX];
     int port_pos = 0;
     int ext_pos = 0;
-    struct addrinfo *ai = NULL;
-    struct addrinfo hint;
-    int err;
+    int satype = SOCK_STREAM;
     int i;
     for (i=0; i < STRMAX-1 && str[i]; i++) {
 	host[i] = str[i];
@@ -1183,36 +1189,7 @@ int hostPort2sa(char *str, struct sockaddr *sa, socklen_t *salenp, int proto) {
     if (proto & proto_v6_d) sa->sa_family = AF_INET6; else
 #endif
 	sa->sa_family = AF_INET;
-    hint.ai_flags = 0;
-    hint.ai_family = sa->sa_family;
-    hint.ai_socktype = SOCK_STREAM;
-    hint.ai_protocol = 0;
-    hint.ai_addrlen = 0;
-    hint.ai_addr = NULL;
-    hint.ai_canonname = NULL;
-    hint.ai_next = NULL;
-    if (Debug > 5) {
-	message(LOG_DEBUG, "getaddrinfo: %s:%s family=%d socktype=%d flags=%d",
-		host, port, sa->sa_family, hint.ai_socktype, 0);
-    }
-    err = getaddrinfo(host, port, &hint, &ai);
-    if (err != 0) {
-	message(LOG_ERR, "getaddrinfo for %s:%s failed err=%d errno=%d",
-		host, port, err, errno);
-    fail:
-	if (ai) freeaddrinfo(ai);
-	return 0;
-    }
-    if (ai->ai_addrlen > *salenp) {
-	message(LOG_ERR,
-		"getaddrinfo for %s:%s returns unexpected addr size=%d",
-		host, port, ai->ai_addrlen);
-	goto fail;
-    }
-    *salenp = ai->ai_addrlen;
-    bcopy(ai->ai_addr, sa, *salenp);
-    freeaddrinfo(ai);
-    return 1;
+    return host2sa(host, port, sa, salenp, &satype, NULL, 0);
 }
 #endif
 
@@ -1603,7 +1580,7 @@ int gcd(int a, int b) {
 
 int mkBackup(int argc, int argi, char *argv[]) {
     char *host = NULL;
-    int port = -1;
+    char *port = NULL;
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
     socklen_t salen;
@@ -1615,7 +1592,7 @@ int mkBackup(int argc, int argi, char *argv[]) {
 	if (!strncmp(argv[argi], "host=", 5)) {
 	    host = argv[argi]+5;
 	} else if (!strncmp(argv[argi], "port=", 5)) {
-	    port = str2port(argv[argi]+5, proto_tcp);
+	    port = argv[argi]+5;
 	} else {
 	    break;
 	}
@@ -1666,7 +1643,7 @@ int mkBackup(int argc, int argi, char *argv[]) {
     if (host) {
 	salen = sizeof(ss);
 	sa->sa_family = AF_UNSPEC;
-	if (host2sa(host, sa, &salen, &sstype, &ssproto, 0)) {
+	if (host2sa(host, port, sa, &salen, &sstype, &ssproto, 0)) {
 	    b->check = saDup(sa, salen);
 	    if (!b->check) {
 		free(b->backup);
@@ -1675,8 +1652,7 @@ int mkBackup(int argc, int argi, char *argv[]) {
 		goto memerr;
 	    }
 	}
-    }
-    if (port >= 0) {
+    } else if (port) {
 	if (b->check == b->master) {
 	    b->check = saDup(&b->master->addr, b->master->len);
 	    if (!b->check) {
@@ -1686,7 +1662,7 @@ int mkBackup(int argc, int argi, char *argv[]) {
 		goto memerr;
 	    }
 	}
-	saPort(&b->check->addr, port);
+	saPort(&b->check->addr, str2port(port, proto_tcp));
     }
     b->chat = healthChat;
     b->last = 0;
@@ -3767,11 +3743,25 @@ int doproxy(Pair *pair, char *host, int port) {
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
     socklen_t salen = sizeof(ss);
-    bzero((char *)sa, salen); /* clear sin struct */
-    if (!host2sa(host, sa, &salen, NULL, NULL, 0)) {
+    sa->sa_family = AF_UNSPEC;
+    if (!host2sa(host, NULL, sa, &salen, NULL, NULL, 0)) {
 	return -1;
     }
     saPort(sa, port);
+    if (((pair->stone->proto & proto_v6_d) && sa->sa_family == AF_INET)
+#ifdef AF_INET6
+	|| (!(pair->stone->proto & proto_v6_d) && sa->sa_family == AF_INET6)
+#endif
+	) {
+	SOCKET nsd = socket(sa->sa_family, SOCK_STREAM, 0);
+	if (ValidSocket(nsd)) {
+	    SOCKET sd = pair->sd;
+	    pair->sd = nsd;
+	    message(LOG_INFO, "stone %d: close %d, reopen %d as family=%d",
+		    pair->stone->sd, sd, nsd, sa->sa_family);
+	    closesocket(sd);
+	}
+    }
     pair->proto &= ~proto_command;
     if (islocalhost(sa)) {
 	TimeLog *log = pair->log;
@@ -5131,9 +5121,9 @@ int reusestone(Stone *stone) {
 /* make stone */
 Stone *mkstone(
     char *dhost,	/* destination hostname */
-    int dport,		/* destination port (host byte order) */
+    char *dserv,	/* destination port */
     char *host,		/* listening host */
-    int port,		/* listening port (host byte order) */
+    char *serv,		/* listening port */
     int nhosts,		/* # of hosts to permit */
     char *hosts[],	/* hosts to permit */
     int proto) {	/* UDP/TCP/SSL */
@@ -5166,9 +5156,7 @@ Stone *mkstone(
     }
     stonep->p = NULL;
     stonep->nhosts = nhosts;
-    stonep->port = port;
     stonep->timeout = PairTimeOut;
-    bzero(sa, salen);
     if (proto & proto_udp) {
 	satype = SOCK_DGRAM;
 	saproto = IPPROTO_UDP;
@@ -5180,19 +5168,20 @@ Stone *mkstone(
     if (proto & proto_v6_s) {
 	struct sockaddr_in6 *sin6p = (struct sockaddr_in6*)sa;
 	sin6p->sin6_family = AF_INET6;
-	if (host && !host2sa(host, sa, &salen,
-			     &satype, &saproto, AI_PASSIVE)) exit(1);
+	if (!host2sa(host, serv, sa, &salen, &satype, &saproto, AI_PASSIVE))
+	    exit(1);
 	safamily = sin6p->sin6_family;
+	stonep->port = ntohs(sin6p->sin6_port);
     } else
 #endif
     {
 	struct sockaddr_in *sinp = (struct sockaddr_in*)sa;
 	sinp->sin_family = AF_INET;
-	if (host && !host2sa(host, sa, &salen,
-			     &satype, &saproto, AI_PASSIVE)) exit(1);
+	if (!host2sa(host, serv, sa, &salen, &satype, &saproto, AI_PASSIVE))
+	    exit(1);
 	safamily = sinp->sin_family;
+	stonep->port = ntohs(sinp->sin_port);
     }
-    saPort(sa, port);
     if ((proto & proto_command) == command_proxy
 	|| (proto & proto_command) == command_health) {
 	stonep->ndsts = 1;
@@ -5209,10 +5198,9 @@ Stone *mkstone(
 	else
 #endif
 	    dsa->sa_family = AF_INET;
-	if (!host2sa(dhost, dsa, &dsalen, NULL, NULL, 0)) {
+	if (!host2sa(dhost, dserv, dsa, &dsalen, NULL, NULL, 0)) {
 	    exit(1);
 	}
-	saPort(dsa, dport);
 	lbset = findLBSet(dsa, proto);
 	if (lbset) {
 	    stonep->ndsts = lbset->ndsts;
@@ -5259,7 +5247,7 @@ Stone *mkstone(
 #ifndef NO_FORK
 	    fcntl(stonep->sd, F_SETFL, O_NONBLOCK);
 #endif
-	    if (port == 0) {
+	    if (stonep->port == 0) {
 		salen = sizeof(ss);
 		getsockname(stonep->sd, sa, &salen);
 	    }
@@ -5341,7 +5329,7 @@ Stone *mkstone(
 	    struct sockaddr_in sin;
 	    int len = sizeof(sin);
 	    sin.sin_family = AF_INET;
-	    if (!host2sa(xhost, (struct sockaddr*)&sin, &len,
+	    if (!host2sa(xhost, NULL, (struct sockaddr*)&sin, &len,
 			 NULL, NULL, 0)) exit(1);
 	    xhosts[i].addr = sin.sin_addr;
 	} else {
@@ -5349,7 +5337,7 @@ Stone *mkstone(
 	    struct sockaddr_in6 sin6;
 	    int len = sizeof(sin6);
 	    sin6.sin6_family = AF_INET6;
-	    if (!host2sa(xhost, (struct sockaddr*)&sin6, &len,
+	    if (!host2sa(xhost, NULL, (struct sockaddr*)&sin6, &len,
 			 NULL, NULL, 0)) exit(1);
 	    xhosts6[i].addr = sin6.sin6_addr;
 #else
@@ -5492,8 +5480,7 @@ void help(char *com) {
 	    "      -q <SSL>          ; SSL client option\n"
 	    "      -z <SSL>          ; SSL server option\n"
 #endif
-	    "stone: <display> [<xhost>...]\n"
-	    "       <host>:<port> <sport> [<xhost>...]\n"
+	    "stone: <host>:<port> <sport> [<xhost>...]\n"
 	    "       proxy <sport> [<xhost>...]\n"
 	    "       <host>:<port#>/http <sport> <Request-Line> [<xhost>...]\n"
 	    "       <host>:<port#>/proxy <sport> <header> [<xhost>...]\n"
@@ -5765,9 +5752,8 @@ void getconfig(void) {
 #endif
 }
 
-int getdist(
+int getdist(	/* return pos where serv begins */
     char *p,
-    int *portp,	/* host byte order */
     int *protop) {
     char *port_str, *proto_str, *top;
     top = p;
@@ -5827,31 +5813,19 @@ int getdist(
     }
     if (port_str) {
 	*(port_str-1) = '\0';
-	*portp = str2port(port_str, *protop);
-	if (*portp < 0) {
-	    message(LOG_ERR, "Unknown service: %s", port_str);
-	    exit(1);
-	}
-	return 1;
+	return port_str - top;	/* host & serv */
     } else {
 	if (!strcmp(top, "proxy")) {
 	    *protop &= ~proto_command;
 	    *protop |= command_proxy;
-	    *portp = 0;
-	    return 1;
+	    return 1;	/* host only */
 	}
 	if (!strcmp(top, "health")) {
 	    *protop &= ~proto_command;
 	    *protop |= command_health;
-	    *portp = 0;
-	    return 1;
+	    return 1;	/* host only */
 	}
-	*portp = str2port(top, *protop);
-	if (*portp < 0) {
-	    message(LOG_ERR, "Unknown service: %s", top);
-	    exit(1);
-	}
-	return 0;	/* no hostname */
+	return 0;	/* serv only */
     }
 }
 
@@ -6134,7 +6108,7 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	    struct sockaddr *sa = (struct sockaddr*)&ss;
 	    socklen_t salen = sizeof(ss);
 	    sa->sa_family = AF_UNSPEC;
-	    if (!host2sa(argv[argi], sa, &salen, NULL, NULL, 0)) {
+	    if (!host2sa(argv[argi], NULL, sa, &salen, NULL, NULL, 0)) {
 		return -1;
 	    }
 	    ConnectFrom = saDup(sa, salen);
@@ -6216,7 +6190,7 @@ int doopts(int argc, char *argv[]) {
 void doargs(int argc, int i, char *argv[]) {
     Stone *stone;
     char *host, *shost;
-    int port, sport;
+    char *serv, *sserv;
     int proto, sproto, dproto;
     char *p;
     int j, k;
@@ -6238,22 +6212,19 @@ void doargs(int argc, int i, char *argv[]) {
 	    }
 	    continue;
 	}
-	j = getdist(argv[i], &port, &dproto);
+	j = getdist(argv[i], &dproto);
 	if (j > 0) {	/* with hostname */
 	    host = argv[i++];
+	    if (j > 1) serv = host + j; else serv = NULL;
 	    if (argc <= i) help(argv[0]);
-	    j = getdist(argv[i], &sport, &sproto);
+	    j = getdist(argv[i], &sproto);
 	    if (j > 0) {
 		shost = argv[i];
+		if (j > 1) sserv = shost + j; else sserv = NULL;
 	    } else if (j == 0) {
 		shost = NULL;
+		sserv = argv[i];
 	    } else help(argv[0]);
-	} else if (j == 0 && DispHost != NULL) {
-	    shost = NULL;	/* without hostname i.e. Display Number */
-	    sport = port+XPORT;
-	    host = DispHost;
-	    port = DispPort;
-	    dproto = proto_tcp;
 	} else help(argv[0]);
 	i++;
 	j = 0;
@@ -6295,7 +6266,7 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (dproto & proto_base) proto |= proto_base_d;
 	    if (dproto & proto_nobackup) proto |= proto_nobackup;
 	}
-	stone = mkstone(host, port, shost, sport, j, &argv[k], proto);
+	stone = mkstone(host, serv, shost, sserv, j, &argv[k], proto);
 	if (proto & proto_ohttp_d) {
 	    stone->p = strdup(p);
 	} else if ((proto & proto_command) == command_ihead) {
@@ -6464,7 +6435,7 @@ void daemonize(void) {
 
 void initialize(int argc, char *argv[]) {
     int i, j;
-    char display[256], *p;
+    char *p;
     int proto;
 #ifdef WINDOWS
     WSADATA WSAData;
@@ -6477,29 +6448,6 @@ void initialize(int argc, char *argv[]) {
     MyPid = getpid();
     LogFp = stderr;
     setbuf(stderr, NULL);
-    DispHost = NULL;
-    p = getenv("DISPLAY");
-    if (p) {
-	if (*p == ':') {
-	    sprintf(display, "localhost%s", p);
-	} else {
-	    strcpy(display, p);
-	}
-	i = 0;
-	for (p=display; *p; p++) {
-	    if (*p == ':') i = 1;
-	    else if (i && *p == '.') {
-		*p = '\0';
-		break;
-	    }
-	}
-	if (getdist(display, &DispPort, &proto) > 0) {
-	    DispHost = display;
-	    DispPort += XPORT;
-	} else {
-	    message(LOG_ERR, "Illegal DISPLAY: %s", p);
-	}
-    }
 #ifdef USE_SSL
     OpenSSL_add_all_algorithms();
     SSL_load_error_strings();
