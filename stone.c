@@ -497,6 +497,8 @@ const int proto_base_d =	0x20000000;	/*        destination */
 #define proto_dest	(proto_tcp|proto_udp|proto_first_r|proto_first_w|\
 			 proto_ohttp_d|proto_base_d|\
 			 proto_command)
+#define proto_stone_s	(proto_src|proto_v6_s|proto_ssl_s|proto_ident)
+#define proto_stone_d	(proto_dest|proto_v6_d|proto_ssl_d|proto_nobackup)
 #define proto_all	(proto_src|proto_dest)
 
 #ifdef USE_SSL
@@ -789,7 +791,8 @@ char *addr2ip6(struct in6_addr *addr, char *str, int len) {
     u_short *s;
     s = (u_short*)addr;
     snprintf(str, len-1, "%x:%x:%x:%x:%x:%x:%x:%x",
-	     s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
+	     htons(s[0]), htons(s[1]), htons(s[2]), htons(s[3]),
+	     htons(s[4]), htons(s[5]), htons(s[6]), htons(s[7]));
     str[len-1] = '\0';
     return str;
 }
@@ -816,11 +819,29 @@ char *ext2str(int flag, int mask, char *str, int len) {
 	strncpy(str+i, "ssl", len-i);
 	i += 3;
     }
+    if (flag & proto_v6 & mask) {
+	if (i < len) str[i++] = sep;
+	sep = ',';
+	strncpy(str+i, "v6", len-i);
+	i += 2;
+    }
     if (flag & proto_base & mask) {
 	if (i < len) str[i++] = sep;
 	sep = ',';
 	strncpy(str+i, "base", len-i);
 	i += 4;
+    }
+    if (flag & proto_ident & mask) {
+	if (i < len) str[i++] = sep;
+	sep = ',';
+	strncpy(str+i, "ident", len-i);
+	i += 5;
+    }
+    if (flag & proto_nobackup & mask) {
+	if (i < len) str[i++] = sep;
+	sep = ',';
+	strncpy(str+i, "nobackup", len-i);
+	i += 8;
     }
     switch(flag & proto_command & mask) {
     case command_ihead:
@@ -912,7 +933,7 @@ char *addr2str(void *sa, socklen_t salen, char *str, int len, int flags) {
 	} else if (((struct sockaddr*)sa)->sa_family == AF_INET6) {
 	    addr2ip6(&((struct sockaddr_in6*)sa)->sin6_addr, str, len);
 	} else {
-	    strncpy(str, "???:?", len);
+	    strncpy(str, "???", len);
 	}
 	message(LOG_ERR, "Unknown address err=%d errno=%d: %s",
 		err, errno, str);
@@ -925,6 +946,7 @@ char *addrport2str(void *sa, socklen_t salen,
     char serv[STRMAX];
     int flags = 0;
     int err;
+    int i;
     if (!str || len <= 1) return "";
     str[len-1] = '\0';
     if (AddrFlag) flags = (NI_NUMERICHOST | NI_NUMERICSERV);
@@ -934,15 +956,25 @@ char *addrport2str(void *sa, socklen_t salen,
     if (err) {
 	if (((struct sockaddr*)sa)->sa_family == AF_INET) {
 	    addr2ip(&((struct sockaddr_in*)sa)->sin_addr, str, len);
+	    i = strlen(str);
+	    snprintf(str+i, len-i-5, ":%d",
+		     ntohs(((struct sockaddr_in*)sa)->sin_port));
+	} else if (((struct sockaddr*)sa)->sa_family == AF_INET6) {
+	    addr2ip6(&((struct sockaddr_in6*)sa)->sin6_addr, str, len);
+	    i = strlen(str);
+	    snprintf(str+i, len-i-5, ":%d",
+		     ntohs(((struct sockaddr_in6*)sa)->sin6_port));
 	} else {
 	    strncpy(str, "???:?", len);
 	}
 	message(LOG_ERR, "Unknown address err=%d errno=%d: %s",
 		err, errno, str);
     } else {
-	int i = strlen(str);
+	i = strlen(str);
 	snprintf(str+i, len-i, ":%s", serv);
     }
+    i = strlen(str);
+    ext2str(flag, mask, str+i, len-i);
     return str;
 }
 #endif
@@ -1884,7 +1916,7 @@ void asyncUDP(Stone *stonep) {
     if (len <= 0) goto end;	/* drop */
     if (!checkXhost(stonep, (struct sockaddr*)&from, fromlen, NULL)) {
 	addrport2str(&from, sizeof(from),
-		     stonep->proto, proto_src, addrport, STRMAX);
+		     stonep->proto, proto_stone_s, addrport, STRMAX);
 	message(LOG_WARNING, "stone %d: recv UDP denied: from %s",
 		stonep->sd, addrport);
 	goto end;
@@ -2785,7 +2817,7 @@ Pair *doaccept(Stone *stonep) {
 	ident[0] = '\0';
     }
     addrport2str(&from, fromlen,
-		 stonep->proto, proto_src, fromstr+len, STRMAX*2-len);
+		 stonep->proto, proto_stone_s, fromstr+len, STRMAX*2-len);
     if (!checkXhost(stonep, (struct sockaddr*)&from, fromlen, ident)) {
 	message(LOG_WARNING, "stone %d: access denied: from %s",
 		stonep->sd, fromstr);
@@ -4935,8 +4967,10 @@ Stone *mkstone(
     bzero((char *)&ss, sizeof(ss)); /* clear ss struct */
     if (proto & proto_udp) {
 	sstype = SOCK_DGRAM;
+	ssproto = IPPROTO_UDP;
     } else {
 	sstype = SOCK_STREAM;
+	ssproto = IPPROTO_TCP;
     }
     if (proto & proto_v6_s) {
 	struct sockaddr_in6 *sin6p = (struct sockaddr_in6*)&ss;
@@ -5102,7 +5136,7 @@ Stone *mkstone(
 	    } else {
 		char addrport[STRMAX];
 		addrport2str(stonep->sins, sizeof(stonep->sins[0]),
-			     stonep->proto, proto_dest, addrport, STRMAX);
+			     stonep->proto, proto_stone_d, addrport, STRMAX);
 		message(LOG_DEBUG,
 			"stone %d: %s %s (mask %x) to connecting to %s",
 			stonep->sd,
@@ -5113,7 +5147,7 @@ Stone *mkstone(
 	    }
 	}
     }
-    addrport2str(&ss, sslen, stonep->proto, proto_src, xhost, STRMAX);
+    addrport2str(&ss, sslen, stonep->proto, proto_stone_s, xhost, STRMAX);
     if ((proto & proto_command) == command_proxy) {
 	message(LOG_INFO, "stone %d: proxy <- %s",
 		stonep->sd,
@@ -5125,7 +5159,7 @@ Stone *mkstone(
     } else {
 	char addrport[STRMAX];
 	addrport2str(stonep->sins, sizeof(stonep->sins[0]),
-		     stonep->proto, proto_dest, addrport, STRMAX),
+		     stonep->proto, proto_stone_d, addrport, STRMAX),
 	message(LOG_INFO, "stone %d: %s <- %s",
 		stonep->sd, addrport, xhost);
     }
