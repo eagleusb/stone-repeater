@@ -3561,7 +3561,7 @@ Stone *mkstone(
 		struct sockaddr_in s;
 		s = stonep->sin;
 		if (i > 0) s.sin_addr.s_addr
-			       = htonl(ntohl(s.sin_addr.s_addr + i));
+			       = htonl(ntohl(s.sin_addr.s_addr) + i);
 		stonep->backups[i] = findBackup(&s, stonep->proto);
 	    }
 	}
