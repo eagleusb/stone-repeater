@@ -2548,6 +2548,12 @@ int dowrite(Pair *pair) {	/* write from buf from pair->start */
 #ifdef WINDOWS
 		    errno = WSAGetLastError();
 #endif
+		    if (errno == EINTR) {
+			if (Debug > 4)
+			    message(LOG_DEBUG,
+				    "TCP %d: SSL_write I/O interrupted", sd);
+			return 0;
+		    }
 		    message(priority(pair),
 			    "TCP %d: SSL_write I/O error err=%d, closing",
 			    sd, errno);
@@ -2761,6 +2767,12 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->start */
 #ifdef WINDOWS
 		    errno = WSAGetLastError();
 #endif
+		    if (errno == EINTR) {
+			if (Debug > 4)
+			    message(LOG_DEBUG,
+				    "TCP %d: SSL_read I/O interrupted", sd);
+			return 0;
+		    }
 		    message(priority(pair),
 			    "TCP %d: SSL_read I/O error err=%d, closing",
 			    sd, errno);
