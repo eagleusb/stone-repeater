@@ -2363,6 +2363,9 @@ void asyncConn(Conn *conn) {
     if (ret < 0) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
+#ifndef EINPROGRESS
+#define EINPROGRESS	WSAEINPROGRESS
+#endif
 #endif
 	if (errno == EINPROGRESS) {
 	    p1->proto |= proto_conninprog;
