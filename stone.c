@@ -1834,6 +1834,11 @@ void asyncConn(Conn *conn) {
 	    ASYNC_END;
 	    return;
 	}
+#ifdef USE_SSL
+	if (p2->proto & proto_ssl_intr)
+	    message(LOG_ERR, "TCP %d: SSL_accept timeout", p2->sd);
+	else
+#endif
 	message(LOG_ERR, "TCP %d: connect timeout to %s:%s",
 		p2->sd,
 		addr2str(&conn->sin.sin_addr),
