@@ -248,7 +248,8 @@ int FdSetBug = 0;
 #define BACKLOG_MAX	50
 #define XPORT		6000
 #define BUFMAX		2048
-#define STRMAX		128	/* > 38 */
+#define LONGSTRMAX	1024
+#define STRMAX		127	/* > 38 */
 #define CONN_TIMEOUT	60	/* 1 min */
 #define CACHE_TIMEOUT	180	/* 3 min */
 #define HASHMAX		181
@@ -538,7 +539,7 @@ int pkt_len_max = PKT_LEN_INI;	/* size of UDP packet buffer */
 int AddrFlag = 0;
 #ifndef NO_SYSLOG
 int Syslog = 0;
-char SyslogName[STRMAX];
+char SyslogName[STRMAX+1];
 #endif
 FILE *LogFp = NULL;
 char *LogFileName = NULL;
@@ -662,7 +663,7 @@ char *strntime(char *str, int len, time_t *clock) {
 }
 
 void message(int pri, char *fmt, ...) {
-    char str[BUFMAX+1];
+    char str[LONGSTRMAX+1];
     int pos = 0;
     va_list ap;
 #ifndef NO_SYSLOG
@@ -671,12 +672,14 @@ void message(int pri, char *fmt, ...) {
     {
 	time_t clock;
 	time(&clock);
-	strntime(str+pos, BUFMAX-pos, &clock);
+	strntime(str+pos, LONGSTRMAX-pos, &clock);
+	str[LONGSTRMAX] = '\0';
 	pos = strlen(str);
     }
     va_start(ap, fmt);
-    vsnprintf(str+pos, BUFMAX-pos, fmt, ap);
+    vsnprintf(str+pos, LONGSTRMAX-pos, fmt, ap);
     va_end(ap);
+    str[LONGSTRMAX] = '\0';
 #ifndef NO_SYSLOG
     if (Syslog) {
 	if (Syslog == 1
@@ -707,7 +710,7 @@ void message(int pri, char *fmt, ...) {
 
 void message_time(Pair *pair, int pri, char *fmt, ...) {
     va_list ap;
-    char str[BUFMAX];
+    char str[LONGSTRMAX+1];
     TimeLog *log;
     log = pair->log;
     if (log) {
@@ -715,8 +718,9 @@ void message_time(Pair *pair, int pri, char *fmt, ...) {
 	free(log);
     }
     va_start(ap, fmt);
-    vsnprintf(str, BUFMAX-1, fmt, ap);
+    vsnprintf(str, LONGSTRMAX, fmt, ap);
     va_end(ap);
+    str[LONGSTRMAX] = '\0';
     log = (TimeLog*)malloc(sizeof(TimeLog)+strlen(str)+1);
     if (log) {
 	time(&log->clock);
@@ -736,7 +740,7 @@ int priority(Pair *pair) {
 }
 
 void packet_dump(char *head, char *buf, int len) {
-    char line[BUFMAX];
+    char line[LONGSTRMAX+1];
     int i, j, k, l;
     int nb = 8;
     k = 0;
@@ -745,7 +749,7 @@ void packet_dump(char *head, char *buf, int len) {
 	    nb = 16;
 	    l = 0;
 	    line[l++] = ' ';
-	    for (j=0; k <= j/10 && i+j < len && l < BUFMAX-10; j++) {
+	    for (j=0; k <= j/10 && i+j < len && l < LONGSTRMAX-10; j++) {
 		if (' ' <= buf[i+j] && buf[i+j] <= '~')
 		    line[l++] = buf[i+j];
 		else {
@@ -793,20 +797,24 @@ char *addr2ip(struct in_addr *addr, char *str, int len) {
 	u_long	l;
 	unsigned char	c[4];
     } u;
-    u.l = addr->s_addr;
-    snprintf(str, len-1, "%d.%d.%d.%d", u.c[0], u.c[1], u.c[2], u.c[3]);
-    str[len-1] = '\0';
+    if (len >= 1) {
+	u.l = addr->s_addr;
+	snprintf(str, len-1, "%d.%d.%d.%d", u.c[0], u.c[1], u.c[2], u.c[3]);
+	str[len-1] = '\0';
+    }
     return str;
 }
 
 #ifdef AF_INET6
 char *addr2ip6(struct in6_addr *addr, char *str, int len) {
     u_short *s;
-    s = (u_short*)addr;
-    snprintf(str, len-1, "%x:%x:%x:%x:%x:%x:%x:%x",
-	     htons(s[0]), htons(s[1]), htons(s[2]), htons(s[3]),
-	     htons(s[4]), htons(s[5]), htons(s[6]), htons(s[7]));
-    str[len-1] = '\0';
+    if (len >= 1) {
+	s = (u_short*)addr;
+	snprintf(str, len-1, "%x:%x:%x:%x:%x:%x:%x:%x",
+		 htons(s[0]), htons(s[1]), htons(s[2]), htons(s[3]),
+		 htons(s[4]), htons(s[5]), htons(s[6]), htons(s[7]));
+	str[len-1] = '\0';
+    }
     return str;
 }
 #endif
@@ -979,6 +987,7 @@ char *addr2str(struct sockaddr *sa, socklen_t salen,
 	errno = WSAGetLastError();
 #endif
 	addr2numeric(sa, str, len);
+	if (len >= 1) str[len-1] = '\0';
 	message(LOG_ERR, "Unknown address err=%d errno=%d: %s",
 		err, errno, str);
     }
@@ -987,7 +996,7 @@ char *addr2str(struct sockaddr *sa, socklen_t salen,
 
 char *addrport2str(struct sockaddr *sa, socklen_t salen,
 		   int proto, int mask, char *str, int len, int flags) {
-    char serv[STRMAX];
+    char serv[STRMAX+1];
     int err;
     int i;
     if (!str || len <= 1) return "";
@@ -996,9 +1005,10 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
     else if (proto & proto_udp) flags |= NI_DGRAM;
     if (!(flags & NI_NUMERICHOST) && islocalhost(sa)) flags |= NI_NUMERICHOST;
     if (Debug > 10) {
+	addr2numeric(sa, serv, STRMAX);
+	serv[STRMAX] = '\0';
 	message(LOG_DEBUG, "getnameinfo: %s family=%d len=%d flags=%d",
-		addr2numeric(sa, serv, STRMAX),
-		sa->sa_family, salen, flags);
+		serv, sa->sa_family, salen, flags);
     }
     err = getnameinfo(sa, salen, str, len, serv, STRMAX, flags);
     if (err == EAI_NODATA && !(flags & NI_NUMERICSERV)) {
@@ -1149,12 +1159,12 @@ int host2sa(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp,
 }
 
 int hostPort2sa(char *str, struct sockaddr *sa, socklen_t *salenp, int proto) {
-    char host[STRMAX];
+    char host[STRMAX+1];
     int i;
     struct sockaddr_in *sinp = (struct sockaddr_in*)sa;
     if (*salenp < sizeof(struct sockaddr_in)) return 0;	/* too small */
     *salenp = sizeof(struct sockaddr_in);
-    for (i=0; i < STRMAX-1; i++) {
+    for (i=0; i < STRMAX; i++) {
 	if (! str[i]) return 0;	/* illegal format */
 	if (str[i] == ':') {
 	    host[i] = '\0';
@@ -1211,13 +1221,13 @@ int host2sa(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp,
 }
 
 int hostPort2sa(char *str, struct sockaddr *sa, socklen_t *salenp, int proto) {
-    char host[STRMAX];
-    char port[STRMAX];
+    char host[STRMAX+1];
+    char port[STRMAX+1];
     int port_pos = 0;
     int ext_pos = 0;
     int satype = SOCK_STREAM;
     int i;
-    for (i=0; i < STRMAX-1 && str[i]; i++) {
+    for (i=0; i < STRMAX && str[i]; i++) {
 	host[i] = str[i];
 	port[i-port_pos] = str[i];
 	if (str[i] == ':') port_pos = i+1;
@@ -1433,7 +1443,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 		int proto, int timeout, Chat *chat) {
     SOCKET sd;
     int ret;
-    char addrport[STRMAX];
+    char addrport[STRMAX+1];
 #ifdef WINDOWS
     u_long param;
 #endif
@@ -1449,6 +1459,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 	return 1;	/* I can't tell the master is healthy or not */
     }
     addrport2str(sa, salen, proto, proto_pair_d, addrport, STRMAX, 0);
+    addrport[STRMAX] = '\0';
 #ifdef WINDOWS
     param = 1;
     ioctlsocket(sd, FIONBIO, &param);
@@ -1483,7 +1494,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
     time(&now);
     if (now - start >= timeout) goto timeout;
     while (chat) {
-	char buf[BUFMAX+1];
+	char buf[BUFMAX];
 	int len;
 	int err;
 	ret = send(sd, chat->send, chat->len, 0);
@@ -1507,7 +1518,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 		FD_ZERO(&rout);
 		FdSet(sd, &rout);
 	    } while (select(FD_SETSIZE, &rout, NULL, NULL, &tv) == 0);
-	    ret = recv(sd, buf+len, BUFMAX-len, 0);
+	    ret = recv(sd, buf+len, BUFMAX-1-len, 0);
 	    if (ret < 0) {
 #ifdef WINDOWS
 		errno = WSAGetLastError();
@@ -1551,12 +1562,13 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 
 void asyncHealthCheck(Backup *b) {
     time_t now;
-    char addrport[STRMAX];
+    char addrport[STRMAX+1];
     ASYNC_BEGIN;
     time(&now);
     b->last = now + 60 * 60;	/* suppress further check */
     addrport2str(&b->check->addr, b->check->len,
 		 b->proto, proto_pair_d, addrport, STRMAX, 0);
+    addrport[STRMAX] = '\0';
     if (Debug > 8)
 	message(LOG_DEBUG, "asyncHealthCheck %s", addrport);
     if (healthCheck(&b->check->addr, b->check->len,
@@ -1594,12 +1606,14 @@ Backup *findBackup(struct sockaddr *sa, int proto) {
 	if (saComp(sa, &b->master->addr)
 	    && (b->proto & proto)) {	/* found */
 	    if (Debug > 1) {
-		char mhostport[STRMAX];
-		char bhostport[STRMAX];
+		char mhostport[STRMAX+1];
+		char bhostport[STRMAX+1];
 		addrport2str(&b->master->addr, b->master->len,
 			     b->proto, proto_pair_d, mhostport, STRMAX, 0);
+		mhostport[STRMAX] = '\0';
 		addrport2str(&b->backup->addr, b->backup->len,
 			     b->proto, proto_pair_d, bhostport, STRMAX, 0);
+		bhostport[STRMAX] = '\0';
 		message(LOG_DEBUG, "master %s backup %s interval %d",
 			mhostport, bhostport, b->interval);
 	    }
@@ -1744,7 +1758,7 @@ char *str2bin(char *p, int *lenp) {
     char buf[BUFMAX];
     char c;
     int i = 0;
-    while ((c=*p++)) {
+    while ((c=*p++) && i < BUFMAX-5) {
 	if (c == '\\') {
 	    c = *p++;
 	    switch(c) {
@@ -1809,16 +1823,17 @@ LBSet *findLBSet(struct sockaddr *sa, int proto) {
 	if (saComp(&s->dsts[0]->addr, sa)
 	    && (s->proto & proto)) {	/* found */
 	    if (Debug > 1) {
-		char buf[BUFMAX];
+		char buf[LONGSTRMAX+1];
 		int len;
 		int i;
+		buf[LONGSTRMAX] = '\0';
 		strcpy(buf, "LB set:");
 		len = strlen(buf);
-		for (i=0; i < s->ndsts; i++) {
+		for (i=0; i < s->ndsts && len < LONGSTRMAX-2; i++) {
 		    buf[len++] = ' ';
 		    addrport2str(&s->dsts[i]->addr, s->dsts[i]->len,
 				 s->proto, proto_pair_d,
-				 buf+len, BUFMAX-len, 0);
+				 buf+len, LONGSTRMAX-1-len, 0);
 		    len += strlen(buf+len);
 		}
 		message(LOG_DEBUG, "%s", buf);
@@ -1879,8 +1894,9 @@ void message_origin(int pri, Origin *origin) {
     SOCKET sd;
     Stone *stone;
     int i;
-    char str[BUFMAX];
-    strntime(str, BUFMAX, &origin->clock);
+    char str[LONGSTRMAX+1];
+    str[LONGSTRMAX] = '\0';
+    strntime(str, LONGSTRMAX, &origin->clock);
     i = strlen(str);
     if (ValidSocket(origin->sd)) {
 	if (getsockname(origin->sd, name, &namelen) < 0) {
@@ -1892,18 +1908,19 @@ void message_origin(int pri, Origin *origin) {
 			origin->sd, errno);
 	} else {
 	    addrport2str(name, namelen, proto_udp, proto_udp,
-			 str+i, BUFMAX-i, 0),
+			 str+i, LONGSTRMAX-i, 0),
 	    i = strlen(str);
-	    if (i < BUFMAX-2) str[i++] = ' ';
+	    if (i < LONGSTRMAX-2) str[i++] = ' ';
 	}
     }
-    if (i >= BUFMAX) i = BUFMAX-1;
+    if (i > LONGSTRMAX) i = LONGSTRMAX;
     str[i] = '\0';
     stone = origin->stone;
     if (stone) sd = stone->sd;
     else sd = INVALID_SOCKET;
     addrport2str(&origin->from->addr, origin->from->len,
 		 proto_udp, proto_udp, str+i, STRMAX-i, 0);
+    str[STRMAX] = '\0';
     message(pri, "UDP%3d:%3d %s", origin->sd, sd, str);
 }
 
@@ -1911,7 +1928,7 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
 		   char *pkt_buf) {
     struct sockaddr_storage ss;
     int fromlen, pkt_len;
-    char addrport[STRMAX];
+    char addrport[STRMAX+1];
     if (!from) {
 	from = (struct sockaddr*)&ss;
 	fromlen = sizeof(ss);
@@ -1927,6 +1944,7 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
     }
     if (fromlenp) *fromlenp = fromlen;
     addrport2str(from, fromlen, proto_udp, proto_udp, addrport, STRMAX, 0);
+    addrport[STRMAX] = '\0';
     if (Debug > 4)
 	message(LOG_DEBUG, "UDP %d: %d bytes received from %s",
 		sd, pkt_len, addrport);
@@ -1941,8 +1959,9 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
 
 static int sendUDP(SOCKET sd, struct sockaddr *sa, socklen_t salen,
 		   int len, char *pkt_buf) {
-    char addrport[STRMAX];
+    char addrport[STRMAX+1];
     addrport2str(sa, salen, proto_udp, proto_udp, addrport, STRMAX, 0);
+    addrport[STRMAX] = '\0';
     if (sendto(sd, pkt_buf, len, 0, sa, salen) != len) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -1955,8 +1974,9 @@ static int sendUDP(SOCKET sd, struct sockaddr *sa, socklen_t salen,
 	message(LOG_DEBUG, "UDP %d: %d bytes sent to %s",
 		sd, len, addrport);
     if (PacketDump > 0) {
-	char head[STRMAX];
-	snprintf(head, STRMAX-1, "UDP %d:", sd);
+	char head[STRMAX+1];
+	snprintf(head, STRMAX, "UDP %d:", sd);
+	head[STRMAX] = '\0';
 	packet_dump(head, pkt_buf, len);
     }
     return len;
@@ -2133,7 +2153,7 @@ void asyncUDP(Stone *stonep) {
     SOCKET dsd;
     int len;
     Origin *origin;
-    char addrport[STRMAX];
+    char addrport[STRMAX+1];
     char *pkt_buf;
     ASYNC_BEGIN;
     if (Debug > 8) message(LOG_DEBUG, "asyncUDP");
@@ -2151,6 +2171,7 @@ void asyncUDP(Stone *stonep) {
     if (!checkXhost(stonep, from, fromlen, NULL)) {
 	addrport2str(from, fromlen,
 		     stonep->proto, proto_stone_s, addrport, STRMAX, 0);
+	addrport[STRMAX] = '\0';
 	message(LOG_WARNING, "stone %d: recv UDP denied: from %s",
 		stonep->sd, addrport);
 	goto end;
@@ -2185,8 +2206,9 @@ void message_pair(int pri, Pair *pair) {
     SOCKET sd, psd;
     Pair *p;
     int i;
-    char str[BUFMAX];
-    strntime(str, BUFMAX, &pair->clock);
+    char str[LONGSTRMAX+1];
+    str[LONGSTRMAX] = '\0';
+    strntime(str, LONGSTRMAX, &pair->clock);
     i = strlen(str);
     sd = pair->sd;
     if (ValidSocket(sd)) {
@@ -2198,9 +2220,10 @@ void message_pair(int pri, Pair *pair) {
 		message(LOG_DEBUG, "TCP %d: Can't get socket's name err=%d",
 			sd, errno);
 	} else {
-	    addrport2str(name, namelen, pair->proto, 0, str+i, BUFMAX-i, 0);
+	    addrport2str(name, namelen, pair->proto, 0,
+			 str+i, LONGSTRMAX-i, 0);
 	    i = strlen(str);
-	    if (i < BUFMAX-2) str[i++] = ' ';
+	    if (i < LONGSTRMAX-2) str[i++] = ' ';
 	}
 	namelen = sizeof(ss);
 	if (getpeername(sd, name, &namelen) < 0) {
@@ -2211,11 +2234,12 @@ void message_pair(int pri, Pair *pair) {
 		message(LOG_DEBUG, "TCP %d: Can't get peer's name err=%d",
 			sd, errno);
 	} else {
-	    addrport2str(name, namelen, pair->proto, 0, str+i, BUFMAX-i, 0);
+	    addrport2str(name, namelen, pair->proto, 0,
+			 str+i, LONGSTRMAX-i, 0);
 	    i += strlen(str+i);
 	}
     }
-    if (i >= BUFMAX) i = BUFMAX-1;
+    if (i > LONGSTRMAX) i = LONGSTRMAX;
     str[i] = '\0';
     p = pair->pair;
     if (p) psd = p->sd;
@@ -2239,12 +2263,13 @@ static void printSSLinfo(int pri, SSL *ssl) {
     message(pri, "[SSL cipher=%s]", p);
     peer = SSL_get_peer_certificate(ssl);
     if (peer) {
-	char buf[BUFMAX];
+	char buf[LONGSTRMAX+1];
 	ASN1_INTEGER *n = X509_get_serialNumber(peer);
 	if (n) message(pri, "[SSL serial=%lx]", ASN1_INTEGER_get(n));
-	if (X509_NAME_oneline(X509_get_subject_name(peer), buf, BUFMAX-1))
+	buf[LONGSTRMAX] = '\0';
+	if (X509_NAME_oneline(X509_get_subject_name(peer), buf, LONGSTRMAX))
 	    message(pri, "[SSL subject=%s]", buf);
-	if (X509_NAME_oneline(X509_get_issuer_name(peer), buf, BUFMAX-1))
+	if (X509_NAME_oneline(X509_get_issuer_name(peer), buf, LONGSTRMAX))
 	    message(pri, "[SSL issuer=%s]", buf);
 	X509_free(peer);
     }
@@ -2598,19 +2623,20 @@ void message_conn(int pri, Conn *conn) {
     Pair *p1, *p2;
     int proto = 0;
     int i = 0;
-    char str[BUFMAX];
+    char str[LONGSTRMAX+1];
+    str[LONGSTRMAX] = '\0';
     p1 = conn->pair;
     if (p1) {
 	p2 = p1->pair;
-	strntime(str, BUFMAX, &p1->clock);
+	strntime(str, LONGSTRMAX, &p1->clock);
 	i = strlen(str);
 	proto = p1->proto;
 	if (p2) sd = p2->sd;
     }
     addrport2str(&conn->dst->addr, conn->dst->len,
-		 proto, proto_pair_d, str+i, BUFMAX-i, 0);
+		 proto, proto_pair_d, str+i, LONGSTRMAX-i, 0);
     i = strlen(str);
-    if (i >= BUFMAX) i = BUFMAX-1;
+    if (i > LONGSTRMAX) i = LONGSTRMAX;
     str[i] = '\0';
     message(pri, "Conn %d: %08x %s", sd, proto, str);
 }
@@ -2626,7 +2652,7 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 #endif
     int offset = -1;	/* offset in load balancing group */
     time_t clock;
-    char addrport[STRMAX];
+    char addrport[STRMAX+1];
 #ifdef WINDOWS
     u_long param;
 #endif
@@ -2721,6 +2747,7 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     fcntl(p1->sd, F_SETFL, O_NONBLOCK);
 #endif
     addrport2str(dst, dstlen, p1->proto, proto_pair_d, addrport, STRMAX, 0);
+    addrport[STRMAX] = '\0';
     if (Debug > 2)
 	message(LOG_DEBUG, "TCP %d: connecting to TCP %d %s",
 		p2->sd, p1->sd, addrport);
@@ -2866,16 +2893,17 @@ int scanConns(void) {
 }
 
 int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
+    /* (size of str) >= STRMAX+1 */
     SOCKET sd;
     struct sockaddr_storage ss;
     struct sockaddr *peer = (struct sockaddr*)&ss;
     socklen_t peerlen = sizeof(ss);
     int sport;
-    char buf[BUFMAX];
+    char buf[LONGSTRMAX+1];
     char c;
     int len;
     int ret;
-    char addr[STRMAX];
+    char addr[STRMAX+1];
 #ifdef WINDOWS
     u_long param;
 #endif
@@ -2898,6 +2926,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
     }
     saPort(peer, 113);	/* ident protocol */
     addr2str(peer, peerlen, addr, STRMAX, 0);
+    addr[STRMAX] = '\0';
 #ifdef WINDOWS
     param = 1;
     ioctlsocket(sd, FIONBIO, &param);
@@ -2934,7 +2963,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 	    return 0;
 	}
     }
-    snprintf(buf, BUFMAX-1, "%d, %d%c%c", sport, cport, '\r', '\n');
+    snprintf(buf, LONGSTRMAX, "%d, %d%c%c", sport, cport, '\r', '\n');
     len = strlen(buf);
     ret = send(sd, buf, len, 0);
     if (ret != len) {
@@ -2964,7 +2993,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 	    FD_ZERO(&rout);
 	    FdSet(sd, &rout);
 	} while (select(FD_SETSIZE, &rout, NULL, NULL, &tv) == 0);
-	ret = recv(sd, buf, BUFMAX-1, 0);
+	ret = recv(sd, buf, LONGSTRMAX, 0);
 	if (ret <= 0) {
 	    if (Debug > 0)
 		message(LOG_DEBUG, "ident: can't read from %s, ret=%d",
@@ -2991,7 +3020,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 	    do {
 		p++;
 	    } while (*p == ' ');
-	    for (i=0; i < STRMAX-1 && *p; i++) str[i] = *p++;
+	    for (i=0; i < STRMAX && *p; i++) str[i] = *p++;
 	    str[i] = '\0';
 	}
     }
@@ -3009,8 +3038,8 @@ Pair *doaccept(Stone *stonep) {
 #ifdef ENLARGE
     int prevXferBufMax = XferBufMax;
 #endif
-    char ident[STRMAX];
-    char fromstr[STRMAX*2];
+    char ident[STRMAX+1];
+    char fromstr[STRMAX*2+1];
 #ifdef WINDOWS
     u_long param;
 #endif
@@ -3044,15 +3073,17 @@ Pair *doaccept(Stone *stonep) {
     }
     if ((stonep->proto & proto_ident)
 	&& getident(ident, from, fromlen, stonep->port)) {
-	strncpy(fromstr, ident, STRMAX*2-1);
+	strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
+	fromstr[STRMAX] = '\0';
 	len = strlen(fromstr);
-	fromstr[len++] = '@';
+	fromstr[len++] = '@';	/* omit size check, because len <= STRMAX */
     } else {
 	len = 0;
 	ident[0] = '\0';
     }
     addrport2str(from, fromlen,
 		 stonep->proto, proto_stone_s, fromstr+len, STRMAX*2-len, 0);
+    fromstr[STRMAX*2] = '\0';
     if (!checkXhost(stonep, from, fromlen, ident)) {
 	message(LOG_WARNING, "stone %d: access denied: from %s",
 		stonep->sd, fromstr);
@@ -3061,7 +3092,8 @@ Pair *doaccept(Stone *stonep) {
 	return NULL;
     }
     if (AccFp) {
-	char buf[BUFMAX], str[STRMAX];
+	char str[STRMAX+1];
+	char tstr[STRMAX+1];
 	short port = 0;
 	time_t clock;
 	time(&clock);
@@ -3073,11 +3105,13 @@ Pair *doaccept(Stone *stonep) {
 	    port = ntohs(((struct sockaddr_in6*)from)->sin6_port);
 	}
 #endif
+	addr2str(from, fromlen, str, STRMAX, NI_NUMERICHOST);
+	str[STRMAX] = '\0';
+	strntime(tstr, STRMAX, &clock);
+	tstr[STRMAX] = '\0';
 	fprintf(AccFp, "%s%d[%d] %s[%s]%d\n",
-		strntime(buf, BUFMAX, &clock),
-		stonep->port, stonep->sd, fromstr,
-		addr2str(from, fromlen, str, STRMAX, NI_NUMERICHOST),
-		port);
+		tstr, stonep->port, stonep->sd, fromstr, str, port);
+		
     }
     if (Debug > 1)
 	message(LOG_DEBUG, "stone %d: accepted TCP %d from %s",
@@ -3161,13 +3195,15 @@ Pair *doaccept(Stone *stonep) {
     }
     if (stonep->from) {
 	if (bind(pair2->sd, &stonep->from->addr, stonep->from->len) < 0) {
-	    char str[STRMAX];
+	    char str[STRMAX+1];
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
-	    message(LOG_ERR, "stone %d: can't bind %s err=%d", stonep->sd,
-		    addrport2str(&stonep->from->addr, stonep->from->len,
-				 0, 0, str, STRMAX, 0), errno);
+	    addrport2str(&stonep->from->addr, stonep->from->len,
+			 0, 0, str, STRMAX, 0);
+	    str[STRMAX] = '\0';
+	    message(LOG_ERR, "stone %d: can't bind %s err=%d",
+		    stonep->sd, str, errno);
 	}
     }
     pair2->pair = pair1;
@@ -3180,7 +3216,7 @@ int strnPeerAddr(char *buf, int limit, SOCKET sd, int isport) {
     struct sockaddr *name = (struct sockaddr*)&ss;
     socklen_t namelen = sizeof(ss);
     int len;
-    char str[STRMAX];
+    char str[STRMAX+1];
     if (getpeername(sd, name, &namelen) < 0) {
 	if (isport) {
 	    strcpy(str, "0.0.0.0:0");
@@ -3193,6 +3229,7 @@ int strnPeerAddr(char *buf, int limit, SOCKET sd, int isport) {
 	} else {
 	    addr2str(name, namelen, str, STRMAX, 0);
 	}
+	str[STRMAX] = '\0';
     }
     len = strlen(str);
     if (len > limit) len = limit;
@@ -3342,14 +3379,14 @@ int scanClose(void) {	/* scan close request */
 }
 
 void message_buf(Pair *pair, int len, char *str) {	/* dump for debug */
-    char head[STRMAX];
+    char head[STRMAX+1];
     Pair *p = pair->pair;
     if (p == NULL) return;
-    head[STRMAX-1] = '\0';
+    head[STRMAX] = '\0';
     if (pair->proto & proto_source) {
-	snprintf(head, STRMAX-1, "%s%d<%d", str, pair->sd, p->sd);
+	snprintf(head, STRMAX, "%s%d<%d", str, pair->sd, p->sd);
     } else {
-	snprintf(head, STRMAX-1, "%s%d>%d", str, p->sd, pair->sd);
+	snprintf(head, STRMAX, "%s%d>%d", str, p->sd, pair->sd);
     }
     packet_dump(head, pair->buf + pair->start, len);
 }
@@ -3718,12 +3755,12 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->start */
     } else if (pair->proto & proto_base) {
 	p->len = baseDecode(&p->buf[p->start], p->len, p->buf+p->bufmax-1);
 	len = *(p->buf+p->bufmax-1);
-	if (Debug > 4 && len > 0) {
-	    char buf[BUFMAX];
+	if (Debug > 4 && len > 0) {	/* len < 4 */
+	    char str[STRMAX+1];
 	    for (i=0; i < len; i++)
-		sprintf(&buf[i*3], " %02x", p->buf[p->bufmax-2-i]);
-	    buf[0] = '(';
-	    message(LOG_DEBUG, "TCP %d: save %d bytes \"%s\")", sd, len, buf);
+		sprintf(&str[i*3], " %02x", p->buf[p->bufmax-2-i]);
+	    str[0] = '(';
+	    message(LOG_DEBUG, "TCP %d: save %d bytes \"%s\")", sd, len, str);
 	}
     }
     if ((p->proto & proto_command) != command_health)
@@ -3745,11 +3782,13 @@ int commOutput(Pair *pair, char *fmt, ...) {
     if ((p->proto & (proto_shutdown | proto_close)) || InvalidSocket(psd))
 	return -1;
     str = &p->buf[p->start + p->len];
+    p->buf[p->bufmax-1] = '\0';
     va_start(ap, fmt);
-    vsnprintf(str, BUFMAX - (p->start + p->len), fmt, ap);
+    vsnprintf(str, p->bufmax-1 - (p->start + p->len), fmt, ap);
     va_end(ap);
     if (p->proto & proto_base)
-	p->len += baseEncode(str, strlen(str), BUFMAX - (p->start + p->len));
+	p->len += baseEncode(str, strlen(str),
+			     p->bufmax-1 - (p->start + p->len));
     else p->len += strlen(str);
     p->proto |= proto_select_w;	/* need to write */
     return p->len;
@@ -3898,7 +3937,7 @@ int popUSER(Pair *pair, char *parm, int start) {
     if (Debug) message(LOG_DEBUG, ": USER %s", parm);
     ulen = strlen(parm);
     tlen = strlen(pair->p);
-    if (ulen + 1 + tlen + 1 >= BUFMAX) {
+    if (ulen + 1 + tlen + 1 >= BUFMAX-1) {
 	commOutput(pair, "+Err Too long user name\r\n");
 	return -1;
     }
@@ -3929,7 +3968,7 @@ int popPASS(Pair *pair, char *parm, int start) {
     str = p + ulen + 1;
     tlen = strlen(str);
     plen = strlen(parm);
-    if (ulen + 1 + tlen + plen + 1 >= BUFMAX) {
+    if (ulen + 1 + tlen + plen + 1 >= BUFMAX-1) {
 	commOutput(pair, "+Err Too long password\r\n");
 	return -1;
     }
@@ -4058,14 +4097,15 @@ Comm limitComm[] = {
 };
 
 int healthHELO(Pair *pair, char *parm, int start) {
-    char str[BUFMAX];
+    char str[LONGSTRMAX+1];
     time_t now;
     time(&now);
-    snprintf(str, BUFMAX-1,
+    snprintf(str, LONGSTRMAX,
 	     "stone=%d pair=%d trash=%d conn=%d established=%d readwrite=%d async=%d",
 	     nStones(), nPairs(pairs.next), nPairs(trash.next), nConns(),
 	     (int)(now - lastEstablished), (int)(now - lastReadWrite),
 	     AsyncCount);
+    str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
     commOutput(pair, "200 stone:%s debug=%d %s\r\n",
 	       VERSION, Debug, str);
@@ -4154,8 +4194,8 @@ int docomm(Pair *pair, Comm *comm) {
 }
 
 int insheader(Pair *pair) {	/* insert header */
-    char buf[BUFMAX];
     char *p;
+    int bufmax = pair->bufmax;
     int len, i;
     len = pair->start + pair->len;
     for (i=pair->start; i < len; i++) {
@@ -4168,9 +4208,12 @@ int insheader(Pair *pair) {	/* insert header */
     }
     i++;
     len -= i;
-    if (len > 0) bcopy(&pair->buf[i], buf, len);	/* save rest header */
+    if (len > 0) {
+	bufmax -= len;		/* reserve */
+	bcopy(&pair->buf[i], &pair->buf[bufmax], len);	/* save rest header */
+    }
     p = pair->stone->p;
-    i += strnparse(&pair->buf[i], pair->bufmax - i, &p, pair->pair, 0xFF);
+    i += strnparse(&pair->buf[i], bufmax - i, &p, pair->pair, 0xFF);
     pair->buf[i++] = '\r';
     pair->buf[i++] = '\n';
     if (Debug > 5) {
@@ -4178,7 +4221,7 @@ int insheader(Pair *pair) {	/* insert header */
 		"TCP %d: insheader start=%d, ins=%d, rest=%d, max=%d",
 		pair->sd, pair->start, i-pair->start, len, pair->bufmax);
     }
-    if (len > 0) bcopy(buf, &pair->buf[i], len);	/* restore */
+    if (len > 0) bcopy(&pair->buf[bufmax], &pair->buf[i], len);	/* restore */
     pair->len = i - pair->start + len;
     return pair->len;
 }
@@ -4854,9 +4897,9 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	    int i;
 	    int j = 1;
 	    if (serial >= 0) {
-		char str[STRMAX];
+		char str[STRMAX+1];
 		int len;
-		snprintf(str, STRMAX-1, "%lx", serial);
+		snprintf(str, STRMAX, "%lx", serial);
 		len = strlen(str);
 		if (match[0]) free(match[0]);
 		match[0] = malloc(len+1);
@@ -5163,7 +5206,7 @@ Stone *mkstone(
     int salen = sizeof(ss);
     int satype;
     int saproto = 0;
-    char xhost[STRMAX], *p;
+    char xhost[STRMAX+1], *p;
     int allow;
     int i;
     XHost *xhosts = NULL;
@@ -5263,13 +5306,14 @@ Stone *mkstone(
 	}
 	if (!DryRun) {
 	    if (bind(stonep->sd, sa, salen) < 0) {
-		char str[STRMAX];
+		char str[STRMAX+1];
 #ifdef WINDOWS
 		errno = WSAGetLastError();
 #endif
-		message(LOG_ERR, "stone %d: Can't bind %s err=%d.", stonep->sd,
-			addrport2str(sa, salen, 0, 0, str, STRMAX, 0),
-			errno);
+		addrport2str(sa, salen, 0, 0, str, STRMAX, 0);
+		str[STRMAX] = '\0';
+		message(LOG_ERR, "stone %d: Can't bind %s err=%d.",
+			stonep->sd, str, errno);
 		exit(1);
 	    }
 #ifndef NO_FORK
@@ -5399,10 +5443,11 @@ Stone *mkstone(
 			"stone %d: %s %s check health",
 			stonep->sd, xhost, (allow ? "can" : "can't"));
 	    } else {
-		char addrport[STRMAX];
+		char addrport[STRMAX+1];
 		addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
 			     stonep->proto, proto_stone_d,
 			     addrport, STRMAX, 0);
+		addrport[STRMAX] = '\0';
 		message(LOG_DEBUG,
 			"stone %d: %s %s to connecting to %s",
 			stonep->sd, (allow ? "permit" : "deny"), xhost,
@@ -5411,6 +5456,7 @@ Stone *mkstone(
 	}
     }
     addrport2str(sa, salen, stonep->proto, proto_stone_s, xhost, STRMAX, 0);
+    xhost[STRMAX] = '\0';
     if ((proto & proto_command) == command_proxy) {
 	message(LOG_INFO, "stone %d: proxy <- %s",
 		stonep->sd,
@@ -5420,11 +5466,11 @@ Stone *mkstone(
 		stonep->sd,
 		xhost);
     } else {
-	char addrport[STRMAX];
+	char addrport[STRMAX+1];
 	addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-		     stonep->proto, proto_stone_d, addrport, STRMAX, 0),
-	message(LOG_INFO, "stone %d: %s <- %s",
-		stonep->sd, addrport, xhost);
+		     stonep->proto, proto_stone_d, addrport, STRMAX, 0);
+	addrport[STRMAX] = '\0';
+	message(LOG_INFO, "stone %d: %s <- %s", stonep->sd, addrport, xhost);
     }
     stonep->backups = NULL;
     if ((proto & proto_command) != command_proxy
@@ -5573,7 +5619,7 @@ static void skipcomment(FILE *fp) {
 }
 
 static int getvar(FILE *fp, char *buf, int bufmax) {
-    char var[STRMAX];
+    char var[STRMAX+1];
     char *val;
     int i = 0;
     int paren = 0;
@@ -5585,7 +5631,7 @@ static int getvar(FILE *fp, char *buf, int bufmax) {
     } else {
 	ungetc(c, fp);
     }
-    while ((c=getc(fp)) != EOF && i < STRMAX-1) {
+    while ((c=getc(fp)) != EOF && i < STRMAX) {
 	if (paren && c == '}') {
 	    break;
 	} else if (isalnum(c) || c == '_') {
@@ -6501,7 +6547,8 @@ void initialize(int argc, char *argv[]) {
     }
 #ifndef NO_SYSLOG
     if (Syslog) {
-	sprintf(SyslogName, "stone[%d]", MyPid);
+	snprintf(SyslogName, STRMAX, "stone[%d]", MyPid);
+	SyslogName[STRMAX] = '\0';
 	openlog(SyslogName, 0, LOG_DAEMON);
 	if (Syslog > 1) setbuf(stdout, NULL);
     }
@@ -6576,7 +6623,8 @@ void initialize(int argc, char *argv[]) {
 #ifndef NO_SYSLOG
 	if (Syslog) {
 	    closelog();
-	    sprintf(SyslogName, "stone[%d]", MyPid);
+	    snprintf(SyslogName, STRMAX, "stone[%d]", MyPid);
+	    SyslogName[STRMAX] = '\0';
 	    openlog(SyslogName, 0, LOG_DAEMON);
 	}
 #endif
@@ -6622,8 +6670,21 @@ void initialize(int argc, char *argv[]) {
 #endif
 #ifndef NO_CHROOT
     if (RootDir) {
+	char cwd[BUFMAX];
+	int len = strlen(RootDir);
+	int i;
+	getcwd(cwd, BUFMAX-1);
+	if (strncmp(cwd, RootDir, len) != 0) len = -1;
 	if (chroot(RootDir) < 0) {
 	    message(LOG_WARNING, "Can't change root directory to %s", RootDir);
+	} else if (len <= 0) {
+	    if (Debug > 0)
+		message(LOG_DEBUG, "cwd=%s is outside chroot=%s, so chdir /",
+			cwd, RootDir);
+	    if (chdir("/") < 0) {
+		message(LOG_WARNING,
+			"Can't change directory to chroot / err=%d", errno);
+	    }
 	}
     }
 #endif
