@@ -2117,7 +2117,7 @@ Pair *pair;		/* read into buf from pair->pair->start */
     if (pair->ssl) {
 	len = SSL_read(pair->ssl,&p->buf[start],bufmax);
 	if (pair->proto & proto_close) return -1;
-	if (len <= 0) {
+	if (len < 0) {
 	    int err;
 	    err = SSL_get_error(pair->ssl,len);
 	    if (err == SSL_ERROR_NONE
