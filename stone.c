@@ -269,6 +269,10 @@ int FdSetBug = 0;
 #include <openssl/bio.h>
 #include <openssl/err.h>
 
+#ifdef CRYPTOAPI
+int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
+#endif
+
 #define NMATCH_MAX	9	/* \1 ... \9 */
 #define DEPTH_MAX	10
 
@@ -294,6 +298,9 @@ typedef struct {
     char *certFile;
     char *caFile;
     char *caPath;
+#ifdef CRYPTOAPI
+    char *certStore;
+#endif
     char *cipherList;
     char *regexp[DEPTH_MAX];
     unsigned char lbmod;
@@ -5210,6 +5217,15 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 		opts->certFile);
 	goto error;
     }
+#ifdef CRYPTOAPI
+    if (opts->certStore) {
+	if (!SSL_CTX_use_CryptoAPI_certificate(ss->ctx, opts->certStore)) {
+	    message(LOG_ERR, "Can't load certificate \"%s\" "
+		    "from Microsoft Certificate Store", opts->certStore);
+	    goto error;
+        }
+    }
+#endif
     if (opts->cipherList
 	&& !SSL_CTX_set_cipher_list(ss->ctx, opts->cipherList)) {
 	message(LOG_ERR, "SSL_CTX_set_cipher_list(%s) error",
@@ -5717,6 +5733,10 @@ void help(char *com) {
 #ifdef USE_SSL
     message(LOG_INFO, "%s",
 	    "using " OPENSSL_VERSION_TEXT "  http://www.openssl.org/");
+#ifdef CRYPTOAPI
+    message(LOG_INFO, "%s",
+	    "using cryptoapi.c by Peter 'Luna' Runestig <peter@runestig.com>");
+#endif
 #endif
 #ifndef NT_SERVICE
     fprintf(stderr,
@@ -5816,6 +5836,9 @@ void help(char *com) {
 	    "       cert=<file>      ; certificate file\n"
 	    "       CAfile=<file>    ; certificate file of CA\n"
 	    "       CApath=<dir>     ; dir of CAs\n"
+#ifdef CRYPTOAPI
+	    "       store=<prop>     ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
+#endif
 	    "       cipher=<ciphers> ; list of ciphers\n"
 	    "       lb<n>=<m>        ; load balancing based on CN\n"
 #endif
@@ -6198,6 +6221,10 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
 	opts->caFile = strdup(argv[i]+7);
     } else if (!strncmp(argv[i], "CApath=", 7)) {
 	opts->caPath = strdup(argv[i]+7);
+#ifdef CRYPTOAPI
+    } else if (!strncmp(argv[i], "store=", 6)) {
+	opts->certStore = strdup(argv[i]+6);
+#endif
     } else if (!strncmp(argv[i], "cipher=", 7)) {
 	opts->cipherList = strdup(argv[i]+7);
     } else if (!strncmp(argv[i], "lb", 2) && isdigit(argv[i][2])

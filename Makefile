@@ -174,13 +174,13 @@ mingw.exe: stone.c
 	$(CC) $(FLAGS) -o stone.exe $? $(LIBS)
 
 mingw:
-	$(MAKE) CC=gcc FLAGS="-DWINDOWS -DNO_RINDEX $(FLAGS)" LIBS="-lws2_32 -lregex $(LIBS)" mingw.exe
+	$(MAKE) CC=gcc FLAGS="-DWINDOWS -DNO_RINDEX -DNO_ADDRINFO $(FLAGS)" LIBS="-lws2_32 -lregex $(LIBS)" mingw.exe
 
 mingw-pop:
 	$(MAKE) CC=gcc TARGET=mingw pop_stone
 
 mingw-ssl:
-	$(MAKE) CC=gcc FLAGS="$(SSL_FLAGS)" SSL_LIBS="-lssl32 -leay32" TARGET=mingw ssl_stone
+	$(MAKE) CC=gcc SSL_FLAGS="$(SSL_FLAGS) -DCRYPTOAPI" SSL_LIBS="cryptoapi.o -lcrypt32 -lssl32 -leay32" TARGET=mingw ssl_stone
 
 mingw-svc:
 	$(MAKE) CC=gcc CFLAGS="-DWINDOWS -DNT_SERVICE -DNO_RINDEX $(POP_FLAGS) $(SSL_FLAGS) $(CFLAGS)" SSL_LIBS="-lssl32 -leay32" TARGET=mingw svc_stone
