@@ -3470,10 +3470,9 @@ int proxyCommon(Pair *pair, char *parm, int start) {
     while (isspace(*p)) p++;	/* now p points url */
     q = p + i;			/* now q points path */
     if (*q != '/') *--q = '/';
-    i = p - top;		/* length of 'GET ' */
-    bcopy(top, q-i, i);
-    pair->len += (pair->start - (q - top - i));
-    pair->start = q - pair->buf - i;
+    bcopy(q, p, pair->start + pair->len - (q - top));
+    pair->len = pair->start + pair->len - (q - p);
+    pair->start = 0;
     if (Debug > 1) {
 	Pair *r = pair->pair;
 	message(LOG_DEBUG, "proxy %d -> http://%s:%d",
