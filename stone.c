@@ -5362,7 +5362,7 @@ Stone *mkstone(
 		addr2ip(&xhosts[i].addr, xhost, STRMAX);
 		pos = strlen(xhost);
 		snprintf(xhost+pos, STRMAX-pos, " (mask %lx)",
-			 ntohl((u_long)xhosts[i].mask.s_addr));
+			 (u_long)ntohl((u_long)xhosts[i].mask.s_addr));
 		pos += strlen(xhost+pos);
 	    } else {
 #ifdef AF_INET6

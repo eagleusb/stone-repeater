@@ -7,9 +7,8 @@
 			    sengoku@gcd.org
 
 
-  Stone is a TCP/IP packet repeater in the application layer.  It
-repeats TCP and UDP packets from inside to outside of a firewall, or
-from outside to inside.
+  Stone is a TCP/IP repeater in the application layer.  It repeats TCP
+and UDP from inside to outside of a firewall, or from outside to inside.
 
   Stone has following features:
 
@@ -26,9 +25,9 @@ from outside to inside.
 
 3.  Stone supports SSL.
 	Using OpenSSL (http://www.openssl.org/), stone can
-	encrypt/decrypt packets.  Client verifications, and server
-	verifications are also supported.  Stone can send a substring of
-	the subject of the certificate to the destination.
+	encrypt/decrypt.  Client verifications, and server verifications
+	are also supported.  Stone can send a substring of the subject
+	of the certificate to the destination.
 
 4.  Stone is a http proxy.
 	Stone can also be a tiny http proxy.
@@ -46,6 +45,7 @@ HOWTO USE
 	      [-s <send> <expect>... --]
 	      [-b [<var>=<val>]... <n> <master>:<port> <backup>:<port>]
 	      [-B <host>:<port> <host1>:<port1>... --]
+	      [-I <host>]
 	      [-o <n>] [-g <n>] [-t <dir>] [-D] [-c <dir>]
 	      [-q <SSL>] [-z <SSL>]
 	      <st> [-- <st>]...
@@ -64,9 +64,9 @@ HOWTO USE
 	shown instead of host names and service names.
 
 	If the ``-u <max>'' flag (``<max>'' is integer) is used, the
-	program memorize ``<max>'' sources simultaneously where UDP
-	packets are sent.  If the ``-f <n>'' flag (``<n>'' is integer)
-	is used, the program spawn ``<n>'' child processes.
+	program memorize ``<max>'' UDP sources simultaneously.  If the
+	``-f <n>'' flag (``<n>'' is integer) is used, the program spawn
+	``<n>'' child processes.
 
 	If the ``-l'' flag is used, the program sends error messages to
 	the syslog instead of stderr.  If the ``-L <file>'' (``<file>''
@@ -97,6 +97,9 @@ HOWTO USE
 	the program chooses a destination randomly from the group.  The
 	destination <host>:<port> that is designated by ``-b'' flag and
 	turned out unhealthy, is excluded from the group.
+
+	The ``-I <host>'' designates the interface used as the source
+	address of the connection to the desctination.
 
 	If the ``-o <n>'' or ``-g <n>'' flag is used, the program set
 	its uid or gid to ``<n>'' respectively.  If the ``-t <dir>''
@@ -172,9 +175,9 @@ HOWTO USE
 	program runs, and port ``<sport>'' in the http proxy settings of
 	your WWW browser.
 
-	Type (5) repeats packets over http request.  ``<request>'' is
-	the request specified in HTTP 1.0.  In the ``<request>'', ``\''
-	is the escape character, and the following substitution occurs.
+	Type (5) relays stream over http request.  ``<request>'' is the
+	request specified in HTTP 1.0.  In the ``<request>'', ``\'' is
+	the escape character, and the following substitution occurs.
 
 		\n	newline  (0x0A)
 		\r	return   (0x0D)
@@ -203,27 +206,36 @@ HOWTO USE
 	Use ``!'' instead of ``<xhost>'', to deny machines by following
 	``<xhost>''.
 
-	If the ``<sport>/udp'' is used, repeats UDP packets instead of
-	TCP packets.
+	Extentions can be added to the ``<port>'' like
+	``<port>/<ext>,<ext>...''.  <ext> is:
 
-	If the ``<sport>/apop'' is used, converts POP to APOP.  The
-	conversion is derived from the RSA Data Security, Inc. MD5
-	Message-Digest Algorithm.
+	udp	repeats UDP instead of TCP.
 
-	If the ``<port>/ssl'' is used, repeats packets with encryption.
+	ssl	forwards with encryption.
 
-	If the ``<sport>/ssl'' is used, repeats packets with decryption.
+	v6	connects to the destination using IPv6.
 
-	If the ``<port>/base'' is used, repeats packets with MIME base64
-	encoding.
+	base	forwards with MIME base64 encoding.
 
-	If the ``<sport>/base'' is used, repeats packets with MIME
-	base64 decoding.
+	Extentions can be added to the ``<sport>'' like
+	``<sport>/<ext>,<ext>...''.  <ext> is:
 
-	If the ``<sport>/http'' is used, repeats packets over http.
+	udp	repeats UDP instead of TCP.
 
-	If the ``<sport>/ident'' is used, identifies the owner of the
-	incoming connection on the peer using ident protocol (RFC1413).
+	apop	converts POP to APOP.  The conversion is derived from
+		the RSA Data Security, Inc. MD5 Message-Digest Algorithm.
+
+	ssl	forwards with decryption.
+
+	v6	accepts connection using IPv6.  If <shost> is omitted 
+		like (1), IP is also acceptable.
+
+	base	forwards with MIME base64 decoding.
+
+	http	relays stream over http.
+
+	ident	identifies the owner of the incoming connection
+		on the peer using ident protocol (RFC1413).
 
 HOWTO USE (NT service version)
 
