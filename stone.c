@@ -2067,6 +2067,7 @@ int getident(char *str, struct sockaddr_in *sinp, int cport) {
 	    str[i] = '\0';
 	}
     }
+    closesocket(sd);
     return 1;
 }
 
