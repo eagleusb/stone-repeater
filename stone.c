@@ -3447,6 +3447,7 @@ void help(char *com) {
 	    "       verify,once      ; verify client's certificate only once\n"
 	    "       verify,ifany     ; verify client's certificate if any\n"
 	    "       verify,none      ; don't require peer's certificate\n"
+	    "       uniq             ; check serial # of peer's certificate\n"
 	    "       re<n>=<regex>    ; verify depth <n> with <regex>\n"
 	    "       depth=<n>        ; set verification depth to <n>\n"
 	    "       key=<file>       ; key file\n"
