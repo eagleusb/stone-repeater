@@ -1852,8 +1852,7 @@ int mkChat(int argc, int i, char *argv[]) {
 LBSet *findLBSet(struct sockaddr *sa, int proto) {
     LBSet *s;
     for (s=lbsets; s != NULL; s=s->next) {
-	if (saComp(&s->dsts[0]->addr, sa)
-	    && (s->proto & proto)) {	/* found */
+	if (saComp(&s->dsts[0]->addr, sa)) {	/* found */
 	    if (Debug > 1) {
 		char buf[LONGSTRMAX+1];
 		int len;
