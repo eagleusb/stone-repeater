@@ -255,6 +255,7 @@ char *cipher_list = NULL;
 #endif
 #ifdef CPP
 char *CppCommand = CPP;
+char *CppOptions = NULL;
 #endif
 
 typedef struct {
@@ -3137,6 +3138,7 @@ char *com;
 	    "opt:  -C <file>         ; configuration file\n"
 #ifdef CPP
 	    "      -P <command>      ; preprocessor for config. file\n"
+	    "      -Q <options>      ; options for preprocessor\n"
 #endif
 	    "      -d                ; increase debug level\n"
 	    "      -p                ; packet dump\n"
@@ -3307,7 +3309,11 @@ FILE *openconfig() {
 	    char buf[BUFMAX];
 	    int len = 0;
 	    char *p;
-	    strcpy(buf,CppCommand);
+	    if (CppOptions) {
+		snprintf(buf,BUFMAX-1,"%s %s",CppCommand,CppOptions);
+	    } else {
+		strncpy(buf,CppCommand,BUFMAX-1);
+	    }
 	    argv[i] = "cpp";
 	    while (buf[len]) {
 		if (isspace(buf[len])) {
@@ -3618,6 +3624,9 @@ char *argv[];
 #ifdef CPP
 	    case 'P':
 		CppCommand = strdup(argv[++i]);
+		break;
+	    case 'Q':
+		CppOptions = strdup(argv[++i]);
 		break;
 #endif
 	    case 'C':
