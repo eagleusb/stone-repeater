@@ -3803,6 +3803,7 @@ int doproxy(Pair *pair, char *host, int port) {
 int proxyCONNECT(Pair *pair, char *parm, int start) {
     int port = 443;	/* host byte order */
     char *r = parm;
+    char *q = NULL;
     Pair *p;
     message_time(pair, LOG_INFO, "CONNECT %s", parm);
     while (*r) {
@@ -3810,11 +3811,12 @@ int proxyCONNECT(Pair *pair, char *parm, int start) {
 	    *r = '\0';
 	    break;
 	}
-	if (*r == ':') {
-	    port = atoi(r+1);
-	    *r = '\0';
-	}
+	if (*r == ':') q = r;
 	r++;
+    }
+    if (q) {
+	port = atoi(q+1);
+	*q = '\0';
     }
     pair->len += pair->start;
     pair->start = 0;
