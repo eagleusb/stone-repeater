@@ -4179,6 +4179,10 @@ void doargs(int argc, int i, char *argv[]) {
 	    case 'd':
 		Debug++;
 		break;
+	    case 'b':
+		mkBackup(atoi(argv[i+1]), argv[i+2], argv[i+3]);
+		i += 3;
+		break;
 #ifdef USE_SSL
 	    case 'q':
 		i = sslopts(argc,i,argv,&ClientOpts,0);
