@@ -109,8 +109,6 @@ typedef void (*FuncPtr)(void*);
 #include "service.h"
 #include "svcbody.h"
 #endif
-#define NO_SNPRINTF
-#define NO_VSNPRINTF
 #define NO_SYSLOG
 #define NO_FORK
 #define NO_SETHOSTENT
@@ -122,6 +120,7 @@ typedef void (*FuncPtr)(void*);
 #define EINTR	WSAEINTR
 #define NO_BCOPY
 #define bzero(b,n)	memset(b,0,n)
+#define	usleep(usec)	sleep(1)
 #define ASYNC(func,arg)	\
     waitMutex(AsyncMutex);\
     if (Debug > 7) message(LOG_DEBUG,"ASYNC: %d",AsyncCount);\
