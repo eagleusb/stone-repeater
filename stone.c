@@ -106,8 +106,7 @@ typedef void (*FuncPtr)(void*);
 #ifdef WINDOWS
 #define FD_SETSIZE	256
 #include <process.h>
-#include <winsock2.h>
-#include <winsock.h>
+#include <ws2tcpip.h>
 #include <time.h>
 #ifdef NT_SERVICE
 #include "service.h"
@@ -186,6 +185,9 @@ typedef void *(*aync_start_routine) (void *);
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
+#ifndef NO_SETUID
+#include <grp.h>
+#endif
 #ifdef PRCTL
 #include <sys/prctl.h>
 #endif
@@ -556,8 +558,8 @@ int DaemonMode = 0;
 char *RootDir = NULL;
 #endif
 #ifndef NO_SETUID
-unsigned long SetUID = 0;
-unsigned long SetGID = 0;
+uid_t SetUID = 0;
+gid_t SetGID = 0;
 #endif
 char *CoreDumpDir = NULL;
 #ifdef NO_FAMILY_T
@@ -6506,7 +6508,7 @@ void initialize(int argc, char *argv[]) {
 	if (AccFileName) fchown(fileno(AccFp), SetUID, SetGID);
 	if (LogFileName) fchown(fileno(LogFp), SetUID, SetGID);
     }
-    if (SetGID) if (setgid(SetGID) < 0) {
+    if (SetGID) if (setgid(SetGID) < 0 || setgroups(1, &SetGID) < 0) {
 	message(LOG_WARNING, "Can't set gid err=%d.", errno);
     }
     if (SetUID) if (setuid(SetUID) < 0) {
