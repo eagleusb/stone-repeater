@@ -892,7 +892,7 @@ int scanBackups(void) {
     time_t now;
     time(&now);
     for (b=backups; b != NULL; b=b->next) {
-	if (!b->used) continue;		/* not assigned */
+	if (b->used < 2) continue;		/* not used */
 	if (now - b->last < b->interval) continue;
 	if (healthCheck(&b->master)) {	/* healthy ? */
 	    if (b->bn) {
