@@ -3992,6 +3992,7 @@ void message_conns(void) {	/* dump for debug */
 #ifdef FD_SET_BUG
 void checkFdSetBug(void) {
     fd_set set;
+    FD_ZERO(&set);
     FD_SET(0, &set);
     FD_SET(0, &set);
     FD_CLR(0, &set);
