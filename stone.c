@@ -821,6 +821,7 @@ char *addr2numeric(struct sockaddr *sa, char *str, int len) {
     } else {
 	strncpy(str, "???", len);
     }
+    return str;
 }
 
 char *ext2str(int flag, int mask, char *str, int len) {
@@ -6461,8 +6462,6 @@ void daemonize(void) {
 
 void initialize(int argc, char *argv[]) {
     int i, j;
-    char *p;
-    int proto;
 #ifdef WINDOWS
     WSADATA WSAData;
     if (WSAStartup(MAKEWORD(1, 1), &WSAData)) {
