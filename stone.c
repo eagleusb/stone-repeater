@@ -2204,7 +2204,7 @@ void freePair(Pair *pair) {
 	    SSL_set_shutdown(ssl, (state | SSL_SENT_SHUTDOWN));
 	}
 	SSL_free(ssl);
-	if (pair->stone->proto & proto_ssl_d) {
+	if (pair->stone->proto & proto_ssl_s) {
 	    ctx = pair->stone->ssl_server->ctx;
 	}
 	if (ctx) SSL_CTX_flush_sessions(ctx, time(NULL));
