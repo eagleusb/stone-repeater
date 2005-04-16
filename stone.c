@@ -2547,70 +2547,81 @@ int doSSL_shutdown(Pair *pair, int how) {
     if (how >= 0) pair->ssl_flag = (how & sf_mask);
     else pair->ssl_flag = sf_mask;
     ret = SSL_shutdown(ssl);
+    if (ret == 0) {
+	if (Debug > 4)
+	    message(LOG_DEBUG,
+		    "TCP %d: SSL_shutdown ret=%d sf=%x, shutdown 1",
+		    sd, ret, pair->ssl_flag);
+	/* send a TCP FIN to trigger the other side's close_notify */
+	shutdown(sd, 1);
+	ret = SSL_shutdown(ssl);
+    }
+    if (ret < 0) {
+	err = SSL_get_error(ssl, ret);
+	if (Debug > 4)
+	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d err=%d sf=%x",
+		    sd, ret, err, pair->ssl_flag);
+	if (err == SSL_ERROR_WANT_READ) {
+	    pair->ssl_flag |= sf_sb_on_r;
+	} else if (err == SSL_ERROR_WANT_WRITE) {
+	    pair->ssl_flag |= sf_sb_on_w;
+	} else if (err == SSL_ERROR_SYSCALL) {
+	    unsigned long e = ERR_get_error();
+	    if (e == 0) {
+#ifdef WINDOWS
+		errno = WSAGetLastError();
+#endif
+		if (errno == 0) {
+		    ret = 1;	/* success ? */
+		} else if (errno == EINTR || errno == EAGAIN) {
+		    pair->ssl_flag |= (sf_sb_on_r | sf_sb_on_r);
+		    if (Debug > 8)
+			message(LOG_DEBUG, "TCP %d: SSL_shutdown "
+				"interrupted sf=%x", sd, pair->ssl_flag);
+		} else {
+		    message(priority(pair), "TCP %d: SSL_shutdown "
+			    "I/O error sf=%x errno=%d", sd, pair->ssl_flag, errno);
+		}
+	    } else {
+		message(priority(pair), "TCP %d: SSL_shutdown sf=%x %s",
+			sd, pair->ssl_flag, ERR_error_string(e, NULL));
+	    }
+	} else {
+	    if (Debug > 4)
+		message(LOG_DEBUG,
+			"TCP %d: SSL_shutdown interrupted sf=%x err=%d",
+			sd, pair->ssl_flag, err);
+	}
+    } else if (ret == 0) {
+	if (Debug > 4)
+	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d sf=%x, incomplete",
+		    sd, ret, pair->ssl_flag);
+	ret = -1;
+    }
     if (ret > 0) {	/* success */
 	if (Debug > 4)
 	    message(LOG_DEBUG, "TCP %d: SSL_shutdown sf=%x",
 		    sd, pair->ssl_flag);
 	if ((pair->ssl_flag & sf_mask) != sf_mask)
 	    shutdown(sd, (pair->ssl_flag & sf_mask));
-	return ret;
     }
-    err = SSL_get_error(ssl, ret);
-    if (err == SSL_ERROR_WANT_READ) {
-	pair->ssl_flag |= sf_sb_on_r;
-	ret = 0;
-    } else if (err == SSL_ERROR_WANT_WRITE) {
-	pair->ssl_flag |= sf_sb_on_w;
-	ret = 0;
-    } else if (err == SSL_ERROR_SYSCALL) {
-	unsigned long e = ERR_get_error();
-	if (e == 0) {
-#ifdef WINDOWS
-	    errno = WSAGetLastError();
-#endif
-	    if (errno == 0) {
-		ret = 1;	/* success ? */
-	    } else if (errno == EINTR || errno == EAGAIN) {
-		pair->ssl_flag |= (sf_sb_on_r | sf_sb_on_r);
-		if (Debug > 8)
-		    message(LOG_DEBUG, "TCP %d: SSL_shutdown "
-			    "interrupted sf=%x", sd, pair->ssl_flag);
-		ret = 0;
-	    } else {
-		message(priority(pair), "TCP %d: SSL_shutdown "
-			"I/O error sf=%x errno=%d", sd, pair->ssl_flag, errno);
-	    }
-	} else {
-	    message(priority(pair), "TCP %d: SSL_shutdown sf=%x %s",
-		    sd, pair->ssl_flag, ERR_error_string(e, NULL));
-	}
-    } else {
-	if (Debug > 4)
-	    message(LOG_DEBUG, "TCP %d: SSL_shutdown interrupted sf=%x err=%d",
-		    sd, pair->ssl_flag, err);
-    }
-    /*
-      if this is the first call to us,
-      we must send FIN for buggy clients that ignore our SSL close notify.
-    */
-    if (!(pair->proto & proto_shutdown) && how > 0) shutdown(sd, 1);
     return ret;
 }
 #endif	/* USE_SSL */
 
-void doshutdown(Pair *pair, int how) {
+int doshutdown(Pair *pair, int how) {
 #ifdef USE_SSL
     SSL *ssl;
 #endif
-    if (!pair) return;
+    if (!pair) return -1;
 #ifdef USE_SSL
     ssl = pair->ssl;
-    if (ssl) doSSL_shutdown(pair, how);
+    if (ssl) return doSSL_shutdown(pair, how);
     else {
 #endif
 	if (Debug > 4)
 	    message(LOG_DEBUG, "TCP %d: shutdown how=%d", pair->sd, how);
-	shutdown(pair->sd, how);
+	return shutdown(pair->sd, how);
 #ifdef USE_SSL
     }
 #endif
@@ -2740,8 +2751,9 @@ void connected(Pair *pair) {
     if (pair->stone->proto & proto_ssl_d) {
 	if (doSSL_connect(pair) < 0) {
 	    /* SSL_connect fails, shutdown pairs */
-	    if (!(p->proto & proto_shutdown)) doshutdown(p, 2);
-	    p->proto |= (proto_shutdown | proto_close);
+	    if (!(p->proto & proto_shutdown))
+		if (doshutdown(p, 2) >= 0) p->proto |= proto_shutdown;
+	    p->proto |= proto_close;
 	    pair->proto |= proto_close;
 	    return;
 	}
@@ -2944,8 +2956,9 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     if (ret < 0		/* fail to connect */
 	|| (p1->proto & proto_close)
 	|| (p2->proto & proto_close)) {
-	if (!(p2->proto & proto_shutdown)) doshutdown(p2, 2);
-	p2->proto |= (proto_shutdown | proto_close);
+	if (!(p2->proto & proto_shutdown))
+	    if (doshutdown(p2, 2) >= 0) p2->proto |= proto_shutdown;
+	p2->proto |= proto_close;
 	p1->proto |= proto_close;
 	return -1;
     }
@@ -4480,11 +4493,15 @@ int first_read(Pair *pair) {
 		message(LOG_DEBUG, "TCP %d: read more from %d", psd, sd);
 	    }
 	} else if (len < 0) {
-	    if (!(pair->proto & proto_shutdown)) doshutdown(pair, 2);
-	    setclose(pair, proto_shutdown);
+	    int flag = 0;
+	    if (!(pair->proto & proto_shutdown))
+		if (doshutdown(pair, 2) >= 0) flag = proto_shutdown;
+	    setclose(pair, flag);
 	    if (ValidSocket(psd)) {
-		if (!(p->proto & proto_shutdown)) doshutdown(p, 2);
-		setclose(p, proto_shutdown);
+		flag = 0;
+		if (!(p->proto & proto_shutdown))
+		    if (doshutdown(p, 2) >= 0) flag = proto_shutdown;
+		setclose(p, flag);
 	    }
 	    return -1;
 	} else {
@@ -4710,8 +4727,9 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		if (doSSL_connect(p[i]) < 0) {
 		    /* SSL_connect fails, shutdown pairs */
 		    if (p[1-i] && !(p[1-i]->proto & proto_shutdown))
-			doshutdown(p[1-i], 2);
-		    p[1-i]->proto |= (proto_shutdown | proto_close);
+			if (doshutdown(p[1-i], 2) >= 0)
+			    p[1-i]->proto |= proto_shutdown;
+		    p[1-i]->proto |= proto_close;
 		    p[i]->proto |= proto_close;
 		}
 	    } else if (((p[i]->ssl_flag & sf_ab_on_r) && FD_ISSET(sd, &ro))
@@ -4768,9 +4786,9 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			  if (rPair->ssl) doSSL_shutdown(rPair, 0);
 			*/
 			if (!(wPair->proto & proto_shutdown))
-			    doshutdown(wPair, 1);	/* send FIN */
+			    if (doshutdown(wPair, 1) >= 0)	/* send FIN */
+				wPair->proto |= proto_shutdown;
 			wPair->proto &= ~proto_select_w;
-			wPair->proto |= proto_shutdown;
 		    } else {
 			/*
 			  error, already shutdowned, or bi-directional EOF,
@@ -4778,14 +4796,18 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			  send SSL notify to wPair and shutdown wPair,
 			  set close flag
 			*/
+			int flag = 0;
 			if (!(rPair->proto & proto_shutdown))
-			    doshutdown(rPair, 2);
-			if (!(wPair->proto & proto_shutdown))
-			    doshutdown(wPair, 2);
+			    if (doshutdown(rPair, 2) >= 0)
+				flag = proto_shutdown;
 			rPair->proto &= ~proto_select_w;
+			setclose(rPair, (proto_eof | flag));
+			flag = 0;
+			if (!(wPair->proto & proto_shutdown))
+			    if (doshutdown(wPair, 2) >= 0)
+				flag = proto_shutdown;
 			wPair->proto &= ~proto_select_w;
-			setclose(rPair, (proto_eof | proto_shutdown));
-			setclose(wPair, proto_shutdown);
+			setclose(wPair, flag);
 		    }
 		} else {
 		    if (len > 0) {
@@ -4831,14 +4853,16 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		len = dowrite(wPair);
 		wPair->count -= REF_UNIT;
 		if (len < 0 || (wPair->proto & proto_close) || rPair == NULL) {
+		    int flag = 0;
 		    if (rPair && ValidSocket(rsd)
 			&& !(rPair->proto & proto_shutdown))
-			doshutdown(rPair, 2);
+			if (doshutdown(rPair, 2) >= 0) flag = proto_shutdown;
 		    rPair->proto &= ~proto_select_w;
-		    setclose(rPair, proto_shutdown);
+		    setclose(rPair, flag);
+		    flag = 0;
 		    if (!(wPair->proto & proto_shutdown))
-			doshutdown(wPair, 2);
-		    setclose(wPair, proto_shutdown);
+			if (doshutdown(wPair, 2) >= 0) flag = proto_shutdown;
+		    setclose(wPair, flag);
 		} else {
 		    ExBuf *ex;
 		    ex = wPair->t;	/* top */
