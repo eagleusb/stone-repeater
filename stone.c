@@ -2550,8 +2550,8 @@ int doSSL_shutdown(Pair *pair, int how) {
     if (ret == 0) {
 	if (Debug > 4)
 	    message(LOG_DEBUG,
-		    "TCP %d: SSL_shutdown ret=%d sf=%x, shutdown 1",
-		    sd, ret, pair->ssl_flag);
+		    "TCP %d: SSL_shutdown ret=%d sf=%x, shutdown %d",
+		    sd, ret, pair->ssl_flag, (how >= 0 ? how : 1));
 	/* send a TCP FIN to trigger the other side's close_notify */
 	shutdown(sd, 1);
 	ret = SSL_shutdown(ssl);
@@ -2594,8 +2594,9 @@ int doSSL_shutdown(Pair *pair, int how) {
 	}
     } else if (ret == 0) {
 	if (Debug > 4)
-	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d sf=%x, incomplete",
+	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d sf=%x, shutdown 2",
 		    sd, ret, pair->ssl_flag);
+	shutdown(sd, 2);
 	ret = -1;
     }
     if (ret > 0) {	/* success */
