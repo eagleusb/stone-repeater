@@ -278,6 +278,7 @@ int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
 
 typedef struct {
     int verbose;
+    int shutdown_mode;
     int depth;
     long serial;
     SSL_CTX *ctx;
@@ -288,6 +289,7 @@ typedef struct {
 
 typedef struct {
     int verbose;
+    int shutdown_mode;
     int mode;
     int depth;
     long off;
@@ -2541,6 +2543,7 @@ int doSSL_shutdown(Pair *pair, int how) {
     int i;
     SOCKET sd;
     SSL *ssl;
+    StoneSSL *ss;
     if (!pair) return -1;
     sd = pair->sd;
     if (InvalidSocket(sd)) return -1;
@@ -2548,10 +2551,26 @@ int doSSL_shutdown(Pair *pair, int how) {
     if (!ssl) return -1;
     if (how >= 0) pair->ssl_flag = (how & sf_mask);
     else pair->ssl_flag = sf_mask;
-    SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN);
+    if ((pair->proto & proto_command) == command_source) {
+	ss = pair->stone->ssl_server;
+    } else {
+	ss = pair->stone->ssl_client;
+    }
+    if (ss->shutdown_mode) {
+	int state = SSL_get_shutdown(ssl);
+	SSL_set_shutdown(ssl, (state | ss->shutdown_mode));
+    }
     for (i=0; i < 4; i++) {
 	ret = SSL_shutdown(ssl);
 	if (ret != 0) break;
+    }
+    if (ret == 0 && ss->shutdown_mode == 0) {
+	if (Debug > 4)
+	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d sf=%x, "
+		    "so don't wait peer's notify",
+		    sd, ret, pair->ssl_flag);
+	SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN);
+	ret = SSL_shutdown(ssl);
     }
     if (ret < 0) {
 	err = SSL_get_error(ssl, ret);
@@ -2591,7 +2610,8 @@ int doSSL_shutdown(Pair *pair, int how) {
 	}
     } else if (ret == 0) {
 	if (Debug > 4)
-	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d sf=%x, shutdown 2",
+	    message(priority(pair), "TCP %d: SSL_shutdown error "
+		    "ret=%d sf=%x, reset connection",
 		    sd, ret, pair->ssl_flag);
 	shutdown(sd, 2);
 	ret = 0;
@@ -4229,8 +4249,9 @@ Pair *identd(int cport, struct sockaddr *ssa, socklen_t ssalen) {
     socklen_t salen;
     Pair *pair;
     for (pair=pairs.next; pair != NULL; pair=pair->next) {
+	SOCKET sd;
 	if ((pair->proto & proto_command) == command_source) continue;
-	SOCKET sd = pair->sd;
+	sd = pair->sd;
 	salen = sizeof(ss);
 	if (InvalidSocket(sd) || getsockname(sd, sa, &salen) < 0) {
 	    continue;
@@ -5270,6 +5291,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	exit(1);
     }
     ss->verbose = opts->verbose;
+    ss->shutdown_mode = opts->shutdown_mode;
     if (isserver) {
 	ss->ctx = SSL_CTX_new(SSLv23_server_method());
     } else {
@@ -5954,6 +5976,7 @@ void help(char *com) {
 #ifdef SSL_OP_CIPHER_SERVER_PREFERENCE
 	    "       serverpref       ; use server's cipher preferences (SSLv2)\n"
 #endif
+	    "       shutdown=<mode>  ; accurate, nowait, unclean\n"
 	    "       sid_ctx=<str>    ; set session ID context\n"
 	    "       key=<file>       ; key file\n"
 	    "       cert=<file>      ; certificate file\n"
@@ -6270,6 +6293,7 @@ int getdist(	/* return pos where serv begins */
 void sslopts_default(SSLOpts *opts, int isserver) {
     int i;
     opts->verbose = 0;
+    opts->shutdown_mode = 0;
     opts->mode = SSL_VERIFY_NONE;
     opts->depth = DEPTH_MAX - 1;
     opts->off = 0;
@@ -6288,6 +6312,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     for (i=0; i < DEPTH_MAX; i++) opts->regexp[i] = NULL;
     opts->lbmod = 0;
     opts->lbparm = 0xFF;
+    opts->shutdown_mode = 0;
 }
 
 int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
@@ -6295,6 +6320,14 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
 	sslopts_default(opts, isserver);
     } else if (!strcmp(argv[i], "verbose")) {
 	opts->verbose++;
+    } else if (!strncmp(argv[i], "shutdown=", 9)) {
+	if (!strcmp(argv[i]+9, "nowait")) {
+	    opts->shutdown_mode = SSL_RECEIVED_SHUTDOWN;
+	} else if (!strcmp(argv[i]+9, "accurate")) {
+	    opts->shutdown_mode = 0;
+	} else if (!strcmp(argv[i]+9, "unclean")) {
+	    opts->shutdown_mode = (SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
+	}
     } else if (!strncmp(argv[i], "verify", 6)
 	       && (argv[i][6] == '\0' || argv[i][6] == ',')) {
 	if (!strcmp(argv[i]+6, ",none")) {
