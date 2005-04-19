@@ -2538,6 +2538,7 @@ int doSSL_connect(Pair *pair) {
 int doSSL_shutdown(Pair *pair, int how) {
     int ret;
     int err;
+    int i;
     SOCKET sd;
     SSL *ssl;
     if (!pair) return -1;
@@ -2547,15 +2548,10 @@ int doSSL_shutdown(Pair *pair, int how) {
     if (!ssl) return -1;
     if (how >= 0) pair->ssl_flag = (how & sf_mask);
     else pair->ssl_flag = sf_mask;
-    ret = SSL_shutdown(ssl);
-    if (ret == 0) {
-	if (Debug > 4)
-	    message(LOG_DEBUG,
-		    "TCP %d: SSL_shutdown ret=%d sf=%x, shutdown %d",
-		    sd, ret, pair->ssl_flag, (how >= 0 ? how : 1));
-	/* send a TCP FIN to trigger the other side's close_notify */
-	shutdown(sd, 1);
+    SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN);
+    for (i=0; i < 4; i++) {
 	ret = SSL_shutdown(ssl);
+	if (ret != 0) break;
     }
     if (ret < 0) {
 	err = SSL_get_error(ssl, ret);
@@ -2598,7 +2594,7 @@ int doSSL_shutdown(Pair *pair, int how) {
 	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d sf=%x, shutdown 2",
 		    sd, ret, pair->ssl_flag);
 	shutdown(sd, 2);
-	ret = -1;
+	ret = 0;
     }
     if (ret > 0) {	/* success */
 	if (Debug > 4)
