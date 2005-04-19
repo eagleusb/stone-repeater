@@ -525,6 +525,7 @@ const int proto_base_d =	0x20000000;	/*        destination */
 #define command_ihead		    0x0200	/* insert header */
 #define command_pop		    0x0300	/* POP -> APOP conversion */
 #define command_health		    0x0400	/* is stone healthy ? */
+#define command_identd		    0x0500	/* identd of stone */
 #define command_source		    0x0f00	/* source flag */
 
 #define proto_ssl	(proto_ssl_s|proto_ssl_d)
@@ -2978,7 +2979,8 @@ int reqconn(Pair *pair,		/* request pair to connect to destination */
     Conn *conn;
     Pair *p = pair->pair;
     if ((pair->proto & proto_command) == command_proxy
-	|| (pair->proto & proto_command) == command_health) {
+	|| (pair->proto & proto_command) == command_health
+	|| (pair->proto & proto_command) == command_identd) {
 	if (p && !(p->proto & (proto_eof | proto_close)))
 	    p->proto |= proto_select_r;	/* must read request header */
 	return 0;
@@ -4214,6 +4216,88 @@ Comm popComm[] = {
 };
 #endif
 
+int getport(struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET) {
+	return ntohs(((struct sockaddr_in*)sa)->sin_port);
+#ifdef AF_INET6
+    } else if (sa->sa_family == AF_INET6) {
+	return ntohs(((struct sockaddr_in6*)sa)->sin6_port);
+#endif
+    }
+    return -1;
+}
+
+Pair *identd(int cport, struct sockaddr *ssa, socklen_t ssalen) {
+    struct sockaddr_storage ss;
+    struct sockaddr *sa = (struct sockaddr*)&ss;
+    socklen_t salen;
+    Pair *pair;
+    for (pair=pairs.next; pair != NULL; pair=pair->next) {
+	if ((pair->proto & proto_command) == command_source) continue;
+	SOCKET sd = pair->sd;
+	salen = sizeof(ss);
+	if (InvalidSocket(sd) || getsockname(sd, sa, &salen) < 0) {
+	    continue;
+	}
+	if (getport(sa) != cport) continue;
+	salen = sizeof(ss);
+	if (getpeername(sd, sa, &salen) < 0) {
+	    continue;
+	}
+	if (!saComp(sa, ssa)) continue;
+	return pair;
+    }
+    return NULL;
+}
+
+int identdQUERY(Pair *pair, char *parm, int start) {
+    int cport, sport;
+    char mesg[STRMAX+1];
+    struct sockaddr_storage ss;
+    struct sockaddr *sa = (struct sockaddr*)&ss;
+    socklen_t salen = sizeof(ss);
+    Pair *p = pair->pair;
+    strcpy(mesg, "ERROR : NO-USER");
+    if (p) {
+	SOCKET sd = p->sd;
+	if (sscanf(parm, "%d,%d", &cport, &sport) == 2
+	    && ValidSocket(sd) && getpeername(sd, sa, &salen) >= 0) {
+	    if (Debug > 8) {
+		char addrport[STRMAX+1];
+		addrport2str(sa, salen, 0, addrport, STRMAX, 0);
+		message(LOG_DEBUG, "TCP %d: identd query %d,%d from %s",
+			sd, cport, sport, addrport);
+	    }
+	    saPort(sa, sport);
+	    p = identd(cport, sa, salen);
+	    if (p) {
+		int port = -1;
+		Stone *stone = p->stone;
+		if (stone) port = stone->port;
+		snprintf(mesg, STRMAX, "USERID : STONE : %d", port);
+	    }
+	    if (Debug > 2) {
+		char addrport[STRMAX+1];
+		addrport2str(sa, salen, 0, addrport, STRMAX, 0);
+		message(LOG_DEBUG, "identd %d %s %s", cport, addrport, mesg);
+	    }
+	}
+    }
+    commOutput(pair, "%d , %d : %s\r\n", cport, sport, mesg);
+    return -2;	/* read more */
+}
+
+int identdQUIT(Pair *pair, char *parm, int start) {
+    if (Debug) message(LOG_DEBUG, "identd QUIT %s", parm);
+    return -1;
+}
+
+Comm identdComm[] = {
+    { "QUIT", identdQUIT },
+    { "", identdQUERY },
+    { NULL, identdQUERY },
+};
+
 int nStones(void) {
     int n = 0;
     Stone *stone;
@@ -4485,6 +4569,9 @@ int first_read(Pair *pair) {
 	case command_health:
 	    if (!memCheck()) len = -1;
 	    else len = docomm(p, healthComm);
+	    break;
+	case command_identd:
+	    len = docomm(p, identdComm);
 	    break;
 	default:
 	    ;
@@ -5507,7 +5594,8 @@ Stone *mkstone(
 	stonep->port = ntohs(sinp->sin_port);
     }
     if ((proto & proto_command) == command_proxy
-	|| (proto & proto_command) == command_health) {
+	|| (proto & proto_command) == command_health
+	|| (proto & proto_command) == command_identd) {
 	stonep->ndsts = 1;
 	stonep->dsts = malloc(sizeof(SockAddr*));	/* dummy */
 	if (!stonep->dsts) goto memerr;
@@ -5699,6 +5787,10 @@ Stone *mkstone(
 		message(LOG_DEBUG,
 			"stone %d: %s %s check health",
 			stonep->sd, xhost, (allow ? "can" : "can't"));
+	    } else if ((proto & proto_command) == command_identd) {
+		message(LOG_DEBUG,
+			"stone %d: %s %s query ident",
+			stonep->sd, xhost, (allow ? "can" : "can't"));
 	    } else {
 		char addrport[STRMAX+1];
 		addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
@@ -5722,6 +5814,10 @@ Stone *mkstone(
 	message(LOG_INFO, "stone %d: health <- %s",
 		stonep->sd,
 		xhost);
+    } else if ((proto & proto_command) == command_identd) {
+	message(LOG_INFO, "stone %d: identd <- %s",
+		stonep->sd,
+		xhost);
     } else {
 	char addrport[STRMAX+1];
 	addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
@@ -5732,6 +5828,7 @@ Stone *mkstone(
     stonep->backups = NULL;
     if ((proto & proto_command) != command_proxy
 	&& (proto & proto_command) != command_health
+	&& (proto & proto_command) != command_identd
 	&& (proto & proto_nobackup) == 0) {
 	Backup *bs[LB_MAX];
 	int found = 0;
@@ -5818,6 +5915,8 @@ void help(char *com) {
 #endif
 	    "stone: <host>:<port> <sport> [<xhost>...]\n"
 	    "       proxy <sport> [<xhost>...]\n"
+	    "       health <sport> [<xhost>...]\n"
+	    "       identd <sport> [<xhost>...]\n"
 	    "       <host>:<port#>/http <sport> <Request-Line> [<xhost>...]\n"
 	    "       <host>:<port#>/proxy <sport> <header> [<xhost>...]\n"
 	    "port:  <port#>[/<ext>[,<ext>]...]\n"
@@ -6160,6 +6259,11 @@ int getdist(	/* return pos where serv begins */
 	if (!strcmp(top, "health")) {
 	    *protop &= ~proto_command;
 	    *protop |= command_health;
+	    return 1;	/* host only */
+	}
+	if (!strcmp(top, "identd")) {
+	    *protop &= ~proto_command;
+	    *protop |= command_identd;
 	    return 1;	/* host only */
 	}
 	return 0;	/* serv only */
@@ -6616,6 +6720,9 @@ void doargs(int argc, int i, char *argv[]) {
 	    } else if ((dproto & proto_command) == command_health) {
 		proto &= ~proto_command;
 		proto |= command_health;
+	    } else if ((dproto & proto_command) == command_identd) {
+		proto &= ~proto_command;
+		proto |= command_identd;
 	    }
 	    if (dproto & proto_ssl) proto |= proto_ssl_d;
 	    if (dproto & proto_v6) proto |= proto_v6_d;
