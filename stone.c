@@ -4268,7 +4268,8 @@ Pair *identd(int cport, struct sockaddr *ssa, socklen_t ssalen) {
 }
 
 int identdQUERY(Pair *pair, char *parm, int start) {
-    int cport, sport;
+    int cport = 0;
+    int sport = 0;
     char mesg[STRMAX+1];
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
@@ -4298,6 +4299,8 @@ int identdQUERY(Pair *pair, char *parm, int start) {
 		addrport2str(sa, salen, 0, addrport, STRMAX, 0);
 		message(LOG_DEBUG, "identd %d %s %s", cport, addrport, mesg);
 	    }
+	} else {
+	    return -1;
 	}
     }
     commOutput(pair, "%d , %d : %s\r\n", cport, sport, mesg);
