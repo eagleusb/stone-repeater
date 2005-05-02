@@ -1118,6 +1118,18 @@ void saPort(struct sockaddr *sa, u_short port) {
     message(LOG_ERR, "saPort: unknown family=%d", sa->sa_family);
 }
 
+/* get port from struct sockaddr */
+int getport(struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET) {
+	return ntohs(((struct sockaddr_in*)sa)->sin_port);
+#ifdef AF_INET6
+    } else if (sa->sa_family == AF_INET6) {
+	return ntohs(((struct sockaddr_in6*)sa)->sin6_port);
+#endif
+    }
+    return -1;
+}
+
 int hostPortExt(char *str, char *host, char *port) {
     int port_pos = 0;
     int ext_pos = 0;
@@ -3087,13 +3099,14 @@ int scanConns(void) {
     return 1;
 }
 
-int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
+int getident(char *str, struct sockaddr *sa, socklen_t salen,
+	     int cport, struct sockaddr *csa, socklen_t csalen) {
     /* (size of str) >= STRMAX+1 */
     SOCKET sd;
     struct sockaddr_storage ss;
     struct sockaddr *peer = (struct sockaddr*)&ss;
     socklen_t peerlen = sizeof(ss);
-    int sport;
+    int sport = getport(sa);
     char buf[LONGSTRMAX+1];
     char c;
     int len;
@@ -3118,6 +3131,16 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 	    message(LOG_DEBUG, "ident: can't create socket err=%d.",
 		    sd, errno);
 	return 0;
+    }
+    saPort(csa, 0);
+    if (bind(sd, csa, csalen) < 0) {
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	if (Debug > 0)
+	    message(LOG_DEBUG, "ident: can't bind socket err=%d.",
+		    sd, errno);
+	/* hope default source address is adequate */
     }
     saPort(peer, 113);	/* ident protocol */
     addr2str(peer, peerlen, addr, STRMAX, 0);
@@ -3224,9 +3247,11 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen, int cport) {
 
 /* *stonep accept connection */
 Pair *doaccept(Stone *stonep) {
-    struct sockaddr_storage ss;
-    struct sockaddr *from = (struct sockaddr*)&ss;
-    socklen_t fromlen = sizeof(ss);
+    struct sockaddr_storage ss1, ss2;
+    struct sockaddr *from = (struct sockaddr*)&ss1;
+    socklen_t fromlen = sizeof(ss1);
+    struct sockaddr *to = (struct sockaddr*)&ss2;
+    socklen_t tolen = sizeof(ss2);
     SOCKET nsd;
     int len;
     Pair *pair1, *pair2;
@@ -3266,15 +3291,25 @@ Pair *doaccept(Stone *stonep) {
 	message(LOG_ERR, "stone %d: accept error err=%d.", stonep->sd, errno);
 	return NULL;
     }
-    if ((stonep->proto & proto_ident)
-	&& getident(ident, from, fromlen, stonep->port)) {
-	strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
-	fromstr[STRMAX] = '\0';
-	len = strlen(fromstr);
-	fromstr[len++] = '@';	/* omit size check, because len <= STRMAX */
-    } else {
-	len = 0;
-	ident[0] = '\0';
+    len = 0;
+    ident[0] = '\0';
+    if (stonep->proto & proto_ident) {
+	if (getsockname(nsd, to, &tolen) < 0) {
+#ifdef WINDOWS
+	    errno = WSAGetLastError();
+#endif
+	    message(LOG_ERR, "stone %d: Can't get socket's name sd=%d err=%d",
+		    stonep->sd, nsd, errno);
+	    shutdown(nsd, 2);
+	    closesocket(nsd);
+	    return NULL;
+	}
+	if (getident(ident, from, fromlen, stonep->port, to, tolen)) {
+	    strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
+	    fromstr[STRMAX] = '\0';
+	    len = strlen(fromstr);
+	    fromstr[len++] = '@';  /* omit size check, because len <= STRMAX */
+	}
     }
     addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
 		 fromstr+len, STRMAX*2-len, 0);
@@ -4231,17 +4266,6 @@ Comm popComm[] = {
     { NULL, popErr },
 };
 #endif
-
-int getport(struct sockaddr *sa) {
-    if (sa->sa_family == AF_INET) {
-	return ntohs(((struct sockaddr_in*)sa)->sin_port);
-#ifdef AF_INET6
-    } else if (sa->sa_family == AF_INET6) {
-	return ntohs(((struct sockaddr_in6*)sa)->sin6_port);
-#endif
-    }
-    return -1;
-}
 
 Pair *identd(int cport, struct sockaddr *ssa, socklen_t ssalen) {
     struct sockaddr_storage ss;
