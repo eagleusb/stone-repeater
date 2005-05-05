@@ -176,6 +176,7 @@ typedef void *(*aync_start_routine) (void *);
 #include <sys/wait.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -505,6 +506,8 @@ const int proto_nobackup =	   0x10000;	  /* no backup */
 const int proto_udp =		   0x20000;	  /* user datagram protocol */
 const int proto_v6_s =		   0x40000;	  /* IPv6 source */
 const int proto_v6_d =		   0x80000;	  /*      destination */
+const int proto_unix_s =	  0x100000;       /* unix socket source */
+const int proto_unix_d =	  0x200000;	  /*             destination */
 const int proto_ssl_s =		 0x1000000;	  /* SSL source */
 const int proto_ssl_d =		 0x2000000;	  /*     destination */
 						/* only for Pair */
@@ -532,6 +535,7 @@ const int proto_base_d =	0x20000000;	/*        destination */
 
 #define proto_ssl	(proto_ssl_s|proto_ssl_d)
 #define proto_v6	(proto_v6_s|proto_v6_d)
+#define proto_unix	(proto_unix_s|proto_unix_d)
 #define proto_ohttp	(proto_ohttp_s|proto_ohttp_d)
 #define proto_base	(proto_base_s|proto_base_d)
 #define proto_stone_s	(proto_udp|proto_command|\
@@ -3380,6 +3384,11 @@ Pair *doaccept(Stone *stonep) {
       SSL connection may not be established yet,
       but we can prepare the pair for connecting to the destination
     */
+#ifdef AF_LOCAL
+    if (stonep->proto & proto_unix_d)
+	pair2->sd = socket(AF_LOCAL, SOCK_STREAM, 0);
+    else
+#endif
 #ifdef AF_INET6
     if (stonep->proto & proto_v6_d)
 	pair2->sd = socket(AF_INET6, SOCK_STREAM, 0);
@@ -5622,6 +5631,16 @@ Stone *mkstone(
 	satype = SOCK_STREAM;
 	saproto = IPPROTO_TCP;
     }
+#ifdef AF_LOCAL
+    if (proto & proto_unix_s) {
+	struct sockaddr_un *sun = (struct sockaddr_un*)sa;
+	salen = sizeof(struct sockaddr_un);
+	bzero(sa, salen);
+	sun->sun_family = AF_LOCAL;
+	snprintf(sun->sun_path, sizeof(sun->sun_path)-1, "%s", host);
+	saproto = 0;
+    } else
+#endif
 #ifdef AF_INET6
     if (proto & proto_v6_s) {
 	struct sockaddr_in6 *sin6p = (struct sockaddr_in6*)sa;
@@ -5645,17 +5664,33 @@ Stone *mkstone(
 	stonep->dsts = malloc(sizeof(SockAddr*));	/* dummy */
 	if (!stonep->dsts) goto memerr;
 	stonep->dsts[0] = saDup(sa, salen);	/* dummy */
+#ifdef AF_LOCAL
+    } else if (proto & proto_unix_d) {
+	struct sockaddr_storage dss;
+	struct sockaddr_un *sun = (struct sockaddr_un*)&dss;
+	stonep->ndsts = 1;
+	stonep->dsts = malloc(sizeof(SockAddr*));
+	if (!stonep->dsts) goto memerr;
+	bzero(sun, sizeof(dss));
+	sun->sun_family = AF_LOCAL;
+	snprintf(sun->sun_path, sizeof(sun->sun_path)-1, "%s", dhost);
+	stonep->dsts[0] = saDup((struct sockaddr*)sun,
+				sizeof(struct sockaddr_un));
+	if (!stonep->dsts[0]) goto memerr;
+#endif
     } else {
 	struct sockaddr_storage dss;
 	struct sockaddr *dsa = (struct sockaddr*)&dss;
 	socklen_t dsalen = sizeof(dss);
+	int dsatype = satype;
+	int dsaproto = 0;
 	LBSet *lbset;
 #ifdef AF_INET6
 	if (proto & proto_v6_d) dsa->sa_family = AF_INET6;
 	else
 #endif
 	    dsa->sa_family = AF_INET;
-	if (!host2sa(dhost, dserv, dsa, &dsalen, &satype, &saproto, 0)) {
+	if (!host2sa(dhost, dserv, dsa, &dsalen, &dsatype, &dsaproto, 0)) {
 	    exit(1);
 	}
 	lbset = findLBSet(dsa, proto);
@@ -5682,8 +5717,9 @@ Stone *mkstone(
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
-	    message(LOG_ERR, "stone %d: Can't get socket err=%d.",
-		    stonep->sd, errno);
+	    message(LOG_ERR, "stone %d: Can't get socket "
+		    "family=%d type=%d proto=%d err=%d.",
+		    stonep->sd, sa->sa_family, satype, saproto, errno);
 	    exit(1);
 	}
 	if (!(proto & proto_udp) && ReuseAddr) {
@@ -6242,12 +6278,30 @@ int getdist(	/* return pos where serv begins */
     char *port_str, *proto_str, *top;
     top = p;
     port_str = proto_str = NULL;
+    *protop = 0;	/* default */
+#ifdef AF_LOCAL
+    if (p[0] == '.' || p[0] == '/') {
+	struct stat st;
+	p++;
+	while (*p) {
+	    if (*p == '/') proto_str = ++p;
+	    else p++;
+	}
+	if (proto_str) {
+	    *(proto_str-1) = '\0';
+	    if (stat(top, &st) >=0 && S_ISDIR(st.st_mode)) {
+		*(proto_str-1) = '/';	/* restore */
+		proto_str = NULL;
+	    }
+	}
+	*protop |= proto_unix;
+    } else
+#endif
     while (*p) {
 	if (*p == ':') port_str = ++p;
 	else if (*p == '/') proto_str = ++p;
 	else p++;
     }
-    *protop = 0;	/* default */
     if (proto_str) {
 	*(proto_str-1) = '\0';
 	p = proto_str;
@@ -6297,6 +6351,11 @@ int getdist(	/* return pos where serv begins */
 	*(port_str-1) = '\0';
 	return port_str - top;	/* host & serv */
     } else {
+#ifdef AF_LOCAL
+	if (*protop & proto_unix) {
+	    return 1;
+	}
+#endif
 	if (!strcmp(top, "proxy")) {
 	    *protop &= ~proto_command;
 	    *protop |= command_proxy;
@@ -6739,8 +6798,14 @@ void doargs(int argc, int i, char *argv[]) {
 	    } else if (j == 0) {
 		shost = NULL;
 		sserv = argv[i];
-	    } else help(argv[0]);
-	} else help(argv[0]);
+	    } else {
+		message(LOG_ERR, "Invalid <sport>: %s", argv[i]);
+		exit(1);
+	    }
+	} else {
+	    message(LOG_ERR, "Invalid <host><port>: %s", argv[i]);
+	    exit(1);
+	}
 	i++;
 	j = 0;
 	k = i;
@@ -6753,6 +6818,7 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (sproto & proto_ohttp) proto |= proto_ohttp_s;
 	    if (sproto & proto_ssl) proto |= proto_ssl_s;
 	    if (sproto & proto_v6) proto |= proto_v6_s;
+	    if (sproto & proto_unix) proto |= proto_unix_s;
 	    if (sproto & proto_base) proto |= proto_base_s;
 	    if (sproto & proto_ident) proto |= proto_ident;
 	    if ((dproto & proto_command) == command_proxy) {
@@ -6782,6 +6848,7 @@ void doargs(int argc, int i, char *argv[]) {
 	    }
 	    if (dproto & proto_ssl) proto |= proto_ssl_d;
 	    if (dproto & proto_v6) proto |= proto_v6_d;
+	    if (dproto & proto_unix) proto |= proto_unix_d;
 	    if (dproto & proto_base) proto |= proto_base_d;
 	    if (dproto & proto_nobackup) proto |= proto_nobackup;
 	}
