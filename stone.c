@@ -1473,7 +1473,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #endif
     time_t start, now;
     time(&start);
-    sd = socket(sa->sa_family, SOCK_STREAM, 0);
+    sd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
     if (InvalidSocket(sd)) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -3126,7 +3126,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
     if (str) {
 	str[0] = '\0';
     }
-    sd = socket(peer->sa_family, SOCK_STREAM, 0);
+    sd = socket(peer->sa_family, SOCK_STREAM, IPPROTO_TCP);
     if (InvalidSocket(sd)) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -3391,10 +3391,10 @@ Pair *doaccept(Stone *stonep) {
 #endif
 #ifdef AF_INET6
     if (stonep->proto & proto_v6_d)
-	pair2->sd = socket(AF_INET6, SOCK_STREAM, 0);
+	pair2->sd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     else
 #endif
-	pair2->sd = socket(AF_INET, SOCK_STREAM, 0);
+	pair2->sd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (InvalidSocket(pair2->sd)) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -4068,7 +4068,7 @@ int doproxy(Pair *pair, char *host, char *port) {
 	|| (!(pair->stone->proto & proto_v6_d) && sa->sa_family == AF_INET6)
 #endif
 	) {
-	SOCKET nsd = socket(sa->sa_family, SOCK_STREAM, 0);
+	SOCKET nsd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
 	if (ValidSocket(nsd)) {
 	    SOCKET sd = pair->sd;
 	    pair->sd = nsd;

@@ -168,7 +168,9 @@ HOWTO USE
 	other machine ``<host>'' port ``<port>''.  If the machine, on
 	which the program runs, has two or more interfaces, type (2) can
 	be used to repeat the connection on the specified interface
-	``<shost>''.
+	``<shost>''.  You can also specify path name that begins with
+	``/'' or ``./'', instead of ``<host>:<port>'' so that the
+	program handles a unix domain socket.
 
 	Type (3) is a http proxy.  Specify the machine, on which the
 	program runs, and port ``<sport>'' in the http proxy settings of
