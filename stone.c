@@ -102,7 +102,7 @@ static char *CVS_ID =
 typedef void (*FuncPtr)(void*);
 
 #ifdef WINDOWS
-#define FD_SETSIZE	256
+#define FD_SETSIZE	4096
 #include <process.h>
 #include <ws2tcpip.h>
 #include <time.h>
@@ -508,6 +508,8 @@ const int proto_v6_s =		   0x40000;	  /* IPv6 source */
 const int proto_v6_d =		   0x80000;	  /*      destination */
 const int proto_unix_s =	  0x100000;       /* unix socket source */
 const int proto_unix_d =	  0x200000;	  /*             destination */
+const int proto_block_s =	  0x400000;	  /* blocking I/O source */
+const int proto_block_d =	  0x800000;	  /*              destination*/
 const int proto_ssl_s =		 0x1000000;	  /* SSL source */
 const int proto_ssl_d =		 0x2000000;	  /*     destination */
 						/* only for Pair */
@@ -536,6 +538,7 @@ const int proto_base_d =	0x20000000;	/*        destination */
 #define proto_ssl	(proto_ssl_s|proto_ssl_d)
 #define proto_v6	(proto_v6_s|proto_v6_d)
 #define proto_unix	(proto_unix_s|proto_unix_d)
+#define proto_block	(proto_block_s|proto_block_d)
 #define proto_ohttp	(proto_ohttp_s|proto_ohttp_d)
 #define proto_base	(proto_base_s|proto_base_d)
 #define proto_stone_s	(proto_udp|proto_command|\
@@ -893,6 +896,12 @@ char *ext2str(int ext, char *str, int len) {
 	sep = ',';
 	strncpy(str+i, "base", len-i);
 	i += 4;
+    }
+    if (ext & proto_block) {
+	if (i < len) str[i++] = sep;
+	sep = ',';
+	strncpy(str+i, "block", len-i);
+	i += 5;
     }
     if (ext & proto_ident) {
 	if (i < len) str[i++] = sep;
@@ -1484,12 +1493,14 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
     }
     addrport2str(sa, salen, (proto & proto_pair_d), addrport, STRMAX, 0);
     addrport[STRMAX] = '\0';
+    if (!(proto & proto_block_d)) {
 #ifdef WINDOWS
-    param = 1;
-    ioctlsocket(sd, FIONBIO, &param);
+	param = 1;
+	ioctlsocket(sd, FIONBIO, &param);
 #else
-    fcntl(sd, F_SETFL, O_NONBLOCK);
+	fcntl(sd, F_SETFL, O_NONBLOCK);
 #endif
+    }
     ret = connect(sd, sa, salen);
     if (ret < 0) {
 #ifdef WINDOWS
@@ -2944,12 +2955,14 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     /*
       now destination is determined, engage
     */
+    if (!(p1->stone->proto & proto_block_d)) {
 #ifdef WINDOWS
-    param = 1;
-    ioctlsocket(p1->sd, FIONBIO, &param);
+	param = 1;
+	ioctlsocket(p1->sd, FIONBIO, &param);
 #else
-    fcntl(p1->sd, F_SETFL, O_NONBLOCK);
+	fcntl(p1->sd, F_SETFL, O_NONBLOCK);
 #endif
+    }
     addrport2str(dst, dstlen, (p1->proto & proto_pair_d), addrport, STRMAX, 0);
     addrport[STRMAX] = '\0';
     if (Debug > 2)
@@ -3264,9 +3277,6 @@ Pair *doaccept(Stone *stonep) {
 #endif
     char ident[STRMAX+1];
     char fromstr[STRMAX*2+1];
-#ifdef WINDOWS
-    u_long param;
-#endif
     nsd = INVALID_SOCKET;
     pair1 = pair2 = NULL;
     nsd = accept(stonep->sd, from, &fromlen);
@@ -3368,12 +3378,15 @@ Pair *doaccept(Stone *stonep) {
 		    proto_first_r | proto_first_w);
     pair1->timeout = pair2->timeout = stonep->timeout;
     /* now successfully accepted */
+    if (!(stonep->proto & proto_block_d)) {
 #ifdef WINDOWS
-    param = 1;
-    ioctlsocket(pair1->sd, FIONBIO, &param);
+	u_long param;
+	param = 1;
+	ioctlsocket(pair1->sd, FIONBIO, &param);
 #else
-    fcntl(pair1->sd, F_SETFL, O_NONBLOCK);
+	fcntl(pair1->sd, F_SETFL, O_NONBLOCK);
 #endif
+    }
 #ifdef USE_SSL
     if (stonep->proto & proto_ssl_s) {
 	if (doSSL_accept(pair1) < 0) goto error;
@@ -4720,6 +4733,7 @@ void proto2fdset(Pair *pair, int isthread,
     if (!isthread && (pair->proto & proto_thread)) return;
     if (pair->proto & proto_conninprog) {
 	FdSet(sd, woutp);
+	FdSet(sd, eoutp);
 #ifdef USE_SSL
     } else if (pair->ssl_flag & (sf_sb_on_r | sf_sb_on_w)) {
 	FD_CLR(sd, routp);
@@ -4807,7 +4821,32 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    sd = p[i]->sd;
 	    if (InvalidSocket(sd)) continue;
 	    p[i]->loop++;
-	    if (FD_ISSET(sd, &eo)) {	/* Out-of-Band Data */
+	    if ((p[i]->proto & proto_conninprog)
+		&& (FD_ISSET(sd, &wo) || FD_ISSET(sd, &eo))) {
+		int optval;
+		socklen_t optlen = sizeof(optval);
+		p[i]->proto &= ~proto_conninprog;
+		if (getsockopt(sd, SOL_SOCKET, SO_ERROR,
+			       (char*)&optval, &optlen) < 0) {
+#ifdef WINDOWS
+		    errno = WSAGetLastError();
+#endif
+		    message(LOG_ERR, "TCP %d: getsockopt err=%d",
+			    sd, errno);
+		    p[i]->proto |= proto_close;
+		    p[1-i]->proto |= proto_close;
+		    goto leave;
+		}
+		if (optval) {
+		    message(LOG_ERR, "TCP %d: connect getsockopt err=%d",
+			    sd, optval);
+		    p[i]->proto |= proto_close;
+		    p[1-i]->proto |= proto_close;
+		    goto leave;
+		} else {	/* succeed in connecting */
+		    connected(p[i]);
+		}
+	    } else if (FD_ISSET(sd, &eo)) {	/* Out-of-Band Data */
 		char buf[1];
 		len = recv(sd, buf, 1, MSG_OOB);
 		if (len == 1) {
@@ -4832,28 +4871,6 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 #endif
 		    message(LOG_ERR, "TCP %d: recv MSG_OOB ret=%d, err=%d",
 			    sd, len, errno);
-		}
-	    } else if ((p[i]->proto & proto_conninprog) && FD_ISSET(sd, &wo)) {
-		int optval;
-		socklen_t optlen = sizeof(optval);
-		p[i]->proto &= ~proto_conninprog;
-		if (getsockopt(sd, SOL_SOCKET, SO_ERROR,
-			       (char*)&optval, &optlen) < 0) {
-#ifdef WINDOWS
-		    errno = WSAGetLastError();
-#endif
-		    message(LOG_ERR, "TCP %d: getsockopt err=%d",
-			    sd, errno);
-		    p[i]->proto |= proto_close;
-		    goto leave;
-		}
-		if (optval) {
-		    message(LOG_ERR, "TCP %d: connect getsockopt err=%d",
-			    sd, optval);
-		    p[i]->proto |= proto_close;
-		    goto leave;
-		} else {	/* succeed in connecting */
-		    connected(p[i]);
 		}
 #ifdef USE_SSL
 	    } else if (((p[i]->ssl_flag & sf_sb_on_r) && FD_ISSET(sd, &ro))
@@ -5739,9 +5756,15 @@ Stone *mkstone(
 			stonep->sd, str, errno);
 		exit(1);
 	    }
-#ifndef NO_FORK
-	    fcntl(stonep->sd, F_SETFL, O_NONBLOCK);
+	    if (!(stonep->proto & proto_block_d)) {
+#ifdef WINDOWS
+		u_long param;
+		param = 1;
+		ioctlsocket(stonep->sd, FIONBIO, &param);
+#else
+		fcntl(stonep->sd, F_SETFL, O_NONBLOCK);
 #endif
+	    }
 	    if (stonep->port == 0) {
 		salen = sizeof(ss);
 		getsockname(stonep->sd, sa, &salen);
@@ -6011,7 +6034,7 @@ void help(char *com) {
 #ifdef USE_POP
 	    " | apop"
 #endif
-	    " | base | nobackup\n"
+	    " | base | block | nobackup\n"
 	    "sport: [<host>:]<port#>[/<exts>[,<exts>]...]\n"
 	    "exts:  tcp | udp"
 #ifdef USE_SSL
@@ -6020,7 +6043,7 @@ void help(char *com) {
 #ifdef AF_INET6
 	    " | v6"
 #endif
-	    " | http | base | ident\n"
+	    " | http | base | block | ident\n"
 	    "xhost: <host>[/<mask>]\n"
 #ifdef USE_SSL
 	    "SSL:   default          ; reset to default\n"
@@ -6338,6 +6361,9 @@ int getdist(	/* return pos where serv begins */
 		p += 2;
 		*protop |= proto_v6;
 #endif
+	    } else if (!strncmp(p, "block", 5)) {
+		p += 5;
+		*protop |= proto_block;
 #ifdef USE_POP
 	    } else if (!strncmp(p, "apop", 4)) {
 		p += 4;
@@ -6819,6 +6845,7 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (sproto & proto_ssl) proto |= proto_ssl_s;
 	    if (sproto & proto_v6) proto |= proto_v6_s;
 	    if (sproto & proto_unix) proto |= proto_unix_s;
+	    if (sproto & proto_block) proto |= proto_block_s;
 	    if (sproto & proto_base) proto |= proto_base_s;
 	    if (sproto & proto_ident) proto |= proto_ident;
 	    if ((dproto & proto_command) == command_proxy) {
@@ -6849,6 +6876,7 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (dproto & proto_ssl) proto |= proto_ssl_d;
 	    if (dproto & proto_v6) proto |= proto_v6_d;
 	    if (dproto & proto_unix) proto |= proto_unix_d;
+	    if (dproto & proto_block) proto |= proto_block_d;
 	    if (dproto & proto_base) proto |= proto_base_d;
 	    if (dproto & proto_nobackup) proto |= proto_nobackup;
 	}
