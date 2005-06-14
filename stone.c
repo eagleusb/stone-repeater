@@ -4069,21 +4069,42 @@ static char *comm_match(char *buf, char *str) {
 }
 
 int doproxy(Pair *pair, char *host, char *port) {
+    SOCKET sd = pair->sd;
+    int reconnect = 0;
+    struct sockaddr_storage name_s;
+    struct sockaddr *name = (struct sockaddr*)&name_s;
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
+    socklen_t namelen = sizeof(name_s);
     socklen_t salen = sizeof(ss);
     sa->sa_family = AF_UNSPEC;
     if (!host2sa(host, port, sa, &salen, NULL, NULL, 0)) {
 	return -1;
     }
-    if (((pair->stone->proto & proto_v6_d) && sa->sa_family == AF_INET)
+    if (islocalhost(sa)) {
+	TimeLog *log = pair->log;
+	pair->log = NULL;
+	if (log) free(log);
+    }
+    if (getpeername(sd, name, &namelen) >= 0) {	/* reconnect proxy */
+	Pair *p = pair->pair;
+	if (Debug > 7) {
+	    char str[STRMAX+1];
+	    message(LOG_DEBUG, "TCP %d: old proxy connection: %s",
+		    sd, addrport2str(name, namelen, 0, str, STRMAX, 0));
+	}
+	if (p) p->proto |= proto_first_w;
+	if (saComp(sa, name)) return 0;	/* same sa, so need not to connect */
+	reconnect = 1;
+    }
+    if (reconnect
+	|| ((pair->stone->proto & proto_v6_d) && sa->sa_family == AF_INET)
 #ifdef AF_INET6
 	|| (!(pair->stone->proto & proto_v6_d) && sa->sa_family == AF_INET6)
 #endif
 	) {
 	SOCKET nsd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
 	if (ValidSocket(nsd)) {
-	    SOCKET sd = pair->sd;
 	    pair->sd = nsd;
 	    message(LOG_INFO, "stone %d: close %d, reopen %d as family=%d",
 		    pair->stone->sd, sd, nsd, sa->sa_family);
@@ -4091,12 +4112,12 @@ int doproxy(Pair *pair, char *host, char *port) {
 	}
     }
     pair->proto &= ~proto_command;
-    if (islocalhost(sa)) {
-	TimeLog *log = pair->log;
-	pair->log = NULL;
-	if (log) free(log);
-    }
     if (reqconn(pair, sa, salen) < 0) return -1;
+    if ((pair->proto & state_mask) == 1) {
+	if (Debug > 7) message(LOG_DEBUG, "TCP %d: command_proxy again",
+			       pair->sd);
+	pair->proto |= command_proxy;
+    }
     return 0;
 }
 
@@ -4167,14 +4188,21 @@ int proxyCommon(Pair *pair, char *parm, int start) {
     ex->start = 0;
     if (Debug > 1) {
 	Pair *r = pair->pair;
-	message(LOG_DEBUG, "proxy %d -> http://%s:%d",
+	message(LOG_DEBUG, "proxy %d -> http://%s:%s",
 		(r ? r->sd : INVALID_SOCKET), host, port);
     }
+    pair->proto &= ~state_mask;
+    pair->proto |= 1;
     return doproxy(pair, host, port);
 }
 
 int proxyGET(Pair *pair, char *parm, int start) {
     message_time(pair, LOG_INFO, "GET %s", parm);
+    return proxyCommon(pair, parm, start);
+}
+
+int proxyHEAD(Pair *pair, char *parm, int start) {
+    message_time(pair, LOG_INFO, "HEAD %s", parm);
     return proxyCommon(pair, parm, start);
 }
 
@@ -4192,6 +4220,7 @@ Comm proxyComm[] = {
     { "CONNECT", proxyCONNECT },
     { "POST", proxyPOST },
     { "GET", proxyGET },
+    { "HEAD", proxyHEAD },
     { NULL, proxyErr },
 };
 
@@ -5026,8 +5055,19 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		    ex = wPair->t;	/* top */
 		    /* (wPair->proto & proto_eof) may be true */
 		    if (ex->len <= 0) {	/* all written */
-			if (wPair->proto & proto_first_w)
+			if (wPair->proto & proto_first_w) {
 			    wPair->proto &= ~proto_first_w;
+			    if (rPair && ValidSocket(rsd)
+				&& ((rPair->proto & proto_command)
+				    == command_proxy)
+				&& ((rPair->proto & state_mask) == 1)) {
+				if (Debug > 7)
+				    message(LOG_DEBUG,
+					    "TCP %d: reconnect proxy",
+					    wPair->sd);
+				wPair->proto |= proto_first_r;
+			    }
+			}
 			if (rPair && ValidSocket(rsd)
 			    && (rPair->proto & proto_connect)
 			    && !(rPair->proto & (proto_eof | proto_close))
