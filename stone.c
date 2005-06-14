@@ -5061,6 +5061,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 				&& ((rPair->proto & proto_command)
 				    == command_proxy)
 				&& ((rPair->proto & state_mask) == 1)) {
+				message_time_log(rPair);
 				if (Debug > 7)
 				    message(LOG_DEBUG,
 					    "TCP %d: reconnect proxy",
