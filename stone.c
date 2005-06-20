@@ -1965,8 +1965,8 @@ void message_origin(int pri, Origin *origin) {
 	    errno = WSAGetLastError();
 #endif
 	    if (Debug > 3)
-		message(LOG_DEBUG, "UDP %d: Can't get socket's name err=%d",
-			origin->sd, errno);
+		message(LOG_DEBUG, "%d UDP %d: Can't get socket's name err=%d",
+			origin->stone->sd, origin->sd, errno);
 	} else {
 	    addrport2str(name, namelen, proto_udp, str+i, LONGSTRMAX-i, 0),
 	    i = strlen(str);
@@ -1981,7 +1981,7 @@ void message_origin(int pri, Origin *origin) {
     addrport2str(&origin->from->addr, origin->from->len, proto_udp,
 		 str+i, STRMAX-i, 0);
     str[STRMAX] = '\0';
-    message(pri, "UDP%3d:%3d %s", origin->sd, sd, str);
+    message(pri, "%d UDP%3d:%3d %s", origin->stone->sd, origin->sd, sd, str);
 }
 
 void ungetPktBuf(PktBuf *pb) {
@@ -2024,8 +2024,7 @@ PktBuf *getPktBuf(void) {
     return ret;
 }
 
-static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp,
-		   PktBuf *pb) {
+static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp, PktBuf *pb) {
     struct sockaddr_storage ss;
     int fromlen, pkt_len;
     char addrport[STRMAX+1];
@@ -2102,13 +2101,14 @@ static Origin *getOrigins(struct sockaddr *from, socklen_t fromlen,
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
-	message(LOG_ERR, "UDP: can't create datagram socket err=%d.", errno);
+	message(LOG_ERR, "%d UDP: can't create datagram socket err=%d.",
+		stonep->sd, errno);
 	return NULL;
     }
     origin = malloc(sizeof(Origin));
     if (!origin) {
     memerr:
-	message(LOG_CRIT, "UDP %d: Out of memory, closing socket", sd);
+	message(LOG_CRIT, "%d UDP %d: Out of memory, closing socket", stonep->sd, sd);
 	return NULL;
     }
     origin->sd = sd;
@@ -2132,7 +2132,8 @@ void freeOrigin(Origin *origin) {
 }
 
 void docloseUDP(Origin *origin, int wait) {
-    if (Debug > 2) message(LOG_DEBUG, "UDP %d: close", origin->sd);
+    if (Debug > 2) message(LOG_DEBUG, "%d UDP %d: close",
+			   origin->stone->sd, origin->sd);
     if (wait) {
 	waitMutex(FdRinMutex);
 	waitMutex(FdEinMutex);
@@ -2159,11 +2160,9 @@ void asyncOrg(Origin *origin) {
     if (!pb) goto end;
     len = recvUDP(origin->sd, NULL, NULL, pb);
     if (Debug > 4)
-	message(LOG_DEBUG, "UDP %d: send %d bytes to %d",
-		origin->sd, len, sd);
+	message(LOG_DEBUG, "UDP %d: send %d bytes to %d", origin->sd, len, sd);
     if (len > 0
-	&& sendUDP(stone->sd, &origin->from->addr, origin->from->len,
-		   len, pb) > 0) {
+	&& sendUDP(sd, &origin->from->addr, origin->from->len, len, pb) > 0) {
 	time(&origin->clock);
 	waitMutex(FdRinMutex);
 	waitMutex(FdEinMutex);
@@ -2231,7 +2230,7 @@ int scanUDP(fd_set *rop, fd_set *eop) {
 	if (isset) FD_CLR(origin->sd, &ein);
 	freeMutex(FdEinMutex);
 	if (isset) {
-	    message(LOG_ERR, "UDP %d: exception", origin->sd);
+	    message(LOG_ERR, "%d UDP %d: exception", origin->stone->sd, origin->sd);
 	    message_origin(LOG_ERR, origin);
 	    docloseUDP(origin, 1);	/* wait mutex */
 	    goto next;
@@ -2320,8 +2319,8 @@ void message_pair(int pri, Pair *pair) {
 	    errno = WSAGetLastError();
 #endif
 	    if (Debug > 3)
-		message(LOG_DEBUG, "TCP %d: Can't get socket's name err=%d",
-			sd, errno);
+		message(LOG_DEBUG, "%d TCP %d: Can't get socket's name err=%d",
+			pair->stone->sd, sd, errno);
 	} else {
 	    addrport2str(name, namelen, 0, str+i, LONGSTRMAX-i, 0);
 	    i = strlen(str);
@@ -2333,8 +2332,8 @@ void message_pair(int pri, Pair *pair) {
 	    errno = WSAGetLastError();
 #endif
 	    if (Debug > 3)
-		message(LOG_DEBUG, "TCP %d: Can't get peer's name err=%d",
-			sd, errno);
+		message(LOG_DEBUG, "%d TCP %d: Can't get peer's name err=%d",
+			pair->stone->sd, sd, errno);
 	} else {
 	    addrport2str(name, namelen, 0, str+i, LONGSTRMAX-i, 0);
 	    i += strlen(str+i);
@@ -2346,12 +2345,12 @@ void message_pair(int pri, Pair *pair) {
     if (p) psd = p->sd;
     else psd = INVALID_SOCKET;
     if (p && p->p) {
-	message(pri, "TCP%3d:%3d %08x %d %s %s tx:%d rx:%d lp:%d",
-		sd, psd, pair->proto, pair->count, str, p->p,
+	message(pri, "%d TCP%3d:%3d %08x %d %s %s tx:%d rx:%d lp:%d",
+		pair->stone->sd, sd, psd, pair->proto, pair->count, str, p->p,
 		pair->tx, pair->rx, pair->loop);
     } else {
-	message(pri, "TCP%3d:%3d %08x %d %s tx:%d rx:%d lp:%d",
-		sd, psd, pair->proto, pair->count, str,
+	message(pri, "%d TCP%3d:%3d %08x %d %s tx:%d rx:%d lp:%d",
+		pair->stone->sd, sd, psd, pair->proto, pair->count, str,
 		pair->tx, pair->rx, pair->loop);
     }
 }
@@ -2422,7 +2421,7 @@ int doSSL_accept(Pair *pair) {
     if (!ssl) {
 	ssl = SSL_new(pair->stone->ssl_server->ctx);
 	if (!ssl) {
-	    message(LOG_ERR, "TCP %d: SSL_new failed", sd);
+	    message(LOG_ERR, "%d TCP %d: SSL_new failed", pair->stone->sd, sd);
 	    return -1;
 	}
 	SSL_set_ex_data(ssl, PairIndex, pair);
@@ -2432,14 +2431,15 @@ int doSSL_accept(Pair *pair) {
     pair->ssl_flag &= ~(sf_ab_on_r | sf_ab_on_w);
     ret = SSL_accept(ssl);
     if (Debug > 7)
-	message(LOG_DEBUG, "TCP %d: SSL_accept ret=%d, state=%x, "
-		"finished=%x, in_init=%x/%x",
+	message(LOG_DEBUG, "%d TCP %d: SSL_accept ret=%d, state=%x, "
+		"finished=%x, in_init=%x/%x", pair->stone->sd,
 		sd, ret, SSL_state(ssl), SSL_is_init_finished(ssl),
 		SSL_in_init(ssl), SSL_in_accept_init(ssl));
     if (ret > 0) {	/* success */
 	if (SSL_in_accept_init(ssl)) {
 	    if (pair->stone->ssl_server->verbose) {
-		message(LOG_NOTICE, "TCP %d: SSL_accept unexpected EOF", sd);
+		message(LOG_NOTICE, "%d TCP %d: SSL_accept unexpected EOF",
+			pair->stone->sd, sd);
 		message_pair(LOG_NOTICE, pair);
 	    }
 	    return -1;	/* unexpected EOF */
@@ -2447,8 +2447,8 @@ int doSSL_accept(Pair *pair) {
 	pair->proto |= proto_connect;	/* src & pair is connected */
 	if (Debug > 3) {
 	    SSL_CTX *ctx = pair->stone->ssl_server->ctx;
-	    message(LOG_DEBUG, "TCP %d: SSL_accept succeeded "
-		    "sess=%ld accept=%ld hits=%ld", sd,
+	    message(LOG_DEBUG, "%d TCP %d: SSL_accept succeeded "
+		    "sess=%ld accept=%ld hits=%ld", pair->stone->sd, sd,
 		    SSL_CTX_sess_number(ctx), SSL_CTX_sess_accept(ctx),
 		    SSL_CTX_sess_hits(ctx));
 	}
@@ -2471,26 +2471,28 @@ int doSSL_accept(Pair *pair) {
 	    if (errno == EINTR || errno == EAGAIN) {
 		pair->ssl_flag |= (sf_ab_on_r | sf_ab_on_r);
 		if (Debug > 8)
-		    message(LOG_DEBUG, "TCP %d: SSL_accept "
-			    "interrupted sf=%x", sd, pair->ssl_flag);
+		    message(LOG_DEBUG, "%d TCP %d: SSL_accept "
+			    "interrupted sf=%x",
+			    pair->stone->sd, sd, pair->ssl_flag);
 		return 0;
 	    }
-	    message(priority(pair), "TCP %d: SSL_accept "
-		    "I/O error sf=%x errno=%d", sd, pair->ssl_flag, errno);
+	    message(priority(pair), "%d TCP %d: SSL_accept "
+		    "I/O error sf=%x errno=%d", pair->stone->sd, sd,
+		    pair->ssl_flag, errno);
 	} else {
-	    message(priority(pair), "TCP %d: SSL_accept sf=%x %s",
-		    sd, pair->ssl_flag, ERR_error_string(e, NULL));
+	    message(priority(pair), "%d TCP %d: SSL_accept sf=%x %s",
+		    pair->stone->sd, sd, pair->ssl_flag, ERR_error_string(e, NULL));
 	}
 	return ret;
     } else if (err == SSL_ERROR_SSL) {
 	unsigned long e = ERR_get_error();
-	message(priority(pair), "TCP %d: SSL_accept lib %s",
-		sd, ERR_error_string(e, NULL));
+	message(priority(pair), "%d TCP %d: SSL_accept lib %s",
+		pair->stone->sd, sd, ERR_error_string(e, NULL));
 	return ret;
     }
     if (Debug > 4)
-	message(LOG_DEBUG, "TCP %d: SSL_accept interrupted sf=%x err=%d",
-		sd, pair->ssl_flag, err);
+	message(LOG_DEBUG, "%d TCP %d: SSL_accept interrupted sf=%x err=%d",
+		pair->stone->sd, sd, pair->ssl_flag, err);
     return ret;
 }
 
@@ -2506,7 +2508,7 @@ int doSSL_connect(Pair *pair) {
     if (!ssl) {
 	ssl = SSL_new(pair->stone->ssl_client->ctx);
 	if (!ssl) {
-	    message(LOG_ERR, "TCP %d: SSL_new failed", sd);
+	    message(LOG_ERR, "%d TCP %d: SSL_new failed", pair->stone->sd, sd);
 	    return -1;
 	}
 	SSL_set_ex_data(ssl, PairIndex, pair);
@@ -2519,8 +2521,8 @@ int doSSL_connect(Pair *pair) {
 	pair->proto |= proto_connect;	/* pair & dst is connected */
 	if (Debug > 3) {
 	    SSL_CTX *ctx = pair->stone->ssl_client->ctx;
-	    message(LOG_DEBUG, "TCP %d: SSL_connect succeeded "
-		    "sess=%ld connect=%ld hits=%ld", sd,
+	    message(LOG_DEBUG, "%d TCP %d: SSL_connect succeeded "
+		    "sess=%ld connect=%ld hits=%ld", pair->stone->sd, sd,
 		    SSL_CTX_sess_number(ctx), SSL_CTX_sess_connect(ctx),
 		    SSL_CTX_sess_hits(ctx));
 	    message_pair(LOG_DEBUG, pair);
@@ -2546,21 +2548,22 @@ int doSSL_connect(Pair *pair) {
 	    } else if (errno == EINTR || errno == EAGAIN) {
 		pair->ssl_flag |= (sf_cb_on_r | sf_cb_on_r);
 		if (Debug > 8)
-		    message(LOG_DEBUG, "TCP %d: SSL_connect "
-			    "interrupted sf=%x", sd, pair->ssl_flag);
+		    message(LOG_DEBUG, "%d TCP %d: SSL_connect "
+			    "interrupted sf=%x", pair->stone->sd, sd, pair->ssl_flag);
 		return 0;
 	    }
-	    message(priority(pair), "TCP %d: SSL_connect "
-		    "I/O error sf=%x errno=%d", sd, pair->ssl_flag, errno);
+	    message(priority(pair), "%d TCP %d: SSL_connect "
+		    "I/O error sf=%x errno=%d", pair->stone->sd, sd,
+		    pair->ssl_flag, errno);
 	} else {
-	    message(priority(pair), "TCP %d: SSL_connect sf=%x %s",
-		    sd, pair->ssl_flag, ERR_error_string(e, NULL));
+	    message(priority(pair), "%d TCP %d: SSL_connect sf=%x %s",
+		    pair->stone->sd, sd, pair->ssl_flag, ERR_error_string(e, NULL));
 	}
 	return ret;
     }
     if (Debug > 4)
-	message(LOG_DEBUG, "TCP %d: SSL_connect interrupted sf=%x err=%d",
-		sd, pair->ssl_flag, err);
+	message(LOG_DEBUG, "%d TCP %d: SSL_connect interrupted sf=%x err=%d",
+		pair->stone->sd, sd, pair->ssl_flag, err);
     return ret;
 }
 
@@ -2593,17 +2596,17 @@ int doSSL_shutdown(Pair *pair, int how) {
     }
     if (ret == 0 && ss->shutdown_mode == 0) {
 	if (Debug > 4)
-	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d sf=%x, "
+	    message(LOG_DEBUG, "%d TCP %d: SSL_shutdown ret=%d sf=%x, "
 		    "so don't wait peer's notify",
-		    sd, ret, pair->ssl_flag);
+		    pair->stone->sd, sd, ret, pair->ssl_flag);
 	SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN);
 	ret = SSL_shutdown(ssl);
     }
     if (ret < 0) {
 	err = SSL_get_error(ssl, ret);
 	if (Debug > 4)
-	    message(LOG_DEBUG, "TCP %d: SSL_shutdown ret=%d err=%d sf=%x",
-		    sd, ret, err, pair->ssl_flag);
+	    message(LOG_DEBUG, "%d TCP %d: SSL_shutdown ret=%d err=%d sf=%x",
+		    pair->stone->sd, sd, ret, err, pair->ssl_flag);
 	if (err == SSL_ERROR_WANT_READ) {
 	    pair->ssl_flag |= sf_sb_on_r;
 	} else if (err == SSL_ERROR_WANT_WRITE) {
@@ -2619,34 +2622,37 @@ int doSSL_shutdown(Pair *pair, int how) {
 		} else if (errno == EINTR || errno == EAGAIN) {
 		    pair->ssl_flag |= (sf_sb_on_r | sf_sb_on_r);
 		    if (Debug > 8)
-			message(LOG_DEBUG, "TCP %d: SSL_shutdown "
-				"interrupted sf=%x", sd, pair->ssl_flag);
+			message(LOG_DEBUG, "%d TCP %d: SSL_shutdown "
+				"interrupted sf=%x", pair->stone->sd, sd,
+				pair->ssl_flag);
 		} else {
-		    message(priority(pair), "TCP %d: SSL_shutdown "
-			    "I/O error sf=%x errno=%d", sd, pair->ssl_flag, errno);
+		    message(priority(pair), "%d TCP %d: SSL_shutdown "
+			    "I/O error sf=%x errno=%d", pair->stone->sd, sd,
+			    pair->ssl_flag, errno);
 		}
 	    } else {
-		message(priority(pair), "TCP %d: SSL_shutdown sf=%x %s",
-			sd, pair->ssl_flag, ERR_error_string(e, NULL));
+		message(priority(pair), "%d TCP %d: SSL_shutdown sf=%x %s",
+			pair->stone->sd, sd,
+			pair->ssl_flag, ERR_error_string(e, NULL));
 	    }
 	} else {
 	    if (Debug > 4)
 		message(LOG_DEBUG,
-			"TCP %d: SSL_shutdown interrupted sf=%x err=%d",
-			sd, pair->ssl_flag, err);
+			"%d TCP %d: SSL_shutdown interrupted sf=%x err=%d",
+			pair->stone->sd, sd, pair->ssl_flag, err);
 	}
     } else if (ret == 0) {
 	if (Debug > 4)
-	    message(priority(pair), "TCP %d: SSL_shutdown error "
+	    message(priority(pair), "%d TCP %d: SSL_shutdown error "
 		    "ret=%d sf=%x, reset connection",
-		    sd, ret, pair->ssl_flag);
+		    pair->stone->sd, sd, ret, pair->ssl_flag);
 	shutdown(sd, 2);
 	ret = 0;
     }
     if (ret > 0) {	/* success */
 	if (Debug > 4)
-	    message(LOG_DEBUG, "TCP %d: SSL_shutdown sf=%x",
-		    sd, pair->ssl_flag);
+	    message(LOG_DEBUG, "%d TCP %d: SSL_shutdown sf=%x",
+		    pair->stone->sd, sd, pair->ssl_flag);
 	if ((pair->ssl_flag & sf_mask) != sf_mask)
 	    shutdown(sd, (pair->ssl_flag & sf_mask));
     }
@@ -2665,7 +2671,8 @@ int doshutdown(Pair *pair, int how) {
     else {
 #endif
 	if (Debug > 4)
-	    message(LOG_DEBUG, "TCP %d: shutdown how=%d", pair->sd, how);
+	    message(LOG_DEBUG, "%d TCP %d: shutdown how=%d",
+		    pair->stone->sd, pair->sd, how);
 	return shutdown(pair->sd, how);
 #ifdef USE_SSL
     }
@@ -2721,7 +2728,7 @@ void freePair(Pair *pair) {
     if (!pair) return;
     sd = pair->sd;
     pair->sd = INVALID_SOCKET;
-    if (Debug > 8) message(LOG_DEBUG, "TCP %d: freePair", sd);
+    if (Debug > 8) message(LOG_DEBUG, "%d TCP %d: freePair", pair->stone->sd, sd);
     p = pair->p;
     if (p) {
 	pair->p = NULL;
@@ -2740,11 +2747,12 @@ void freePair(Pair *pair) {
 	pair->ssl = NULL;
 	state = SSL_get_shutdown(ssl);
 	if (!(state & SSL_RECEIVED_SHUTDOWN) && Debug > 2) {
-	    message(LOG_DEBUG, "TCP %d: SSL close notify was not received",
-		    sd);
+	    message(LOG_DEBUG, "%d TCP %d: SSL close notify was not received",
+		    pair->stone->sd, sd);
 	}
 	if (!(state & SSL_SENT_SHUTDOWN)) {
-	    message(LOG_ERR, "TCP %d: SSL close notify was not sent", sd);
+	    message(LOG_ERR, "%d TCP %d: SSL close notify was not sent",
+		    pair->stone->sd, sd);
 	    SSL_set_shutdown(ssl, (state | SSL_SENT_SHUTDOWN));
 	}
 	SSL_free(ssl);
@@ -2760,7 +2768,8 @@ void freePair(Pair *pair) {
 	ExBuf *f = ex;
 	ex = ex->next;
 	pair->nbuf--;
-	if (Debug > 4) message(LOG_DEBUG, "TCP %d: freePair unget ExBuf", sd);
+	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: freePair unget ExBuf",
+			       pair->stone->sd, sd);
 	ungetExBuf(f);
     }
     if (ValidSocket(sd)) closesocket(sd);
@@ -2788,8 +2797,8 @@ void message_time_log(Pair *pair) {
 void connected(Pair *pair) {
     Pair *p = pair->pair;
     if (Debug > 2)
-	message(LOG_DEBUG, "TCP %d: established to %d",
-		p->sd, pair->sd);
+	message(LOG_DEBUG, "%d TCP %d: established to %d",
+		pair->stone->sd, p->sd, pair->sd);
     time(&lastEstablished);
     /* now successfully connected */
 #ifdef USE_SSL
@@ -2811,23 +2820,25 @@ void connected(Pair *pair) {
     */
     if (pair->t->len > 0) {
 	if (Debug > 8)
-	    message(LOG_DEBUG, "TCP %d: waiting %d bytes to write",
-		    pair->sd, pair->t->len);
+	    message(LOG_DEBUG, "%d TCP %d: waiting %d bytes to write",
+		    pair->stone->sd, pair->sd, pair->t->len);
 	if (!(pair->proto & proto_shutdown)) pair->proto |= proto_select_w;
     } else if (!(pair->proto & proto_ohttp_d)) {
 	if (Debug > 8)
-	    message(LOG_DEBUG, "TCP %d: request to read 1st", p->sd);
+	    message(LOG_DEBUG, "%d TCP %d: request to read 1st",
+		    pair->stone->sd, p->sd);
 	if (!(p->proto & proto_eof)) p->proto |= proto_select_r;
     }
     if (!(p->proto & proto_ohttp_s)) {
 	if (p->t->len > 0) {
 	    if (Debug > 8)
-		message(LOG_DEBUG, "TCP %d: waiting %d bytes to write",
-			p->sd, p->t->len);
+		message(LOG_DEBUG, "%d TCP %d: waiting %d bytes to write",
+			pair->stone->sd, p->sd, p->t->len);
 	    if (!(p->proto & proto_shutdown)) p->proto |= proto_select_w;
 	} else {
 	    if (Debug > 8)
-		message(LOG_DEBUG, "TCP %d: request to read", pair->sd);
+		message(LOG_DEBUG, "%d TCP %d: request to read",
+			pair->stone->sd, pair->sd);
 	    if (!(pair->proto & proto_eof)) pair->proto |= proto_select_r;
 	}
     }
@@ -2890,7 +2901,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		int i;
 		for (i=0; i < sess->session_id_length; i++)
 		    sprintf(&str[i*2], "%02x", sess->session_id[i]);
-		message(LOG_DEBUG, "TCP %d: SSL session ID=%s", p2->sd, str);
+		message(LOG_DEBUG, "%d TCP %d: SSL session ID=%s",
+			p2->stone->sd, p2->sd, str);
 	    }
 	    match = SSL_SESSION_get_ex_data(sess, MatchIndex);
 	    if (match && p2->stone->ssl_server) {
@@ -2908,8 +2920,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		    }
 		    offset %= lbmod;
 		    if (Debug > 2)
-			message(LOG_DEBUG, "TCP %d: pair %d lb%d=%d",
-				p1->sd, p2->sd, lbparm, offset);
+			message(LOG_DEBUG, "%d TCP %d: pair %d lb%d=%d",
+				p1->stone->sd, p1->sd, p2->sd, lbparm, offset);
 		}
 	    }
 	    SSL_SESSION_free(sess);
@@ -2928,8 +2940,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		    break;
 		}
 		if (Debug > 8)
-		    message(LOG_DEBUG, "TCP %d: ofs=%d is unhealthy, skipped",
-			    p1->sd, (offset+i) % n);
+		    message(LOG_DEBUG, "%d TCP %d: ofs=%d is unhealthy, skipped",
+			    p1->stone->sd, p1->sd, (offset+i) % n);
 	    }
 	}
 	/* round robin */
@@ -2966,8 +2978,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     addrport2str(dst, dstlen, (p1->proto & proto_pair_d), addrport, STRMAX, 0);
     addrport[STRMAX] = '\0';
     if (Debug > 2)
-	message(LOG_DEBUG, "TCP %d: connecting to TCP %d %s",
-		p2->sd, p1->sd, addrport);
+	message(LOG_DEBUG, "%d TCP %d: connecting to TCP %d %s",
+		p1->stone->sd, p2->sd, p1->sd, addrport);
     ret = connect(p1->sd, dst, dstlen);
     if (ret < 0) {
 #ifdef WINDOWS
@@ -2976,28 +2988,30 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 	if (errno == EINPROGRESS) {
 	    p1->proto |= proto_conninprog;
 	    if (Debug > 3)
-		message(LOG_DEBUG, "TCP %d: connection in progress", p1->sd);
+		message(LOG_DEBUG, "%d TCP %d: connection in progress",
+			p1->stone->sd, p1->sd);
 	    return 1;
 	} else if (errno == EINTR) {
 	    if (Debug > 4)
-		message(LOG_DEBUG, "TCP %d: connect interrupted", p1->sd);
+		message(LOG_DEBUG, "%d TCP %d: connect interrupted",
+			p1->stone->sd, p1->sd);
 	    if (clock - p1->clock < CONN_TIMEOUT) return 0;
-	    message(priority(p2), "TCP %d: connect timeout to %s",
-		    p2->sd, addrport);
+	    message(priority(p2), "%d TCP %d: connect timeout to %s",
+		    p2->stone->sd, p2->sd, addrport);
 	} else if (errno == EISCONN || errno == EADDRINUSE
 #ifdef EALREADY
 		   || errno == EALREADY
 #endif
 	    ) {
 	    if (Debug > 4) {	/* SunOS's bug ? */
-		message(LOG_DEBUG, "TCP %d: connect bug err=%d",
-			p1->sd, errno);
+		message(LOG_DEBUG, "%d TCP %d: connect bug err=%d",
+			p1->stone->sd, p1->sd, errno);
 		message_pair(LOG_DEBUG, p1);
 	    }
 	} else {
 	    message(priority(p1),
-		    "TCP %d: can't connect err=%d: to %s",
-		    p1->sd, errno, addrport);
+		    "%d TCP %d: can't connect err=%d: to %s",
+		    p1->stone->sd, p1->sd, errno, addrport);
 	}
     }
     if (ret < 0		/* fail to connect */
@@ -3036,7 +3050,8 @@ int reqconn(Pair *pair,		/* request pair to connect to destination */
     conn = malloc(sizeof(Conn));
     if (!conn) {
     memerr:
-	message(LOG_CRIT, "TCP %d: out of memory", (p ? p->sd : -1));
+	message(LOG_CRIT, "%d TCP %d: out of memory",
+		(p ? p->stone->sd : -1), (p ? p->sd : -1));
 	return -1;
     }
     time(&pair->clock);
@@ -3412,8 +3427,8 @@ Pair *doaccept(Stone *stonep) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
-	message(priority(pair1), "TCP %d: can't create socket err=%d.",
-		pair1->sd, errno);
+	message(priority(pair1), "%d TCP %d: can't create socket err=%d.",
+		pair1->stone->sd, pair1->sd, errno);
     error:
 	freePair(pair1);
 	freePair(pair2);
@@ -3644,8 +3659,8 @@ void setclose(Pair *pair, int flag) {	/* set close flag */
     if (!(pair->proto & proto_close)) {		/* request to close */
 	pair->proto |= (flag | proto_close);
 	if (Debug > 2 && ValidSocket(sd))
-	    message(LOG_DEBUG, "TCP %d: close tx:%d rx:%d lp:%d",
-		    sd, pair->tx, pair->rx, pair->loop);
+	    message(LOG_DEBUG, "%d TCP %d: close tx:%d rx:%d lp:%d",
+		    pair->stone->sd, sd, pair->tx, pair->rx, pair->loop);
     }
 }
 
@@ -3660,12 +3675,13 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 	pair->t = ex->next;
 	pair->nbuf--;
 	if (Debug > 4) message(LOG_DEBUG,
-			       "TCP %d: before dowrite unget ExBuf nbuf=%d",
-			       pair->sd, pair->nbuf);
+			       "%d TCP %d: before dowrite unget ExBuf nbuf=%d",
+			       pair->stone->sd, pair->sd, pair->nbuf);
 	ungetExBuf(ex);
     }
     if (ex->len <= 0) return 0;	/* nothing to write */
-    if (Debug > 5) message(LOG_DEBUG, "TCP %d: write %d bytes", sd, ex->len);
+    if (Debug > 5) message(LOG_DEBUG, "%d TCP %d: write %d bytes",
+			   pair->stone->sd, sd, ex->len);
     if (InvalidSocket(sd)) return -1;
 #ifdef USE_SSL
     if (pair->ssl) {
@@ -3677,14 +3693,14 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 	    if (err == SSL_ERROR_NONE
 		|| err == SSL_ERROR_WANT_WRITE) {
 		if (Debug > 4)
-		    message(LOG_DEBUG, "TCP %d: SSL_write interrupted err=%d",
-			    sd, err);
+		    message(LOG_DEBUG, "%d TCP %d: SSL_write interrupted err=%d",
+			    pair->stone->sd, sd, err);
 		return 0;	/* EINTR */
 	    } else if (err == SSL_ERROR_WANT_READ) {
 		if (Debug > 4)
 		    message(LOG_DEBUG,
-			    "TCP %d: SSL_write blocked on read err=%d",
-			    sd, err);
+			    "%d TCP %d: SSL_write blocked on read err=%d",
+			    pair->stone->sd, sd, err);
 		pair->ssl_flag |= sf_wb_on_r;
 		return 0;	/* EINTR */
 	    }
@@ -3697,24 +3713,26 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 		    if (errno == EINTR) {
 			if (Debug > 4)
 			    message(LOG_DEBUG,
-				    "TCP %d: SSL_write I/O interrupted", sd);
+				    "%d TCP %d: SSL_write I/O interrupted",
+				    pair->stone->sd, sd);
 			return 0;
 		    }
 		    message(priority(pair),
-			    "TCP %d: SSL_write I/O error err=%d, closing",
-			    sd, errno);
+			    "%d TCP %d: SSL_write I/O error err=%d, closing",
+			    pair->stone->sd, sd, errno);
 		    message_pair(LOG_ERR, pair);
 		} else {
 		    message(priority(pair),
-			    "TCP %d: SSL_write I/O %s, closing",
-			    sd, ERR_error_string(e, NULL));
+			    "%d TCP %d: SSL_write I/O %s, closing",
+			    pair->stone->sd, sd, ERR_error_string(e, NULL));
 		    message_pair(LOG_ERR, pair);
 		}
 		return -1;	/* error */
 	    } else if (err != SSL_ERROR_ZERO_RETURN) {
 		message(priority(pair),
-			"TCP %d: SSL_write err=%d %s, closing",
-			sd, err, ERR_error_string(ERR_get_error(), NULL));
+			"%d TCP %d: SSL_write err=%d %s, closing",
+			pair->stone->sd, sd,
+			err, ERR_error_string(ERR_get_error(), NULL));
 		message_pair(LOG_ERR, pair);
 		return len;	/* error */
 	    }
@@ -3729,18 +3747,20 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 #endif
 	    if (errno == EINTR) {
 		if (Debug > 4)
-		    message(LOG_DEBUG, "TCP %d: write interrupted", sd);
+		    message(LOG_DEBUG, "%d TCP %d: write interrupted",
+			    pair->stone->sd, sd);
 		return 0;
 	    }
-	    message(priority(pair), "TCP %d: write error err=%d, closing",
-		    sd, errno);
+	    message(priority(pair), "%d TCP %d: write error err=%d, closing",
+		    pair->stone->sd, sd, errno);
 	    message_pair(LOG_ERR, pair);
 	    return len;	/* error */
 	}
 #ifdef USE_SSL
     }
 #endif
-    if (Debug > 4) message(LOG_DEBUG, "TCP %d: %d bytes written", sd, len);
+    if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: %d bytes written",
+			   pair->stone->sd, sd, len);
     if (PacketDump > 0 || ((pair->proto & proto_first_w) && Debug > 3))
 	message_buf(pair, len, "");
     time(&pair->clock);
@@ -3751,8 +3771,8 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
     } else {
 	ex->start += len;
 	message(LOG_NOTICE,
-		"TCP %d: write %d bytes, but only %d bytes written",
-		sd, ex->len, len);
+		"%d TCP %d: write %d bytes, but only %d bytes written",
+		pair->stone->sd, sd, ex->len, len);
 	message_pair(LOG_NOTICE, pair);
     }
     ex->len -= len;
@@ -3760,8 +3780,8 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 	pair->t = ex->next;
 	pair->nbuf--;
 	if (Debug > 4) message(LOG_DEBUG,
-			       "TCP %d: after dowrite unget ExBuf nbuf=%d",
-			       pair->sd, pair->nbuf);
+			       "%d TCP %d: after dowrite unget ExBuf nbuf=%d",
+			       pair->stone->sd, pair->sd, pair->nbuf);
 	ungetExBuf(ex);
     }
     pair->tx += len;
@@ -3860,7 +3880,7 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
     ExBuf *ex;
     int bufmax, start;
     if (InvalidSocket(sd)) return -1;
-    if (Debug > 5) message(LOG_DEBUG, "TCP %d: read", sd);
+    if (Debug > 5) message(LOG_DEBUG, "%d TCP %d: read", pair->stone->sd, sd);
     p = pair->pair;
     if (p == NULL) {	/* no pair, no more read */
 	char _buf[BUFMAX];
@@ -3871,10 +3891,12 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 #endif
 	    len = recv(sd, _buf, BUFMAX, 0);
 	if (pair->proto & proto_close) return -1;
-	if (Debug > 4) message(LOG_DEBUG, "TCP %d: read %d bytes", sd, len);
+	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: read %d bytes",
+			       pair->stone->sd, sd, len);
 	if (len == 0) return -1;	/* EOF w/o pair */
 	if (len > 0) {
-	    message(priority(pair), "TCP %d: no pair, closing", sd);
+	    message(priority(pair), "%d TCP %d: no pair, closing",
+		    pair->stone->sd, sd);
 	    message_pair(LOG_ERR, pair);
 	    len = -1;
 	}
@@ -3887,8 +3909,8 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	p->b->next = ex;
 	p->b = ex;
 	p->nbuf++;
-	if (Debug > 4) message(LOG_DEBUG, "TCP %d: get ExBuf nbuf=%d",
-			       p->sd, p->nbuf);
+	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: get ExBuf nbuf=%d",
+			       pair->stone->sd, p->sd, p->nbuf);
     }
     bufmax = ex->bufmax - ex->start;
     start = ex->start;
@@ -3915,14 +3937,14 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	    if (err == SSL_ERROR_NONE
 		|| err == SSL_ERROR_WANT_READ) {
 		if (Debug > 4)
-		    message(LOG_DEBUG, "TCP %d: SSL_read interrupted err=%d",
-			    sd, err);
+		    message(LOG_DEBUG, "%d TCP %d: SSL_read interrupted err=%d",
+			    pair->stone->sd, sd, err);
 		return 0;	/* EINTR */
 	    } else if (err == SSL_ERROR_WANT_WRITE) {
 		if (Debug > 4)
 		    message(LOG_DEBUG,
-			    "TCP %d: SSL_read blocked on write err=%d",
-			    sd, err);
+			    "%d TCP %d: SSL_read blocked on write err=%d",
+			    pair->stone->sd, sd, err);
 		pair->ssl_flag |= sf_rb_on_w;
 		return 0;	/* EINTR */
 	    }
@@ -3934,25 +3956,24 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 #endif
 		    if (errno == EINTR) {
 			if (Debug > 4)
-			    message(LOG_DEBUG,
-				    "TCP %d: SSL_read I/O interrupted", sd);
+			    message(LOG_DEBUG, "%d TCP %d: SSL_read I/O interrupted",
+				    pair->stone->sd, sd);
 			return 0;
 		    }
 		    message(priority(pair),
-			    "TCP %d: SSL_read I/O error err=%d, closing",
-			    sd, errno);
+			    "%d TCP %d: SSL_read I/O error err=%d, closing",
+			    pair->stone->sd, sd, errno);
 		    message_pair(LOG_ERR, pair);
 		} else {
-		    message(priority(pair),
-			    "TCP %d: SSL_read I/O %s, closing",
-			    sd, ERR_error_string(e, NULL));
+		    message(priority(pair), "%d TCP %d: SSL_read I/O %s, closing",
+			    pair->stone->sd, sd, ERR_error_string(e, NULL));
 		    message_pair(LOG_ERR, pair);
 		}
 		return -1;	/* error */
 	    } else if (err != SSL_ERROR_ZERO_RETURN) {
-		message(priority(pair),
-			"TCP %d: SSL_read err=%d %s, closing",
-			sd, err, ERR_error_string(ERR_get_error(), NULL));
+		message(priority(pair), "%d TCP %d: SSL_read err=%d %s, closing",
+			pair->stone->sd, sd,
+			err, ERR_error_string(ERR_get_error(), NULL));
 		message_pair(LOG_ERR, pair);
 		return -1;	/* error */
 	    }
@@ -3967,11 +3988,12 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 #endif
 	    if (errno == EINTR) {
 		if (Debug > 4)
-		    message(LOG_DEBUG, "TCP %d: read interrupted", sd);
+		    message(LOG_DEBUG, "%d TCP %d: read interrupted",
+			    pair->stone->sd, sd);
 		return 0;	/* EINTR */
 	    }
-	    message(priority(pair), "TCP %d: read error err=%d, closing",
-		    sd, errno);
+	    message(priority(pair), "%d TCP %d: read error err=%d, closing",
+		    pair->stone->sd, sd, errno);
 	    message_pair(LOG_ERR, pair);
 	    return len;	/* error */
 	}
@@ -3984,19 +4006,19 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	if (len > ex->bufmax - 10
 	    && XferBufMax < ex->bufmax * 2) {
 	    XferBufMax = ex->bufmax * 2;
-	    message(LOG_NOTICE, "TCP %d: XferBufMax becomes %d byte",
-		    sd, XferBufMax);
+	    message(LOG_NOTICE, "%d TCP %d: XferBufMax becomes %d byte",
+		    pair->stone->sd, sd, XferBufMax);
 	}
 #endif
 	ex->len = start + len - ex->start;
 	if (Debug > 4) {
 	    SOCKET psd = p->sd;
 	    if (start > ex->start) {
-		message(LOG_DEBUG, "TCP %d: read %d+%d bytes to %d",
-			sd, len, start - ex->start, psd);
+		message(LOG_DEBUG, "%d TCP %d: read %d+%d bytes to %d",
+			pair->stone->sd, sd, len, start - ex->start, psd);
 	    } else {
-		message(LOG_DEBUG, "TCP %d: read %d bytes to %d",
-			sd, ex->len, psd);
+		message(LOG_DEBUG, "%d TCP %d: read %d bytes to %d",
+			pair->stone->sd, sd, ex->len, psd);
 	    }
 	}
 	time(&pair->clock);
@@ -4013,8 +4035,8 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 		for (i=0; i < len; i++)
 		    sprintf(&str[i*3], " %02x", ex->buf[ex->bufmax-2-i]);
 		str[0] = '(';
-		message(LOG_DEBUG, "TCP %d: save %d bytes \"%s\")",
-			sd, len, str);
+		message(LOG_DEBUG, "%d TCP %d: save %d bytes \"%s\")",
+			pair->stone->sd, sd, len, str);
 	    }
 	}
 	if ((p->proto & proto_command) != command_health)
@@ -4022,7 +4044,7 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
     }
     if (p->t->len <= 0) {	/* top */
 	message_time_log(pair);
-	if (Debug > 2) message(LOG_DEBUG, "TCP %d: EOF", sd);
+	if (Debug > 2) message(LOG_DEBUG, "%d TCP %d: EOF", pair->stone->sd, sd);
 	return -2;	/* EOF w/ pair */
     }
     return p->t->len;
@@ -4090,8 +4112,9 @@ int doproxy(Pair *pair, char *host, char *port) {
 	Pair *p = pair->pair;
 	if (Debug > 7) {
 	    char str[STRMAX+1];
-	    message(LOG_DEBUG, "TCP %d: old proxy connection: %s",
-		    sd, addrport2str(name, namelen, 0, str, STRMAX, 0));
+	    message(LOG_DEBUG, "%d TCP %d: old proxy connection: %s",
+		    pair->stone->sd, sd,
+		    addrport2str(name, namelen, 0, str, STRMAX, 0));
 	}
 	if (p) p->proto |= proto_first_w;
 	if (saComp(sa, name)) return 0;	/* same sa, so need not to connect */
@@ -4114,8 +4137,8 @@ int doproxy(Pair *pair, char *host, char *port) {
     pair->proto &= ~proto_command;
     if (reqconn(pair, sa, salen) < 0) return -1;
     if ((pair->proto & state_mask) == 1) {
-	if (Debug > 7) message(LOG_DEBUG, "TCP %d: command_proxy again",
-			       pair->sd);
+	if (Debug > 7) message(LOG_DEBUG, "%d TCP %d: command_proxy again",
+			       pair->stone->sd, pair->sd);
 	pair->proto |= command_proxy;
     }
     return 0;
@@ -4358,8 +4381,8 @@ int identdQUERY(Pair *pair, char *parm, int start) {
 	    if (Debug > 8) {
 		char addrport[STRMAX+1];
 		addrport2str(sa, salen, 0, addrport, STRMAX, 0);
-		message(LOG_DEBUG, "TCP %d: identd query %d,%d from %s",
-			sd, cport, sport, addrport);
+		message(LOG_DEBUG, "%d TCP %d: identd query %d,%d from %s",
+			pair->stone->sd, sd, cport, sport, addrport);
 	    }
 	    saPort(sa, sport);
 	    p = identd(cport, sa, salen);
@@ -4585,7 +4608,8 @@ int insheader(Pair *pair) {	/* insert header */
     }
     if (i >= len) {
 	if (Debug > 3)
-	    message(LOG_DEBUG, "TCP %d: insheader needs more", pair->sd);
+	    message(LOG_DEBUG, "%d TCP %d: insheader needs more",
+		    pair->stone->sd, pair->sd);
 	return -1;
     }
     i++;
@@ -4601,8 +4625,8 @@ int insheader(Pair *pair) {	/* insert header */
     ex->buf[i++] = '\n';
     if (Debug > 5) {
 	message(LOG_DEBUG,
-		"TCP %d: insheader start=%d, ins=%d, rest=%d, max=%d",
-		pair->sd, ex->start, i-ex->start, len, ex->bufmax);
+		"%d TCP %d: insheader start=%d, ins=%d, rest=%d, max=%d",
+		pair->stone->sd, pair->sd, ex->start, i-ex->start, len, ex->bufmax);
     }
     if (len > 0)	/* restore */
 	bcopy(&ex->buf[bufmax], &ex->buf[i], len);
@@ -4673,7 +4697,8 @@ int first_read(Pair *pair) {
 	}
 	if (len == -2) {	/* read more */
 	    if (Debug > 3) {
-		message(LOG_DEBUG, "TCP %d: read more from %d", psd, sd);
+		message(LOG_DEBUG, "%d TCP %d: read more from %d",
+			pair->stone->sd, psd, sd);
 	    }
 	} else if (len < 0) {
 	    int flag = 0;
@@ -4699,9 +4724,9 @@ int first_read(Pair *pair) {
 		pair->proto &= ~proto_ohttp_s;
 	    } else if (pair->proto & proto_ohttp_d) {
 		if (Debug > 3)
-		    message(LOG_DEBUG, "TCP %d: request to read, "
+		    message(LOG_DEBUG, "%d TCP %d: request to read, "
 			    "because response header from %d finished",
-			    psd, sd);
+			    pair->stone->sd, psd, sd);
 		p->proto |= proto_select_r;
 	    }
 	}
@@ -4715,7 +4740,7 @@ int first_read(Pair *pair) {
 	    if (ex->buf[i] == '<') {	/* time stamp of APOP banner */
 		q = pair->p = malloc(BUFMAX);
 		if (!q) {
-		    message(LOG_CRIT, "TCP %d: out of memory", sd);
+		    message(LOG_CRIT, "%d TCP %d: out of memory", pair->stone->sd, sd);
 		    break;
 		}
 		for (; i < ex->start + ex->len; i++) {
@@ -4730,7 +4755,7 @@ int first_read(Pair *pair) {
 #endif
     if (len <= 0 && !(pair->proto & (proto_eof | proto_close))) {
 	if (Debug > 8) {
-	    message(LOG_DEBUG, "TCP %d: read more", sd);
+	    message(LOG_DEBUG, "%d TCP %d: read more", pair->stone->sd, sd);
 	}
 	pair->proto |= proto_select_r;	/* read more */
 	if (len < 0) pair->proto |= proto_first_r;
@@ -4821,7 +4846,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     int npairs = 1;
     Pair *p[2];
     Pair *rPair, *wPair;
-    SOCKET sd, rsd, wsd;
+    SOCKET stsd, sd, rsd, wsd;
     int len;
     int i;
     FD_ZERO(&ri);
@@ -4829,7 +4854,8 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     FD_ZERO(&ei);
     p[0] = pair;
     p[1] = pair->pair;
-    if (Debug > 8) message(LOG_DEBUG, "TCP %d, %d: doReadWrite",
+    stsd = pair->stone->sd;
+    if (Debug > 8) message(LOG_DEBUG, "%d TCP %d, %d: doReadWrite", stsd,
 			   (p[0] ? p[0]->sd : INVALID_SOCKET),
 			   (p[1] ? p[1]->sd : INVALID_SOCKET));
     if (p[1]) npairs++;
@@ -4860,15 +4886,15 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 #ifdef WINDOWS
 		    errno = WSAGetLastError();
 #endif
-		    message(LOG_ERR, "TCP %d: getsockopt err=%d",
-			    sd, errno);
+		    message(LOG_ERR, "%d TCP %d: getsockopt err=%d",
+			    stsd, sd, errno);
 		    p[i]->proto |= proto_close;
 		    p[1-i]->proto |= proto_close;
 		    goto leave;
 		}
 		if (optval) {
-		    message(LOG_ERR, "TCP %d: connect getsockopt err=%d",
-			    sd, optval);
+		    message(LOG_ERR, "%d TCP %d: connect getsockopt err=%d",
+			    stsd, sd, optval);
 		    p[i]->proto |= proto_close;
 		    p[1-i]->proto |= proto_close;
 		    goto leave;
@@ -4881,8 +4907,8 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		if (len == 1) {
 		    if (p[1-i]) wsd = p[1-i]->sd; else wsd = INVALID_SOCKET;
 		    if (Debug > 3)
-			message(LOG_DEBUG, "TCP %d: MSG_OOB 0x%02x to %d",
-				sd, buf[0], wsd);
+			message(LOG_DEBUG, "%d TCP %d: MSG_OOB 0x%02x to %d",
+				stsd, sd, buf[0], wsd);
 		    if (ValidSocket(wsd)) {
 			len = send(wsd, buf, 1, MSG_OOB);
 			if (len != 1) {
@@ -4890,16 +4916,16 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			    errno = WSAGetLastError();
 #endif
 			    message(LOG_ERR,
-				    "TCP %d: send MSG_OOB ret=%d, err=%d",
-				    sd, len, errno);
+				    "%d TCP %d: send MSG_OOB ret=%d, err=%d",
+				    stsd, sd, len, errno);
 			}
 		    }
 		} else {
 #ifdef WINDOWS
 		    errno = WSAGetLastError();
 #endif
-		    message(LOG_ERR, "TCP %d: recv MSG_OOB ret=%d, err=%d",
-			    sd, len, errno);
+		    message(LOG_ERR, "%d TCP %d: recv MSG_OOB ret=%d, err=%d",
+			    stsd, sd, len, errno);
 		}
 #ifdef USE_SSL
 	    } else if (((p[i]->ssl_flag & sf_sb_on_r) && FD_ISSET(sd, &ro))
@@ -5064,8 +5090,8 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 				message_time_log(rPair);
 				if (Debug > 7)
 				    message(LOG_DEBUG,
-					    "TCP %d: reconnect proxy",
-					    wPair->sd);
+					    "%d TCP %d: reconnect proxy",
+					    stsd, wPair->sd);
 				wPair->proto |= proto_first_r;
 			    }
 			}
@@ -5078,8 +5104,8 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			    if (rPair->ssl && SSL_pending(rPair->ssl)) {
 				if (Debug > 4)
 				    message(LOG_DEBUG,
-					    "TCP %d: SSL_pending, read again",
-					    rPair->sd);
+					    "%d TCP %d: SSL_pending, read again",
+					    stsd, rPair->sd);
 				i = npairs;	/* read once */
 				goto read_pending;
 			    }
@@ -5100,7 +5126,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	p[i]->proto &= ~proto_thread;
 	p[i]->count -= REF_UNIT;
     }
-    if (Debug > 8) message(LOG_DEBUG, "TCP %d, %d: doReadWrite end",
+    if (Debug > 8) message(LOG_DEBUG, "%d TCP %d, %d: doReadWrite end", stsd,
 			   (p[0] ? p[0]->sd : INVALID_SOCKET),
 			   (p[1] ? p[1]->sd : INVALID_SOCKET));
 }
@@ -5151,7 +5177,8 @@ void asyncAccept(Stone *stone) {
     pairs.next = p1;
     freeMutex(PairMutex);
     if (Debug > 4) {
-	message(LOG_DEBUG, "TCP %d: pair %d inserted", p1->sd, p2->sd);
+	message(LOG_DEBUG, "%d TCP %d: pair %d inserted",
+		p1->stone->sd, p1->sd, p2->sd);
 	message_pair(LOG_DEBUG, p1);
     }
     if (ret > 0) doReadWrite(p1);
@@ -5235,7 +5262,8 @@ int scanPairs(fd_set *rop, fd_set *wop, fd_set *eop) {
 	    if (idle && pair->timeout > 0
 		&& (time(&clock), clock - pair->clock > pair->timeout)) {
 		if (pair->count > 0 || Debug > 2) {
-		    message(LOG_NOTICE, "TCP %d: idle time exceeds", sd);
+		    message(LOG_NOTICE, "%d TCP %d: idle time exceeds",
+			    pair->stone->sd, sd);
 		    message_pair(LOG_NOTICE, pair);
 		    if (pair->count > 0) pair->count -= REF_UNIT;
 		}
@@ -5316,8 +5344,8 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	}
     }
     if (Debug > 3)
-	message(LOG_DEBUG, "TCP %d: callback: err=%d, depth=%d, preverify=%d",
-		pair->sd, err, depth, preverify_ok);
+	message(LOG_DEBUG, "%d TCP %d: callback: err=%d, depth=%d, preverify=%d",
+		pair->stone->sd, pair->sd, err, depth, preverify_ok);
     p = X509_NAME_oneline(X509_get_subject_name(err_cert), buf, BUFMAX-1);
     if (!p) return 0;
     if (ss->verbose) message(LOG_DEBUG, "[depth%d=%s]", depth, p);
@@ -5331,8 +5359,8 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	regmatch_t pmatch[NMATCH_MAX];
 	char **match;
 	err = regexec(ss->re[depth], p, (size_t)NMATCH_MAX, pmatch, 0);
-	if (Debug > 3) message(LOG_DEBUG, "TCP %d: regexec%d=%d",
-			       pair->sd, depth, err);
+	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: regexec%d=%d",
+			       pair->stone->sd, pair->sd, depth, err);
 	if (err) return 0;	/* not match */
 	sess = SSL_get1_session(ssl);
 	if (sess && (match = SSL_SESSION_get_ex_data(sess, MatchIndex))) {
@@ -5358,16 +5386,16 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 		    if (match[i]) {
 			strncpy(match[i], p + pmatch[j].rm_so, len);
 			match[i][len] = '\0';
-			if (Debug > 4) message(LOG_DEBUG, "TCP %d: \\%d=%s",
-					       pair->sd, i+1, match[i]);
+			if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: \\%d=%s",
+					       pair->stone->sd, pair->sd,
+					       i+1, match[i]);
 		    }
 		    j++;
 		}
 	    }
 	} else {
-	    message(LOG_ERR,
-		    "TCP %d: SSL callback can't get session's ex_data",
-		    pair->sd);
+	    message(LOG_ERR, "%d TCP %d: SSL callback can't get session's ex_data",
+		    pair->stone->sd, pair->sd);
 	}
 	if (sess) SSL_SESSION_free(sess);
     }
