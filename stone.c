@@ -1945,6 +1945,42 @@ int lbsopts(int argc, int i, char *argv[]) {
     }
     return i;
 }
+
+char *stone2str(Stone *stonep, char *str, int strlen) {
+    struct sockaddr_storage ss;
+    struct sockaddr *sa = (struct sockaddr*)&ss;
+    int salen = sizeof(ss);
+    int proto;
+    char src[STRMAX+1];
+    if (getsockname(stonep->sd, sa, &salen) < 0) {
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	message(LOG_ERR, "stone %d: Can't get socket's name err=%d",
+		stonep->sd, errno);
+	str[0] = '\0';
+	return NULL;
+    }
+    addrport2str(sa, salen, (stonep->proto & proto_stone_s), src, STRMAX, 0);
+    src[STRMAX] = '\0';
+    proto = stonep->proto;
+    if ((proto & proto_command) == command_proxy) {
+	snprintf(str, strlen, "stone %d: proxy <- %s", stonep->sd, src);
+    } else if ((proto & proto_command) == command_health) {
+	snprintf(str, strlen, "stone %d: health <- %s", stonep->sd, src);
+    } else if ((proto & proto_command) == command_identd) {
+	snprintf(str, strlen, "stone %d: identd <- %s", stonep->sd, src);
+    } else {
+	char dst[STRMAX+1];
+	addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
+		     (stonep->proto & proto_stone_d), dst, STRMAX, 0);
+	dst[STRMAX] = '\0';
+	snprintf(str, strlen, "stone %d: %s <- %s", stonep->sd, dst, src);
+    }
+    str[strlen] = '\0';
+    return str;
+}
+
 
 /* relay UDP */
 
@@ -4520,6 +4556,15 @@ int healthCVS_ID(Pair *pair, char *parm, int start) {
     return -2;	/* read more */
 }
 
+int healthSTONE(Pair *pair, char *parm, int start) {
+    Stone *stone;
+    char str[STRMAX+1];
+    for (stone=stones; stone != NULL; stone=stone->next)
+	commOutput(pair, "200%c%s\n", (stone->next ? '-' : ' '),
+		   stone2str(stone, str, STRMAX));
+    return -2;	/* read more */
+}
+
 int healthLIMIT(Pair *pair, char *parm, int start) {
     Comm *comm = limitComm;
     char *q;
@@ -4544,6 +4589,7 @@ int healthErr(Pair *pair, char *parm, int start) {
 Comm healthComm[] = {
     { "HELO", healthHELO },
     { "CVS_ID", healthCVS_ID },
+    { "STONE", healthSTONE },
     { "LIMIT", healthLIMIT },
     { "QUIT", healthQUIT },
     { NULL, healthErr },
@@ -5977,27 +6023,7 @@ Stone *mkstone(
 	    }
 	}
     }
-    addrport2str(sa, salen, (stonep->proto & proto_stone_s), xhost, STRMAX, 0);
-    xhost[STRMAX] = '\0';
-    if ((proto & proto_command) == command_proxy) {
-	message(LOG_INFO, "stone %d: proxy <- %s",
-		stonep->sd,
-		xhost);
-    } else if ((proto & proto_command) == command_health) {
-	message(LOG_INFO, "stone %d: health <- %s",
-		stonep->sd,
-		xhost);
-    } else if ((proto & proto_command) == command_identd) {
-	message(LOG_INFO, "stone %d: identd <- %s",
-		stonep->sd,
-		xhost);
-    } else {
-	char addrport[STRMAX+1];
-	addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-		     (stonep->proto & proto_stone_d), addrport, STRMAX, 0);
-	addrport[STRMAX] = '\0';
-	message(LOG_INFO, "stone %d: %s <- %s", stonep->sd, addrport, xhost);
-    }
+    message(LOG_INFO, "%s", stone2str(stonep, xhost, STRMAX));
     stonep->backups = NULL;
     if ((proto & proto_command) != command_proxy
 	&& (proto & proto_command) != command_health
