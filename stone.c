@@ -4101,6 +4101,17 @@ int commOutput(Pair *pair, char *fmt, ...) {
     if ((p->proto & (proto_shutdown | proto_close)) || InvalidSocket(psd))
 	return -1;
     ex = p->b;	/* bottom */
+    if (ex->bufmax - (ex->start + ex->len) < STRMAX+1) {
+	ExBuf *new = getExBuf();
+	if (new) {
+	    ex = new;
+	    p->b->next = ex;
+	    p->b = ex;
+	    p->nbuf++;
+	    if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: get ExBuf nbuf=%d",
+				   pair->stone->sd, p->sd, p->nbuf);
+	}
+    }
     str = &ex->buf[ex->start + ex->len];
     ex->buf[ex->bufmax-1] = '\0';
     va_start(ap, fmt);
@@ -4556,6 +4567,14 @@ int healthCVS_ID(Pair *pair, char *parm, int start) {
     return -2;	/* read more */
 }
 
+int healthCONFIG(Pair *pair, char *parm, int start) {
+    int i;
+    for (i=1; i < ConfigArgc; i++)
+	commOutput(pair, "200%c%s\n", (i < ConfigArgc-1 ? '-' : ' '),
+		   ConfigArgv[i]);
+    return -2;	/* read more */
+}
+
 int healthSTONE(Pair *pair, char *parm, int start) {
     Stone *stone;
     char str[STRMAX+1];
@@ -4589,6 +4608,7 @@ int healthErr(Pair *pair, char *parm, int start) {
 Comm healthComm[] = {
     { "HELO", healthHELO },
     { "CVS_ID", healthCVS_ID },
+    { "CONFIG", healthCONFIG },
     { "STONE", healthSTONE },
     { "LIMIT", healthLIMIT },
     { "QUIT", healthQUIT },
