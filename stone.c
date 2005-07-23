@@ -1646,8 +1646,7 @@ void scanBackups(void) {
 Backup *findBackup(struct sockaddr *sa, int proto) {
     Backup *b;
     for (b=backups; b != NULL; b=b->next) {
-	if (saComp(sa, &b->master->addr)
-	    && (b->proto & proto)) {	/* found */
+	if (saComp(sa, &b->master->addr)) {	/* found */
 	    if (Debug > 1) {
 		char mhostport[STRMAX+1];
 		char bhostport[STRMAX+1];
