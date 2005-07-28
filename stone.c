@@ -547,6 +547,7 @@ const int proto_base_d =	0x20000000;	/*        destination */
 #define proto_stone_d	(proto_udp|proto_command|\
 			 proto_ohttp_d|proto_base_d|\
 			 proto_v6_d|proto_ssl_d|proto_nobackup)
+#define proto_pair_s	(proto_ohttp_s|proto_base_s)
 #define proto_pair_d	(proto_ohttp_d|proto_base_d|proto_command)
 
 #ifdef USE_SSL
@@ -1638,12 +1639,12 @@ void scanBackups(void) {
     time(&now);
     for (b=backups; b != NULL; b=b->next) {
 	if (b->used < 2) continue;		/* not used */
-	if (now - b->last < b->interval) continue;
+	if (b->interval <= 0 || now - b->last < b->interval) continue;
 	ASYNC(asyncHealthCheck, b);
     }
 }
 
-Backup *findBackup(struct sockaddr *sa, int proto) {
+Backup *findBackup(struct sockaddr *sa) {
     Backup *b;
     for (b=backups; b != NULL; b=b->next) {
 	if (saComp(sa, &b->master->addr)) {	/* found */
@@ -1705,16 +1706,23 @@ int mkBackup(int argc, int argi, char *argv[]) {
 	}
     }
     if (b) {
+	b->last = 0;
+	b->bn = 0;	/* healthy */
+	b->used = 0;
 	b->interval = atoi(argv[argi]);
     } else {
     memerr:
 	message(LOG_CRIT, "Out of memory, no backup for %s", argv[argi+1]);
 	return argi+2;
     }
-    if (MinInterval > 0) {
-	MinInterval = gcd(MinInterval, b->interval);
+    if (b->interval > 0) {
+	if (MinInterval > 0) {
+	    MinInterval = gcd(MinInterval, b->interval);
+	} else {
+	    MinInterval = b->interval;
+	}
     } else {
-	MinInterval = b->interval;
+	b->bn = 1;	/* force unhealthy */
     }
     b->proto = 0;
     pos = hostPortExt(argv[argi+1], master_host, master_port);
@@ -1784,9 +1792,6 @@ int mkBackup(int argc, int argi, char *argv[]) {
 	}
     }
     b->chat = healthChat;
-    b->last = 0;
-    b->bn = 0;	/* healthy */
-    b->used = 0;
     b->next = backups;
     backups = b;
     return argi+2;
@@ -1878,7 +1883,7 @@ int mkChat(int argc, int i, char *argv[]) {
     return i;
 }
 
-LBSet *findLBSet(struct sockaddr *sa, int proto) {
+LBSet *findLBSet(struct sockaddr *sa) {
     LBSet *s;
     for (s=lbsets; s != NULL; s=s->next) {
 	if (saComp(&s->dsts[0]->addr, sa)) {	/* found */
@@ -2584,7 +2589,8 @@ int doSSL_connect(Pair *pair) {
 		pair->ssl_flag |= (sf_cb_on_r | sf_cb_on_r);
 		if (Debug > 8)
 		    message(LOG_DEBUG, "%d TCP %d: SSL_connect "
-			    "interrupted sf=%x", pair->stone->sd, sd, pair->ssl_flag);
+			    "interrupted sf=%x",
+			    pair->stone->sd, sd, pair->ssl_flag);
 		return 0;
 	    }
 	    message(priority(pair), "%d TCP %d: SSL_connect "
@@ -2832,8 +2838,8 @@ void message_time_log(Pair *pair) {
 void connected(Pair *pair) {
     Pair *p = pair->pair;
     if (Debug > 2)
-	message(LOG_DEBUG, "%d TCP %d: established to %d",
-		pair->stone->sd, p->sd, pair->sd);
+	message(LOG_DEBUG, "%d TCP %d: established to %d %08x %08x",
+		pair->stone->sd, p->sd, pair->sd, p->proto, pair->proto);
     time(&lastEstablished);
     /* now successfully connected */
 #ifdef USE_SSL
@@ -2924,7 +2930,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     bcopy(sa, dst, salen);
     dstlen = salen;
     time(&clock);
-    if (Debug > 8) message(LOG_DEBUG, "doconnect");
+    if (Debug > 8) message(LOG_DEBUG, "%d TCP %d: doconnect",
+			   p1->stone->sd, p1->sd);
 #ifdef USE_SSL
     ssl = p2->ssl;
     if (ssl) {
@@ -3109,6 +3116,7 @@ int reqconn(Pair *pair,		/* request pair to connect to destination */
 void asyncConn(Conn *conn) {
     Pair *p1, *p2;
     ASYNC_BEGIN;
+    if (Debug > 8) message(LOG_DEBUG, "asyncConn");
     p1 = conn->pair;
     if (p1 == NULL ||
 	doconnect(p1, &conn->dst->addr, conn->dst->len) != 0) {
@@ -3422,9 +3430,9 @@ Pair *doaccept(Stone *stonep) {
     }
     pair1->stone = pair2->stone = stonep;
     pair1->sd = nsd;
-    pair1->proto = ((stonep->proto & proto_stone_s & ~proto_command) |
+    pair1->proto = ((stonep->proto & proto_pair_s & ~proto_command) |
 		    proto_first_r | proto_first_w | command_source);
-    pair2->proto = ((stonep->proto & proto_stone_d) |
+    pair2->proto = ((stonep->proto & proto_pair_d) |
 		    proto_first_r | proto_first_w);
     pair1->timeout = pair2->timeout = stonep->timeout;
     /* now successfully accepted */
@@ -3660,9 +3668,11 @@ void message_buf(Pair *pair, int len, char *str) {	/* dump for debug */
     if (p == NULL) return;
     head[STRMAX] = '\0';
     if ((pair->proto & proto_command) == command_source) {
-	snprintf(head, STRMAX, "%s%d<%d", str, pair->sd, p->sd);
+	snprintf(head, STRMAX, "%d %s%d<%d",
+		 pair->stone->sd, str, pair->sd, p->sd);
     } else {
-	snprintf(head, STRMAX, "%s%d>%d", str, p->sd, pair->sd);
+	snprintf(head, STRMAX, "%d %s%d>%d",
+		 pair->stone->sd, str, p->sd, pair->sd);
     }
     packet_dump(head, pair->t->buf + pair->t->start, len);
 }
@@ -4153,6 +4163,13 @@ int doproxy(Pair *pair, char *host, char *port) {
 	TimeLog *log = pair->log;
 	pair->log = NULL;
 	if (log) free(log);
+    }
+    if ((pair->stone->proto & proto_nobackup) == 0) {
+	Backup *backup = findBackup(sa);
+	if (backup && backup->bn) {	/* unhealthy */
+	    sa = &backup->backup->addr;
+	    salen = backup->backup->len;
+	}
     }
     if (getpeername(sd, name, &namelen) >= 0) {	/* reconnect proxy */
 	Pair *p = pair->pair;
@@ -4964,6 +4981,9 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		    p[1-i]->proto |= proto_close;
 		    goto leave;
 		} else {	/* succeed in connecting */
+		    if (Debug > 4)
+			message(LOG_DEBUG, "%d TCP %d: connecting completed",
+				stsd, sd);
 		    connected(p[i]);
 		}
 	    } else if (FD_ISSET(sd, &eo)) {	/* Out-of-Band Data */
@@ -5844,7 +5864,7 @@ Stone *mkstone(
 	if (!host2sa(dhost, dserv, dsa, &dsalen, &dsatype, &dsaproto, 0)) {
 	    exit(1);
 	}
-	lbset = findLBSet(dsa, proto);
+	lbset = findLBSet(dsa);
 	if (lbset) {
 	    stonep->ndsts = lbset->ndsts;
 	    stonep->dsts = lbset->dsts;
@@ -6051,7 +6071,7 @@ Stone *mkstone(
 	Backup *bs[LB_MAX];
 	int found = 0;
 	for (i=0; i < stonep->ndsts; i++) {
-	    bs[i] = findBackup(&stonep->dsts[i]->addr, stonep->proto);
+	    bs[i] = findBackup(&stonep->dsts[i]->addr);
 	    if (bs[i]) {
 		found = 1;
 		bs[i]->used = 1;
