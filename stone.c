@@ -528,11 +528,12 @@ const int proto_ohttp_s =	 0x4000000;	/* over http source */
 const int proto_ohttp_d =	 0x8000000;	/*           destination */
 const int proto_base_s =	0x10000000;	/* base64 source */
 const int proto_base_d =	0x20000000;	/*        destination */
-#define command_proxy		    0x0100	/* http proxy */
-#define command_ihead		    0x0200	/* insert header */
+#define command_ihead		    0x0100	/* insert header */
+#define command_iheads		    0x0200	/* insert header repeatedly */
 #define command_pop		    0x0300	/* POP -> APOP conversion */
 #define command_health		    0x0400	/* is stone healthy ? */
 #define command_identd		    0x0500	/* identd of stone */
+#define command_proxy		    0x0600	/* http proxy */
 #define command_source		    0x0f00	/* source flag */
 
 #define proto_ssl	(proto_ssl_s|proto_ssl_d)
@@ -922,6 +923,12 @@ char *ext2str(int ext, char *str, int len) {
 	sep = ',';
 	strncpy(str+i, "proxy", len-i);
 	i += 5;
+	break;
+    case command_iheads:
+	if (i < len) str[i++] = sep;
+	sep = ',';
+	strncpy(str+i, "mproxy", len-i);
+	i += 6;
 	break;
     case command_pop:
 	if (i < len) str[i++] = sep;
@@ -3971,7 +3978,8 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	*(ex->buf+ex->bufmax-1) = 0;
 	bufmax -= 5;
     }
-    if ((p->proto & proto_command) == command_ihead) bufmax = bufmax / 2;
+    if (((p->proto & proto_command) == command_ihead) ||
+	((p->proto & proto_command) == command_iheads)) bufmax = bufmax / 2;
 #ifdef USE_SSL
     if (pair->ssl) {
 	len = SSL_read(pair->ssl, &ex->buf[start], bufmax);
@@ -5143,9 +5151,13 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		wsd = sd;
 		if (rPair) rsd = rPair->sd; else rsd = INVALID_SOCKET;
 		wPair->proto &= ~proto_select_w;
-		if ((wPair->proto & proto_command) == command_ihead) {
-		    if (insheader(wPair) >= 0)	/* insert header */
-			wPair->proto &= ~proto_command;
+		if (((wPair->proto & proto_command) == command_ihead) ||
+		    ((wPair->proto & proto_command) == command_iheads)) {
+		    int state = (wPair->proto & state_mask);
+		    if (state == 0) {
+			if (insheader(wPair) >= 0)	/* insert header */
+			    wPair->proto |= ++state;
+		    }
 		}
 		wPair->count += REF_UNIT;
 		len = dowrite(wPair);
@@ -5179,6 +5191,15 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 					    stsd, wPair->sd);
 				wPair->proto |= proto_first_r;
 			    }
+			}
+			if (rPair && ValidSocket(rsd)
+			    && ((rPair->proto & proto_command)
+				== command_iheads)) {
+			    if (Debug > 7)
+				message(LOG_DEBUG,
+					"%d TCP %d: insheader again",
+					stsd, wPair->sd);
+			    rPair->proto &= ~state_mask;
 			}
 			if (rPair && ValidSocket(rsd)
 			    && (rPair->proto & proto_connect)
@@ -6157,6 +6178,7 @@ void help(char *com) {
 	    "       identd <sport> [<xhost>...]\n"
 	    "       <host>:<port#>/http <sport> <Request-Line> [<xhost>...]\n"
 	    "       <host>:<port#>/proxy <sport> <header> [<xhost>...]\n"
+	    "       <host>:<port#>/mproxy <sport> <header> [<xhost>...]\n"
 	    "port:  <port#>[/<ext>[,<ext>]...]\n"
 	    "ext:   tcp | udp"
 #ifdef USE_SSL
@@ -6482,6 +6504,10 @@ int getdist(	/* return pos where serv begins */
 		p += 5;
 		*protop &= ~proto_command;
 		*protop |= command_ihead;
+	    } else if (!strncmp(p, "mproxy", 6)) {
+		p += 6;
+		*protop &= ~proto_command;
+		*protop |= command_iheads;
 	    } else if (!strncmp(p, "nobackup", 8)) {
 		p += 8;
 		*protop |= proto_nobackup;
@@ -7000,6 +7026,10 @@ void doargs(int argc, int i, char *argv[]) {
 		p = argv[k++];
 		j--;
 		if (k > argc || j < 0) help(argv[0]);
+	    } else if ((dproto & proto_command) == command_iheads) {
+		proto &= ~proto_command;
+		proto |= command_iheads;
+		goto extra_arg;
 	    } else if ((dproto & proto_command) == command_health) {
 		proto &= ~proto_command;
 		proto |= command_health;
@@ -7017,7 +7047,8 @@ void doargs(int argc, int i, char *argv[]) {
 	stone = mkstone(host, serv, shost, sserv, j, &argv[k], proto);
 	if (proto & proto_ohttp_d) {
 	    stone->p = strdup(p);
-	} else if ((proto & proto_command) == command_ihead) {
+	} else if (((proto & proto_command) == command_ihead) ||
+		   ((proto & proto_command) == command_iheads)) {
 	    stone->p = strdup(p);
 	}
 	stone->next = stones;
