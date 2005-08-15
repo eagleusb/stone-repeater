@@ -3502,13 +3502,23 @@ Pair *doaccept(Stone *stonep) {
     return pair1;
 }
 
-int strnPeerAddr(char *buf, int limit, SOCKET sd, int isport) {
+int strnAddr(char *buf, int limit, SOCKET sd, int which, int isport) {
     struct sockaddr_storage ss;
     struct sockaddr *name = (struct sockaddr*)&ss;
     socklen_t namelen = sizeof(ss);
     int len;
     char str[STRMAX+1];
-    if (getpeername(sd, name, &namelen) < 0) {
+    int ret;
+    switch (which) {
+#ifdef SO_ORIGINAL_DST
+    case 1:	/* original destination */
+	ret = getsockopt(sd, SOL_IP, SO_ORIGINAL_DST, name, &namelen);
+	break;
+#endif
+    default:	/* peer */
+	ret = getpeername(sd, name, &namelen);
+    }
+    if (ret < 0) {
 	if (isport) {
 	    strcpy(str, "0.0.0.0:0");
 	} else {
@@ -3590,11 +3600,17 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 	    case 'n':  c = '\n';  break;
 	    case 'r':  c = '\r';  break;
 	    case 't':  c = '\t';  break;
-	    case 'a':
-		if (buf) i += strnPeerAddr(buf+i, limit-i, pair->sd, 0);
+	    case 'a':	/* peer address */
+		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 0, 0);
 		continue;
-	    case 'A':
-		if (buf) i += strnPeerAddr(buf+i, limit-i, pair->sd, 1);
+	    case 'A':	/* peer address:port */
+		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 0, 1);
+		continue;
+	    case 'd':	/* dst address */
+		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 1, 0);
+		continue;
+	    case 'D':	/* dst address:port (transparent proxy) */
+		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 1, 1);
 		continue;
 	    case '\0':
 		c = '\\';
