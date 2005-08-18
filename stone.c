@@ -3606,12 +3606,14 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 	    case 'A':	/* peer address:port */
 		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 0, 1);
 		continue;
+#ifdef SO_ORIGINAL_DST
 	    case 'd':	/* dst address */
 		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 1, 0);
 		continue;
 	    case 'D':	/* dst address:port (transparent proxy) */
 		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 1, 1);
 		continue;
+#endif
 	    case '\0':
 		c = '\\';
 		p--;
