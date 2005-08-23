@@ -5796,6 +5796,111 @@ int reusestone(Stone *stone) {
     return 0;
 }
 
+void mkXhosts(int nhosts, char *hosts[], int proto, void *buf, char *mesg) {
+    XHost *xhosts = NULL;
+    XHost6 *xhosts6 = NULL;
+    char xhost[STRMAX+1];
+    int allow = 1;
+    int i;
+    char *p;
+#ifdef AF_INET6
+    if (proto & proto_v6_s) {
+	xhosts6 = (XHost6*)buf;
+    } else {
+#endif
+	xhosts = (XHost*)buf;
+#ifdef AF_INET6
+    }
+#endif
+    for (i=0; i < nhosts; i++) {
+	if (Debug > 10) message(LOG_DEBUG, "xhost[%d]=\"%s\"", i, hosts[i]);
+	if (!strcmp(hosts[i], "!")) {
+	    if (xhosts) {
+		xhosts[i].addr.s_addr = (u_long)~0;
+		xhosts[i].mask.s_addr = 0;
+	    } else {
+		xhosts6[i].mbits = -1;
+	    }
+	    allow = !allow;
+	    continue;
+	}
+	strcpy(xhost, hosts[i]);
+	p = strchr(xhost, '/');
+	if (p != NULL) {
+	    int ndigits;
+	    *p++ = '\0';
+	    ndigits = isdigitaddr(p);
+	    if (ndigits == 1) {
+		int bitsmax;
+		int nbits = atoi(p);
+		if (xhosts) bitsmax = 32; else bitsmax = 128;
+		if (nbits <= 0 || bitsmax < nbits) {
+		    message(LOG_ERR, "Illegal netmask: %s", p);
+		    exit(1);
+		}
+		if (xhosts) {
+		    xhosts[i].mask.s_addr
+			= htonl((u_long)~0 << (bitsmax - nbits));
+		} else {
+		    xhosts6[i].mbits = nbits;
+		}
+	    } else if (!xhosts
+		       || (xhosts[i].mask.s_addr = inet_addr(p)) == -1) {
+		message(LOG_ERR, "Illegal netmask: \"%s\" in \"%s/%s\"",
+			p, xhost, p);
+		exit(1);
+	    }
+	} else {
+	    if (xhosts) {
+		xhosts[i].mask.s_addr = (u_long)~0;
+	    } else {
+		xhosts6[i].mbits = 128;
+	    }
+	}
+	if (xhosts) {
+	    struct sockaddr_in sin;
+	    int len = sizeof(sin);
+	    sin.sin_family = AF_INET;
+	    if (!host2sa(xhost, NULL, (struct sockaddr*)&sin, &len,
+			 NULL, NULL, 0)) exit(1);
+	    xhosts[i].addr = sin.sin_addr;
+	} else {
+#ifdef AF_INET6
+	    struct sockaddr_in6 sin6;
+	    int len = sizeof(sin6);
+	    sin6.sin6_family = AF_INET6;
+	    if (!host2sa(xhost, NULL, (struct sockaddr*)&sin6, &len,
+			 NULL, NULL, 0)) exit(1);
+	    xhosts6[i].addr = sin6.sin6_addr;
+#else
+	    exit(1);
+#endif
+	}
+	if (mesg) {
+	    char str[STRMAX+1];
+	    int pos = 0;
+	    if (xhosts) {
+		addr2ip(&xhosts[i].addr, str, STRMAX);
+		pos = strlen(str);
+		snprintf(str+pos, STRMAX-pos, " (mask %lx)",
+			 (u_long)ntohl((u_long)xhosts[i].mask.s_addr));
+		pos += strlen(str+pos);
+	    } else {
+#ifdef AF_INET6
+		addr2ip6(&xhosts6[i].addr, str, STRMAX);
+		pos = strlen(str);
+		snprintf(str+pos, STRMAX-pos, "/%d", xhosts6[i].mbits);
+		pos += strlen(str+pos);
+#else
+		exit(1);
+#endif
+	    }
+	    message(LOG_DEBUG, "%s%s is %s", mesg, str,
+		    (allow ? "permitted" : "denied"));
+	}
+    }
+}
+
 /* make stone */
 Stone *mkstone(
     char *dhost,	/* destination hostname */
@@ -5811,19 +5916,14 @@ Stone *mkstone(
     int salen = sizeof(ss);
     int satype;
     int saproto = 0;
-    char xhost[STRMAX+1], *p;
-    int allow;
-    int i;
-    XHost *xhosts = NULL;
-    XHost6 *xhosts6 = NULL;
+    char *mesg;
+    char str[STRMAX+1];
 #ifdef AF_INET6
     if (proto & proto_v6_s) {
 	stonep = calloc(1, sizeof(Stone)+sizeof(XHost6)*nhosts);
-	xhosts6 = (XHost6*)stonep->xhosts;
     } else {
 #endif
 	stonep = calloc(1, sizeof(Stone)+sizeof(XHost)*nhosts);
-	xhosts = stonep->xhosts;
 #ifdef AF_INET6
     }
 #endif
@@ -5933,7 +6033,7 @@ Stone *mkstone(
 	    exit(1);
 	}
 	if (!(proto & proto_udp) && ReuseAddr) {
-	    i = 1;
+	    int i = 1;
 	    setsockopt(stonep->sd, SOL_SOCKET, SO_REUSEADDR,
 		       (char*)&i, sizeof(i));
 	}
@@ -5993,115 +6093,28 @@ Stone *mkstone(
 	stonep->ssl_client = NULL;
     }
 #endif
-    allow = 1;
-    for (i=0; i < nhosts; i++) {
-	if (Debug > 10) message(LOG_DEBUG, "xhost[%d]=\"%s\"", i, hosts[i]);
-	if (!strcmp(hosts[i], "!")) {
-	    if (xhosts) {
-		xhosts[i].addr.s_addr = (u_long)~0;
-		xhosts[i].mask.s_addr = 0;
-	    } else {
-		xhosts6[i].mbits = -1;
-	    }
-	    allow = !allow;
-	    continue;
-	}
-	strcpy(xhost, hosts[i]);
-	p = strchr(xhost, '/');
-	if (p != NULL) {
-	    int ndigits;
-	    *p++ = '\0';
-	    ndigits = isdigitaddr(p);
-	    if (ndigits == 1) {
-		int bitsmax;
-		int nbits = atoi(p);
-		if (xhosts) bitsmax = 32; else bitsmax = 128;
-		if (nbits <= 0 || bitsmax < nbits) {
-		    message(LOG_ERR, "Illegal netmask: %s", p);
-		    exit(1);
-		}
-		if (xhosts) {
-		    xhosts[i].mask.s_addr
-			= htonl((u_long)~0 << (bitsmax - nbits));
-		} else {
-		    xhosts6[i].mbits = nbits;
-		}
-	    } else if (!xhosts
-		       || (xhosts[i].mask.s_addr = inet_addr(p)) == -1) {
-		message(LOG_ERR, "Illegal netmask: \"%s\" in \"%s/%s\"",
-			p, xhost, p);
-		exit(1);
-	    }
+    mesg = NULL;
+    if (Debug > 1) {
+	mesg = str;
+	if ((proto & proto_command) == command_proxy) {
+	    snprintf(mesg, STRMAX, "stone %d: using proxy by ",
+		     stonep->sd);
+	} else if ((proto & proto_command) == command_health) {
+	    snprintf(mesg, STRMAX, "stone %d: health check by ", stonep->sd);
+	} else if ((proto & proto_command) == command_identd) {
+	    snprintf(mesg, STRMAX, "stone %d: ident query by ", stonep->sd);
 	} else {
-	    if (xhosts) {
-		xhosts[i].mask.s_addr = (u_long)~0;
-	    } else {
-		xhosts6[i].mbits = 128;
-	    }
-	}
-	if (xhosts) {
-	    struct sockaddr_in sin;
-	    int len = sizeof(sin);
-	    sin.sin_family = AF_INET;
-	    if (!host2sa(xhost, NULL, (struct sockaddr*)&sin, &len,
-			 NULL, NULL, 0)) exit(1);
-	    xhosts[i].addr = sin.sin_addr;
-	} else {
-#ifdef AF_INET6
-	    struct sockaddr_in6 sin6;
-	    int len = sizeof(sin6);
-	    sin6.sin6_family = AF_INET6;
-	    if (!host2sa(xhost, NULL, (struct sockaddr*)&sin6, &len,
-			 NULL, NULL, 0)) exit(1);
-	    xhosts6[i].addr = sin6.sin6_addr;
-#else
-	    exit(1);
-#endif
-	}
-	if (Debug > 1) {
-	    int pos = 0;
-	    if (xhosts) {
-		addr2ip(&xhosts[i].addr, xhost, STRMAX);
-		pos = strlen(xhost);
-		snprintf(xhost+pos, STRMAX-pos, " (mask %lx)",
-			 (u_long)ntohl((u_long)xhosts[i].mask.s_addr));
-		pos += strlen(xhost+pos);
-	    } else {
-#ifdef AF_INET6
-		addr2ip6(&xhosts6[i].addr, xhost, STRMAX);
-		pos = strlen(xhost);
-		snprintf(xhost+pos, STRMAX-pos, "/%d", xhosts6[i].mbits);
-		pos += strlen(xhost+pos);
-#else
-		exit(1);
-#endif
-	    }
-	    if ((proto & proto_command) == command_proxy) {
-		message(LOG_DEBUG,
-			"stone %d: %s %s to connecting to proxy",
-			stonep->sd, (allow ? "permit" : "deny"), xhost);
-	    } else if ((proto & proto_command) == command_health) {
-		message(LOG_DEBUG,
-			"stone %d: %s %s check health",
-			stonep->sd, xhost, (allow ? "can" : "can't"));
-	    } else if ((proto & proto_command) == command_identd) {
-		message(LOG_DEBUG,
-			"stone %d: %s %s query ident",
-			stonep->sd, xhost, (allow ? "can" : "can't"));
-	    } else {
-		char addrport[STRMAX+1];
-		addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-			     (stonep->proto & proto_stone_d),
-			     addrport, STRMAX, 0);
-		addrport[STRMAX] = '\0';
-		message(LOG_DEBUG,
-			"stone %d: %s %s to connecting to %s",
-			stonep->sd, (allow ? "permit" : "deny"), xhost,
-			addrport);
-	    }
+	    char addrport[STRMAX+1];
+	    addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
+			 (stonep->proto & proto_stone_d),
+			 addrport, STRMAX, 0);
+	    addrport[STRMAX] = '\0';
+	    snprintf(mesg, STRMAX, "stone %d: connecting to %s by ",
+		     stonep->sd, addrport);
 	}
     }
-    message(LOG_INFO, "%s", stone2str(stonep, xhost, STRMAX));
+    mkXhosts(nhosts, hosts, stonep->proto, (void*)stonep->xhosts, mesg);
+    message(LOG_INFO, "%s", stone2str(stonep, str, STRMAX));
     stonep->backups = NULL;
     if ((proto & proto_command) != command_proxy
 	&& (proto & proto_command) != command_health
