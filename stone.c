@@ -80,6 +80,7 @@
  * -DNO_PID_T	  without pid_t
  * -DNO_SOCKLEN_T without socklen_t
  * -DNO_ADDRINFO  without getaddrinfo
+ * -DNO_FAMILY_T  without sa_family_t
  * -DPTHREAD      use Posix Thread
  * -DPRCTL	  use prctl(2) - operations on a process
  * -DOS2	  OS/2 with EMX
@@ -343,18 +344,6 @@ char *CppOptions = NULL;
 typedef int socklen_t;
 #endif
 
-typedef struct {
-    struct in_addr addr;
-    struct in_addr mask;
-} XHost;
-
-typedef struct {
-#ifdef AF_INET6
-    struct in6_addr addr;
-#endif
-    short mbits;
-} XHost6;
-
 typedef struct _Chat {
     struct _Chat *next;
     char *send;
@@ -367,6 +356,13 @@ typedef struct {
     struct sockaddr addr;
 } SockAddr;
 #define SockAddrBaseSize	(sizeof(SockAddr) - sizeof(struct sockaddr))
+
+typedef struct _XHosts {
+    struct _XHosts *next;
+    short mbits;
+    SockAddr xhost;	/* must be the last member */
+} XHosts;
+#define XHostsBaseSize		(sizeof(XHosts) - sizeof(struct sockaddr))
 
 typedef struct _Backup {
     struct _Backup *next;
@@ -405,7 +401,7 @@ typedef struct _Stone {
     StoneSSL *ssl_client;
 #endif
     int nhosts;			/* # of hosts */
-    XHost xhosts[0];		/* hosts permitted to connect */
+    XHosts *xhosts;		/* hosts permitted to connect */
 } Stone;
 
 typedef struct _TimeLog {
@@ -1339,54 +1335,48 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
 }
 
 /* *addrp is permitted to connect to *stonep ? */
-int checkXhost(Stone *stonep, struct sockaddr *sa, socklen_t salen,
-	       char *ident) {
+int checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
     int i;
     int match = 1;
-    if (!stonep->nhosts) return 1; /* any hosts can access */
-    if (sa->sa_family == AF_INET) {
-	struct in_addr *addrp;
-	addrp = &((struct sockaddr_in*)sa)->sin_addr;
-	for (i=0; i < stonep->nhosts; i++) {
-	    if ((stonep->xhosts[i].addr.s_addr == (u_long)~0)
-		&& ! stonep->xhosts[i].mask.s_addr)
-		match = !match;
-	    else if ((addrp->s_addr & stonep->xhosts[i].mask.s_addr)
-		     == (stonep->xhosts[i].addr.s_addr
-			 & stonep->xhosts[i].mask.s_addr))
-		return match;
+    if (!xhosts) return 1; /* any hosts can access */
+    for (; xhosts != NULL; xhosts = xhosts->next) {
+	if (xhosts->mbits < 0) {
+	    match = !match;
+	    continue;
 	}
-	return !match;
-    }
+	if (sa->sa_family == AF_INET
+	    && xhosts->xhost.addr.sa_family == AF_INET) {
+	    u_long addr = ((struct sockaddr_in*)sa)->sin_addr.s_addr;
+	    u_long xadr = ((struct sockaddr_in*)&xhosts->xhost.addr)
+		->sin_addr.s_addr;
+	    u_long bits = htonl((u_long)~0 << (32 - xhosts->mbits));
+	    if ((addr & bits) == (xadr & bits)) return match;
 #ifdef AF_INET6
-    else if (sa->sa_family == AF_INET6) {
-	XHost6 *xhosts = (XHost6*)stonep->xhosts;
-	struct in6_addr *addrp;
-	addrp = &((struct sockaddr_in6*)sa)->sin6_addr;
-	for (i=0; i < stonep->nhosts; i++) {
-	    if (xhosts[i].mbits < 0) {
-		match = !match;
-	    } else {
-		int j, k;
-		for (j=0, k=xhosts[i].mbits; k > 0; j+=4, k -= 32) {
-		    u_long addr, xaddr, mask;
-		    addr = ntohl(*(u_long*)&addrp->s6_addr[j]);
-		    xaddr = ntohl(*(u_long*)&xhosts[i].addr.s6_addr[j]);
-		    if (k >= 32) mask = (u_long)~0;
-		    else mask = ((u_long)~0 << (32-k));
-		    if (Debug > 12)
-			message(LOG_DEBUG, "compare addr=%lx x=%lx m=%lx",
-				addr, xaddr, mask);
-		    if ((addr & mask) != (xaddr & mask)) break;
-		}
-		if (k <= 0) return match;
+	} else if (sa->sa_family == AF_INET6
+		   && xhosts->xhost.addr.sa_family == AF_INET6) {
+	    struct in6_addr *adrp = &((struct sockaddr_in6*)sa)->sin6_addr;
+	    struct in6_addr *xadp = &((struct sockaddr_in6*)
+				      &xhosts->xhost.addr)->sin6_addr;
+	    int j, k;
+	    for (j=0, k=xhosts->mbits; k > 0; j+=4, k -= 32) {
+		u_long addr, xadr, mask;
+		addr = ntohl(*(u_long*)&adrp->s6_addr[j]);
+		xadr = ntohl(*(u_long*)&xadp->s6_addr[j]);
+		if (k >= 32) mask = (u_long)~0;
+		else mask = ((u_long)~0 << (32-k));
+		if (Debug > 12)
+		    message(LOG_DEBUG, "compare addr=%lx x=%lx m=%lx",
+			    addr, xadr, mask);
+		if ((addr & mask) != (xadr & mask)) break;
 	    }
-	}
-	return !match;
-    }
+	    if (k <= 0) return match;
 #endif
-    message(LOG_ERR, "checkXhost: unknown family=%d", sa->sa_family);
-    return 0;	/* deny */
+	} else {
+	    message(LOG_ERR, "checkXhost: unknown family=%d", sa->sa_family);
+	    return 0;	/* deny */
+	}
+    }
+    return !match;
 }
 
 #ifdef WINDOWS
@@ -2317,7 +2307,7 @@ void asyncUDP(Stone *stonep) {
     FdSet(stonep->sd, &rin);
     freeMutex(FdRinMutex);
     if (len <= 0) goto end;	/* drop */
-    if (!checkXhost(stonep, from, fromlen, NULL)) {
+    if (!checkXhost(stonep->xhosts, from, fromlen)) {
 	addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
 		     addrport, STRMAX, 0);
 	addrport[STRMAX] = '\0';
@@ -3393,7 +3383,7 @@ Pair *doaccept(Stone *stonep) {
     addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
 		 fromstr+len, STRMAX*2-len, 0);
     fromstr[STRMAX*2] = '\0';
-    if (!checkXhost(stonep, from, fromlen, ident)) {
+    if (!checkXhost(stonep->xhosts, from, fromlen)) {
 	message(LOG_WARNING, "stone %d: access denied: from %s",
 		stonep->sd, fromstr);
 	shutdown(nsd, 2);
@@ -5796,109 +5786,103 @@ int reusestone(Stone *stone) {
     return 0;
 }
 
-void mkXhosts(int nhosts, char *hosts[], int proto, void *buf, char *mesg) {
-    XHost *xhosts = NULL;
-    XHost6 *xhosts6 = NULL;
+#ifdef NO_FAMILY_T
+typedef sa_family_t int;
+#endif
+
+XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
+    XHosts *top = NULL;
+    XHosts *bot = NULL;
     char xhost[STRMAX+1];
     int allow = 1;
     int i;
     char *p;
-#ifdef AF_INET6
-    if (proto & proto_v6_s) {
-	xhosts6 = (XHost6*)buf;
-    } else {
-#endif
-	xhosts = (XHost*)buf;
-#ifdef AF_INET6
-    }
-#endif
     for (i=0; i < nhosts; i++) {
+	XHosts *new;
 	if (Debug > 10) message(LOG_DEBUG, "xhost[%d]=\"%s\"", i, hosts[i]);
 	if (!strcmp(hosts[i], "!")) {
-	    if (xhosts) {
-		xhosts[i].addr.s_addr = (u_long)~0;
-		xhosts[i].mask.s_addr = 0;
-	    } else {
-		xhosts6[i].mbits = -1;
-	    }
+	    new = malloc(XHostsBaseSize);
+	    if (!new) goto memerr;
+	    new->mbits = -1;
 	    allow = !allow;
-	    continue;
-	}
-	strcpy(xhost, hosts[i]);
-	p = strchr(xhost, '/');
-	if (p != NULL) {
+	} else {
 	    int ndigits;
-	    *p++ = '\0';
-	    ndigits = isdigitaddr(p);
-	    if (ndigits == 1) {
-		int bitsmax;
-		int nbits = atoi(p);
-		if (xhosts) bitsmax = 32; else bitsmax = 128;
-		if (nbits <= 0 || bitsmax < nbits) {
-		    message(LOG_ERR, "Illegal netmask: %s", p);
+	    int mbits = 0;
+	    struct sockaddr_storage ss;
+	    struct sockaddr *sa = (struct sockaddr*)&ss;
+	    int salen = sizeof(ss);
+	    strcpy(xhost, hosts[i]);
+	    p = strchr(xhost, '/');
+	    if (p) {
+		*p++ = '\0';
+		ndigits = isdigitaddr(p);
+		if (ndigits == 1) {
+		    mbits = atoi(p);
+#ifdef AF_INET6
+		    if (mbits > 32) family = AF_INET6;	/* force to set IPv6 */
+#endif
+		    if (mbits <= 0 || 128 < mbits) {
+			message(LOG_ERR, "Illegal netmask: %s", p);
+			exit(1);
+		    }
+		} else if (ndigits == 4) {
+		    u_long bits = ntohl(inet_addr(p));
+		    family = AF_INET;	/* force to set IPv4 */
+		    for (mbits=0; mbits < 32 && bits; mbits++) {
+			if (!(bits & 0x80000000)) {
+			    message(LOG_ERR, "netmask by bits pattern "
+				    "is deprecated: %s/%s", xhost, p);
+			    exit(1);
+			}
+			bits <<= 1;
+		    }
+		} else {
+		    message(LOG_ERR, "Illegal netmask: \"%s\" in \"%s/%s\"",
+			    p, xhost, p);
 		    exit(1);
 		}
-		if (xhosts) {
-		    xhosts[i].mask.s_addr
-			= htonl((u_long)~0 << (bitsmax - nbits));
+	    }
+	    sa->sa_family = family;
+	    if (!host2sa(xhost, NULL, sa, &salen, NULL, NULL, 0)) exit(1);
+	    new = malloc(XHostsBaseSize+salen);
+	    if (!new) goto memerr;
+	    new->xhost.len = salen;
+	    bcopy(sa, &new->xhost.addr, salen);
+	    if (!mbits) {
+		if (sa->sa_family == AF_INET) {
+		    mbits = 32;
+#ifdef AF_INET6
+		} else if (sa->sa_family == AF_INET6) {
+		    mbits = 128;
+#endif
 		} else {
-		    xhosts6[i].mbits = nbits;
+		    message(LOG_ERR, "mkXhosts: unknown family=%d",
+			    sa->sa_family);
+		    exit(1);
 		}
-	    } else if (!xhosts
-		       || (xhosts[i].mask.s_addr = inet_addr(p)) == -1) {
-		message(LOG_ERR, "Illegal netmask: \"%s\" in \"%s/%s\"",
-			p, xhost, p);
-		exit(1);
 	    }
-	} else {
-	    if (xhosts) {
-		xhosts[i].mask.s_addr = (u_long)~0;
-	    } else {
-		xhosts6[i].mbits = 128;
-	    }
-	}
-	if (xhosts) {
-	    struct sockaddr_in sin;
-	    int len = sizeof(sin);
-	    sin.sin_family = AF_INET;
-	    if (!host2sa(xhost, NULL, (struct sockaddr*)&sin, &len,
-			 NULL, NULL, 0)) exit(1);
-	    xhosts[i].addr = sin.sin_addr;
-	} else {
-#ifdef AF_INET6
-	    struct sockaddr_in6 sin6;
-	    int len = sizeof(sin6);
-	    sin6.sin6_family = AF_INET6;
-	    if (!host2sa(xhost, NULL, (struct sockaddr*)&sin6, &len,
-			 NULL, NULL, 0)) exit(1);
-	    xhosts6[i].addr = sin6.sin6_addr;
-#else
-	    exit(1);
-#endif
-	}
-	if (mesg) {
-	    char str[STRMAX+1];
-	    int pos = 0;
-	    if (xhosts) {
-		addr2ip(&xhosts[i].addr, str, STRMAX);
+	    new->mbits = mbits;
+	    if (mesg) {
+		char str[STRMAX+1];
+		int pos = 0;
+		addr2str(&new->xhost.addr, new->xhost.len,
+			 str, STRMAX, NI_NUMERICHOST);
 		pos = strlen(str);
-		snprintf(str+pos, STRMAX-pos, " (mask %lx)",
-			 (u_long)ntohl((u_long)xhosts[i].mask.s_addr));
+		snprintf(str+pos, STRMAX-pos, "/%d", new->mbits);
 		pos += strlen(str+pos);
-	    } else {
-#ifdef AF_INET6
-		addr2ip6(&xhosts6[i].addr, str, STRMAX);
-		pos = strlen(str);
-		snprintf(str+pos, STRMAX-pos, "/%d", xhosts6[i].mbits);
-		pos += strlen(str+pos);
-#else
-		exit(1);
-#endif
+		message(LOG_DEBUG, "%s%s is %s", mesg, str,
+			(allow ? "permitted" : "denied"));
 	    }
-	    message(LOG_DEBUG, "%s%s is %s", mesg, str,
-		    (allow ? "permitted" : "denied"));
 	}
+	new->next = NULL;
+	if (!top) top = new;
+	if (bot) bot->next = new;
+	bot = new;
     }
+    return top;
+ memerr:
+    message(LOG_CRIT, "Out of memory.");
+    exit(1);
 }
 
 /* make stone */
@@ -5916,23 +5900,15 @@ Stone *mkstone(
     int salen = sizeof(ss);
     int satype;
     int saproto = 0;
+    sa_family_t family;
     char *mesg;
     char str[STRMAX+1];
-#ifdef AF_INET6
-    if (proto & proto_v6_s) {
-	stonep = calloc(1, sizeof(Stone)+sizeof(XHost6)*nhosts);
-    } else {
-#endif
-	stonep = calloc(1, sizeof(Stone)+sizeof(XHost)*nhosts);
-#ifdef AF_INET6
-    }
-#endif
+    stonep = calloc(1, sizeof(Stone));
     if (!stonep) {
 	message(LOG_CRIT, "Out of memory.");
 	exit(1);
     }
     stonep->p = NULL;
-    stonep->nhosts = nhosts;
     stonep->timeout = PairTimeOut;
     if (proto & proto_udp) {
 	satype = SOCK_DGRAM;
@@ -6113,7 +6089,13 @@ Stone *mkstone(
 		     stonep->sd, addrport);
 	}
     }
-    mkXhosts(nhosts, hosts, stonep->proto, (void*)stonep->xhosts, mesg);
+    family = AF_INET;
+#ifdef AF_INET6
+    if (stonep->proto & proto_v6_s) {
+	family = AF_INET6;
+    }
+#endif
+    stonep->xhosts = mkXhosts(nhosts, hosts, family, mesg);
     message(LOG_INFO, "%s", stone2str(stonep, str, STRMAX));
     stonep->backups = NULL;
     if ((proto & proto_command) != command_proxy
@@ -6122,6 +6104,7 @@ Stone *mkstone(
 	&& (proto & proto_nobackup) == 0) {
 	Backup *bs[LB_MAX];
 	int found = 0;
+	int i;
 	for (i=0; i < stonep->ndsts; i++) {
 	    bs[i] = findBackup(&stonep->dsts[i]->addr);
 	    if (bs[i]) {
