@@ -364,6 +364,18 @@ typedef struct _XHosts {
 } XHosts;
 #define XHostsBaseSize		(sizeof(XHosts) - sizeof(struct sockaddr))
 
+typedef struct _XPorts {
+    struct _XPorts *next;
+    short from;		/* port range from */
+    short end;		/* port range to, or equals to from */
+} XPorts;
+
+typedef struct _PortXHosts {
+    struct _PortXHosts *next;
+    XPorts *ports;
+    XHosts *xhosts;
+} PortXHosts;
+
 typedef struct _Backup {
     struct _Backup *next;
     SockAddr *check;
@@ -472,6 +484,7 @@ typedef struct _Comm {
 Stone *stones = NULL;
 Stone *oldstones = NULL;
 int ReuseAddr = 0;
+PortXHosts *portXHosts = NULL;
 Chat *healthChat = NULL;
 Backup *backups = NULL;
 LBSet *lbsets = NULL;
@@ -4162,9 +4175,10 @@ static char *comm_match(char *buf, char *str) {
     return buf;
 }
 
-int doproxy(Pair *pair, char *host, char *port) {
+int doproxy(Pair *pair, char *host, char *serv) {
     SOCKET sd = pair->sd;
     int reconnect = 0;
+    PortXHosts *pxh;
     struct sockaddr_storage name_s;
     struct sockaddr *name = (struct sockaddr*)&name_s;
     struct sockaddr_storage ss;
@@ -4172,7 +4186,7 @@ int doproxy(Pair *pair, char *host, char *port) {
     socklen_t namelen = sizeof(name_s);
     socklen_t salen = sizeof(ss);
     sa->sa_family = AF_UNSPEC;
-    if (!host2sa(host, port, sa, &salen, NULL, NULL, 0)) {
+    if (!host2sa(host, serv, sa, &salen, NULL, NULL, 0)) {
 	return -1;
     }
     if (islocalhost(sa)) {
@@ -4185,6 +4199,36 @@ int doproxy(Pair *pair, char *host, char *port) {
 	if (backup && backup->bn) {	/* unhealthy */
 	    sa = &backup->backup->addr;
 	    salen = backup->backup->len;
+	}
+    }
+    pxh = (PortXHosts*)pair->stone->dsts[1];
+    if (pxh) {
+	for (; pxh; pxh=pxh->next) {
+	    XPorts *ports;
+	    int isok = 0;
+	    short port = getport(sa);
+	    for (ports=pxh->ports; ports; ports=ports->next) {
+		if (ports->from <= port && port <= ports->end) {
+		    isok = 1;
+		}
+	    }
+	    if (!isok) continue;
+	    if (checkXhost(pxh->xhosts, sa, salen)) {
+		if (Debug > 7) {
+		    message(LOG_DEBUG, "stone %d: proxy can connect to %s:%s",
+			    pair->stone->sd, host, serv);
+		}
+		break;
+	    } else {
+		message(LOG_WARNING, "stone %d: proxy may not connect to %s",
+			pair->stone->sd, host);
+		return -1;
+	    }
+	}
+	if (!pxh) {
+	    message(LOG_WARNING, "stone %d: proxy may not connect to port %s",
+		    pair->stone->sd, serv);
+	    return -1;
 	}
     }
     if (getpeername(sd, name, &namelen) >= 0) {	/* reconnect proxy */
@@ -5885,6 +5929,99 @@ XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
     exit(1);
 }
 
+int mkPortXhosts(int argc, int i, char *argv[]) {
+    PortXHosts *pxh;
+    XPorts *top = NULL;
+    XPorts *bot = NULL;
+    char **hosts;
+    char *p, *q;
+    char str[STRMAX+1];
+    int isnum;
+    int from;
+    int j;
+    i++;
+    if (!strcmp(argv[i], "--")) {
+	portXHosts = NULL;
+	return i;
+    }
+    p = argv[i];
+    q = str;
+    isnum = 1;
+    from = -1;
+    for (;;) {
+	if (*p == ',' || *p == '-' || *p == '\0') {
+	    int port;
+	    *q = '\0';
+	    if (str[0]) {
+		if (isnum) port = atoi(str);
+		else {
+		    struct sockaddr_storage ss;
+		    struct sockaddr *sa = (struct sockaddr*)&ss;
+		    socklen_t salen = sizeof(ss);
+		    if (!host2sa(NULL, str, sa, &salen, NULL, NULL, 0)) {
+			goto opterr;
+		    }
+		    port = getport(sa);
+		}
+	    } else {
+	    opterr:
+		message(LOG_ERR, "Illegal option: -x requires port list: %s",
+			argv[i]);
+		exit(1);
+	    }
+	    if (*p == '-') {
+		from = port;
+	    } else {
+		XPorts *new = malloc(sizeof(XPorts));
+		if (!new) goto memerr;
+		new->next = NULL;
+		if (from >= 0) new->from = from;
+		else new->from = port;
+		new->end = port;
+		from = -1;
+		if (bot) bot->next = new;
+		bot = new;
+		if (!top) top = new;
+		if (*p == '\0') break;
+	    }
+	    p++;
+	    q = str;
+	    isnum = 1;
+	    continue;
+	} else if (!isdigit(*p)) {
+	    isnum = 0;
+	}
+	*q++ = *p++;
+    }
+    if (Debug > 5) {
+	char buf[BUFMAX];
+	XPorts *cur;
+	j = 0;
+	for (cur=top; j < BUFMAX && cur; cur=cur->next) {
+	    if (j > 0) buf[j++] = ',';
+	    snprintf(buf+j, BUFMAX-1-j, "%d-%d", cur->from, cur->end);
+	    j += strlen(buf+j);
+	}
+	buf[j] = '\0';
+	message(LOG_DEBUG, "XPorts: %s", buf);
+    }
+    i++;
+    hosts = &argv[i];
+    j = 0;
+    for (; i < argc; i++, j++) if (!strcmp(argv[i], "--")) break;
+    pxh = malloc(sizeof(PortXHosts));
+    if (!pxh) goto memerr;
+    pxh->ports = top;
+    if (Debug > 5) p = "XHosts: "; else p = NULL;
+    pxh->xhosts = mkXhosts(j, hosts, AF_UNSPEC, p);
+    pxh->next = portXHosts;
+    portXHosts = pxh;
+    return i;
+ memerr:
+    message(LOG_CRIT, "Out of memory.");
+    exit(1);
+}
+
 /* make stone */
 Stone *mkstone(
     char *dhost,	/* destination hostname */
@@ -5947,7 +6084,14 @@ Stone *mkstone(
 	|| (proto & proto_command) == command_health
 	|| (proto & proto_command) == command_identd) {
 	stonep->ndsts = 1;
-	stonep->dsts = malloc(sizeof(SockAddr*));	/* dummy */
+	if ((proto & proto_command) == command_proxy) {
+	    stonep->dsts = malloc(sizeof(SockAddr*) + sizeof(PortXHosts*));
+	    if (stonep->dsts) ((PortXHosts**)stonep->dsts)[1] = portXHosts;
+	    /* only proxy stone needs portXHosts,
+	       so we divert dsts into holding current portXHosts */
+	} else {
+	    stonep->dsts = malloc(sizeof(SockAddr*));	/* dummy */
+	}
 	if (!stonep->dsts) goto memerr;
 	stonep->dsts[0] = saDup(sa, salen);	/* dummy */
 #ifdef AF_LOCAL
@@ -6163,6 +6307,8 @@ void help(char *com) {
 	    "      -T <n>            ; timeout [sec] of TCP sessions\n"
 	    "      -A <n>            ; length of backlog\n"
 	    "      -r                ; reuse socket\n"
+	    "      -x <port>[,<port>][-<port>]... <xhost> --\n"
+	    "                        ; permit connecting to <xhost>:<port>\n"
 	    "      -s <send> <expect>... --\n"
 	    "                        ; health check script\n"
 	    "      -b <n> <master>:<port> <backup>:<port>\n"
@@ -6850,6 +6996,9 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
     case 'r':
 	ReuseAddr = 1;
 	break;
+    case 'x':
+	argi = mkPortXhosts(argc, argi, argv);
+	break;
     case 's':
 	argi = mkChat(argc, argi, argv);
 	break;
@@ -7003,7 +7152,7 @@ void doargs(int argc, int i, char *argv[]) {
 		exit(1);
 	    }
 	} else {
-	    message(LOG_ERR, "Invalid <host><port>: %s", argv[i]);
+	    message(LOG_ERR, "Invalid <host>:<port>: %s", argv[i]);
 	    exit(1);
 	}
 	i++;
