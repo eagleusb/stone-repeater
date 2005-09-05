@@ -46,6 +46,7 @@ HOWTO USE
 	stone [-C <file>] [-P <command>] [-Q <options>] [-N] [-d] [-p] [-n]
 	      [-u <max>] [-f <n>] [-l] [-L <file>] [-a <file>] [-i <file>]
 	      [-X <n>] [-T <n>] [-r]
+	      [-x <port>[,<port>][-<port>]... <xhost>... --]
 	      [-s <send> <expect>... --]
 	      [-b [<var>=<val>]... <n> <master>:<port> <backup>:<port>]
 	      [-B <host>:<port> <host1>:<port1>... --]
@@ -83,6 +84,13 @@ HOWTO USE
 	the ``-T <n>'' is used, the timeout of TCP sessions can be
 	specified to ``<n>'' sec.  Default: 600.  The ``-r'' flag is
 	used, SO_REUSEADDR is set on the socket of <st> .
+
+	Using the ``-x <port>[,<port>][-<port>]... <xhost>... --'' flag,
+	the http proxy (described later) can only connect to
+	<xhost>:<port>.  If more than one ``-x ... --'' flags are
+	designated, the posterior one whose <port> list matches the
+	connecting port.  If the ``-x --'' is used, prior ``-x'' flags
+	are ignored.
 
 	The ``-b <n> <master>:<port> <backup>:<port>'' flag designates
 	the backup destination for <master>:<port>.  The program checks
