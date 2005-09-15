@@ -115,6 +115,7 @@ typedef void (*FuncPtr)(void*);
 #define NO_FORK
 #define NO_SETUID
 #define NO_CHROOT
+#define NO_FAMILY_T
 #define ValidSocket(sd)		((sd) != INVALID_SOCKET)
 #define FD_SET_BUG
 #undef EINTR
@@ -666,10 +667,9 @@ int snprintf(char *str, size_t len, char *fmt, ...) {
 #ifdef NO_BCOPY
 void bcopy(void *b1, void *b2, int len) {
     if (b1 < b2 && (char*)b2 < (char*)b1 + len) {	/* overlapping */
-	char *p;
-	b2 = (char*)b2 + len - 1;
-	for (p=(char*)b1+len-1; (char*)b1 <= p; p--, ((char*)b2)--)
-	    *(char*)b2 = *p;
+	char *p, *q;
+	q = (char*)b2 + len - 1;
+	for (p=(char*)b1+len-1; (char*)b1 <= p; p--, q--) *q = *p;
     } else {
 	memcpy(b2, b1, len);
     }
@@ -5831,7 +5831,7 @@ int reusestone(Stone *stone) {
 }
 
 #ifdef NO_FAMILY_T
-typedef sa_family_t int;
+typedef int sa_family_t;
 #endif
 
 XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
