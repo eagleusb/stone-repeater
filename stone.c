@@ -7394,6 +7394,15 @@ void initialize(int argc, char *argv[]) {
     PairIndex = SSL_get_ex_new_index(0, "Pair index", NULL, NULL, NULL);
     MatchIndex = SSL_SESSION_get_ex_new_index(0, "Match index",
 					      newMatch, NULL, freeMatch);
+    RAND_poll();
+    if (!RAND_status()) {
+	message(LOG_WARNING, "Can't collect enough random seeds");
+	srand(time(NULL));
+	do {
+	    u_short rnd = (rand() & 0xFFFF);
+	    RAND_seed(&rnd, sizeof(rnd));
+	} while (!RAND_status());
+    }
     sslopts_default(&ServerOpts, 1);
     sslopts_default(&ClientOpts, 0);
 #endif
