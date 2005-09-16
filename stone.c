@@ -271,6 +271,7 @@ int FdSetBug = 0;
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
+#include <openssl/pkcs12.h>
 
 #ifdef CRYPTOAPI
 int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
@@ -303,6 +304,8 @@ typedef struct {
     char *certFile;
     char *caFile;
     char *caPath;
+    char *pfxFile;
+    char *passwd;
 #ifdef CRYPTOAPI
     char *certStore;
 #endif
@@ -5560,6 +5563,12 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
     return 1;	/* if re is null, always succeed */
 }
 
+static int passwd_callback(char *buf, int size, int rwflag, void *passwd) {
+    strncpy(buf, (char *)(passwd), size);
+    buf[size-1] = '\0';
+    return(strlen(buf));
+}
+
 StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     StoneSSL *ss;
     int err;
@@ -5612,19 +5621,69 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 				       (SSL_SESS_CACHE_SERVER
 					   | SSL_SESS_CACHE_NO_AUTO_CLEAR));
     }
-    if (opts->keyFile
-	&& !SSL_CTX_use_PrivateKey_file
-		(ss->ctx, opts->keyFile, X509_FILETYPE_PEM)) {
-	message(LOG_ERR, "SSL_CTX_use_PrivateKey_file(%s) error",
-		opts->keyFile);
-	goto error;
-    }
-    if (opts->certFile
-	&& !SSL_CTX_use_certificate_file(ss->ctx, opts->certFile,
-					 X509_FILETYPE_PEM)) {
-	message(LOG_ERR, "SSL_CTX_use_certificate_file(%s) error",
-		opts->certFile);
-	goto error;
+    if (opts->pfxFile) {
+	FILE *fp = fopen(opts->pfxFile, "r");
+	PKCS12 *p12;
+	EVP_PKEY *key;
+	X509 *cert;
+	if (!fp) {
+	    message(LOG_ERR, "Can't open pfx file: %s", opts->pfxFile);
+	    goto error;
+	}
+	p12 = d2i_PKCS12_fp(fp, NULL);
+	if (!p12) {
+	    message(LOG_ERR, "Can't read pfx file: %s", opts->pfxFile);
+	    fclose(fp);
+	    goto error;
+	}
+	fclose(fp);
+	key = NULL;
+	cert = NULL;
+	if (!PKCS12_parse(p12, opts->passwd, &key, &cert, NULL)) {
+	    message(LOG_ERR, "Can't parse PKCS12(%s) %s",
+		    opts->pfxFile, ERR_error_string(ERR_get_error(), NULL));
+	    goto error;
+	}
+	if (cert) {
+	    if (!SSL_CTX_use_certificate(ss->ctx, cert)) {
+		message(LOG_ERR, "SSL_CTX_use_certificate(%s) %s",
+			opts->pfxFile,
+			ERR_error_string(ERR_get_error(), NULL));
+		X509_free(cert);
+		goto error;
+	    }
+	    X509_free(cert);
+	}
+	if (key) {
+	    if (!SSL_CTX_use_PrivateKey(ss->ctx, key)) {
+		message(LOG_ERR, "SSL_CTX_use_PrivateKey(%s) %s",
+			opts->pfxFile,
+			ERR_error_string(ERR_get_error(), NULL));
+		EVP_PKEY_free(key);
+		goto error;
+	    }
+	    EVP_PKEY_free(key);
+	}
+	PKCS12_free(p12);
+    } else {
+	if (opts->passwd) {
+	    SSL_CTX_set_default_passwd_cb(ss->ctx, passwd_callback);
+	    SSL_CTX_set_default_passwd_cb_userdata(ss->ctx, opts->passwd);
+	}
+	if (opts->keyFile
+	    && !SSL_CTX_use_PrivateKey_file
+	    (ss->ctx, opts->keyFile, X509_FILETYPE_PEM)) {
+	    message(LOG_ERR, "SSL_CTX_use_PrivateKey_file(%s) %s",
+		    opts->keyFile, ERR_error_string(ERR_get_error(), NULL));
+	    goto error;
+	}
+	if (opts->certFile
+	    && !SSL_CTX_use_certificate_file(ss->ctx, opts->certFile,
+					     X509_FILETYPE_PEM)) {
+	    message(LOG_ERR, "SSL_CTX_use_certificate_file(%s) error",
+		    opts->certFile);
+	    goto error;
+	}
     }
 #ifdef CRYPTOAPI
     if (opts->certStore) {
@@ -6404,10 +6463,12 @@ void help(char *com, char *sub) {
 #endif
 "       shutdown=<mode>  ; accurate, nowait, unclean\n"
 "       sid_ctx=<str>    ; set session ID context\n"
+"       passfile=<file>  ; password file\n"
 "       key=<file>       ; key file\n"
 "       cert=<file>      ; certificate file\n"
 "       CAfile=<file>    ; certificate file of CA\n"
 "       CApath=<dir>     ; dir of CAs\n"
+"       pfx=<file>       ; PKCS#12 file\n"
 #ifdef CRYPTOAPI
 "       store=<prop>     ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
 #endif
@@ -6766,6 +6827,11 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 	opts->keyFile = opts->certFile = NULL;
     }
     opts->caFile = opts->caPath = NULL;
+    opts->pfxFile = NULL;
+    opts->passwd = NULL;
+#ifdef CRYPTOAPI
+    opts->certStore = NULL;
+#endif
     opts->cipherList = getenv("SSL_CIPHER");
     for (i=0; i < DEPTH_MAX; i++) opts->regexp[i] = NULL;
     opts->lbmod = 0;
@@ -6840,6 +6906,23 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
 	opts->caFile = strdup(argv[i]+7);
     } else if (!strncmp(argv[i], "CApath=", 7)) {
 	opts->caPath = strdup(argv[i]+7);
+    } else if (!strncmp(argv[i], "pfx=", 4)) {
+	opts->pfxFile = strdup(argv[i]+4);
+    } else if (!strncmp(argv[i], "passfile=", 9)) {
+	FILE *fp = fopen(argv[i]+9, "r");
+	char str[STRMAX+1];
+	int i;
+	if (!fp) {
+	    message(LOG_ERR, "Can't open passwd file: %s", argv[i]+9);
+	    help(argv[0], "ssl");
+	}
+	for (i=0; i < STRMAX; i++) {
+	    int c = getc(fp);
+	    if (c == '\r' || c == '\n' || c == EOF) break;
+	    str[i] = c;
+	}
+	str[i] = '\0';
+	opts->passwd = strdup(str);
 #ifdef CRYPTOAPI
     } else if (!strncmp(argv[i], "store=", 6)) {
 	opts->certStore = strdup(argv[i]+6);
@@ -6853,7 +6936,7 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
     } else {
     error:
 	message(LOG_ERR, "Invalid SSL Option: %s", argv[i]);
-	help(argv[0], "opt");
+	help(argv[0], "ssl");
     }
     return i;
 }
