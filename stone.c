@@ -6268,7 +6268,7 @@ Stone *mkstone(
 
 /* main */
 
-void help(char *com) {
+void help(char *com, char *sub) {
     message(LOG_INFO, "stone %s  http://www.gcd.org/sengoku/stone/", VERSION);
     message(LOG_INFO, "%s",
 	    "Copyright(C)2004 by Hiroaki Sengoku <sengoku@gcd.org>");
@@ -6280,118 +6280,144 @@ void help(char *com) {
 	    "using cryptoapi.c by Peter 'Luna' Runestig <peter@runestig.com>");
 #endif
 #endif
-#ifndef NT_SERVICE
-    fprintf(stderr,
-	    "Usage: %s <opt>... <stone> [-- <stone>]...\n"
-	    "opt:  -C <file>         ; configuration file\n"
-#ifdef CPP
-	    "      -P <command>      ; preprocessor for config. file\n"
-	    "      -Q <options>      ; options for preprocessor\n"
+#ifdef NT_SERVICE
+    exit(1);
 #endif
-	    "      -N                ; configuration check only\n"
-	    "      -d                ; increase debug level\n"
-	    "      -p                ; packet dump\n"
-	    "      -n                ; numerical address\n"
-	    "      -u <max>          ; # of UDP sessions\n"
+    if (!sub) {
+    help:
+	fprintf(stderr,
+		"Usage: %s <opt>... <stone> [-- <stone>]...\n"
+		"opt:  -h opt            ; help for <opt> more\n"
+		"      -h stone          ; help for <stone>\n"
+#ifdef USE_SSL
+		"      -h ssl            ; help for <SSL>, see -q/-z opt\n"
+#endif
+		, com);
+	exit(1);
+    }
+    if (!strcmp(sub, "opt")) {
+	fprintf(stderr, "Usage: %s <opt>... <stone> [-- <stone>]...\n"
+"opt:  -C <file>         ; configuration file\n"
+#ifdef CPP
+"      -P <command>      ; preprocessor for config. file\n"
+"      -Q <options>      ; options for preprocessor\n"
+#endif
+"      -N                ; configuration check only\n"
+"      -d                ; increase debug level\n"
+"      -p                ; packet dump\n"
+"      -n                ; numerical address\n"
+"      -u <max>          ; # of UDP sessions\n"
 #ifndef NO_FORK
-	    "      -f <n>            ; # of child processes\n"
+"      -f <n>            ; # of child processes\n"
 #endif
 #ifndef NO_SYSLOG
-	    "      -l                ; use syslog\n"
-	    "      -ll               ; run under daemontools\n"
+"      -l                ; use syslog\n"
+"      -ll               ; run under daemontools\n"
 #endif
-	    "      -L <file>         ; write log to <file>\n"
-	    "      -a <file>         ; write accounting to <file>\n"
-	    "      -i <file>         ; write process ID to <file>\n"
-	    "      -X <n>            ; size [byte] of Xfer buffer\n"
-	    "      -T <n>            ; timeout [sec] of TCP sessions\n"
-	    "      -A <n>            ; length of backlog\n"
-	    "      -r                ; reuse socket\n"
-	    "      -x <port>[,<port>][-<port>]... <xhost> --\n"
-	    "                        ; permit connecting to <xhost>:<port>\n"
-	    "      -s <send> <expect>... --\n"
-	    "                        ; health check script\n"
-	    "      -b <n> <master>:<port> <backup>:<port>\n"
-	    "                        ; check <master>:<port> every <n> sec\n"
-	    "                        ; use <backup>:<port>, if check failed\n"
-	    "      -B <host>:<port>... --\n"
-	    "                        ; load balancing hosts\n"
-	    "      -I <host>         ; local end of its connections to\n"
+"      -L <file>         ; write log to <file>\n"
+"      -a <file>         ; write accounting to <file>\n"
+"      -i <file>         ; write process ID to <file>\n"
+"      -X <n>            ; size [byte] of Xfer buffer\n"
+"      -T <n>            ; timeout [sec] of TCP sessions\n"
+"      -A <n>            ; length of backlog\n"
+"      -r                ; reuse socket\n"
+"      -x <port>[,<port>][-<port>]... <xhost> --\n"
+"                        ; permit connecting to <xhost>:<port>\n"
+"      -s <send> <expect>... --\n"
+"                        ; health check script\n"
+"      -b <n> <master>:<port> <backup>:<port>\n"
+"                        ; check <master>:<port> every <n> sec\n"
+"                        ; use <backup>:<port>, if check failed\n"
+"      -B <host>:<port>... --\n"
+"                        ; load balancing hosts\n"
+"      -I <host>         ; local end of its connections to\n"
 #ifndef NO_SETUID
-	    "      -o <n>            ; set uid to <n>\n"
-	    "      -g <n>            ; set gid to <n>\n"
+"      -o <n>            ; set uid to <n>\n"
+"      -g <n>            ; set gid to <n>\n"
 #endif
 #ifndef NO_CHROOT
-	    "      -t <dir>          ; chroot to <dir>\n"
+"      -t <dir>          ; chroot to <dir>\n"
 #endif
 #ifdef UNIX_DAEMON
-	    "      -D                ; become UNIX Daemon\n"
+"      -D                ; become UNIX Daemon\n"
 #endif
-	    "      -c <dir>          ; core dump to <dir>\n"
+"      -c <dir>          ; core dump to <dir>\n"
 #ifdef USE_SSL
-	    "      -q <SSL>          ; SSL client option\n"
-	    "      -z <SSL>          ; SSL server option\n"
+"      -q <SSL>          ; SSL client option\n"
+"      -z <SSL>          ; SSL server option\n"
+"                        ; `-h ssl' for <SSL>\n"
 #endif
-	    "stone: <host>:<port> <sport> [<xhost>...]\n"
-	    "       proxy <sport> [<xhost>...]\n"
-	    "       health <sport> [<xhost>...]\n"
-	    "       identd <sport> [<xhost>...]\n"
-	    "       <host>:<port#>/http <sport> <Request-Line> [<xhost>...]\n"
-	    "       <host>:<port#>/proxy <sport> <header> [<xhost>...]\n"
-	    "       <host>:<port#>/mproxy <sport> <header> [<xhost>...]\n"
-	    "port:  <port#>[/<ext>[,<ext>]...]\n"
-	    "ext:   tcp | udp"
+		, com);
+    } else if (!strcmp(sub, "stone")) {
+	fprintf(stderr, "Usage: %s <opt>... <stone> [-- <stone>]...\n"
+		"stone: <host>:<port> <sport> [<xhost>...]\n"
+		"       proxy <sport> [<xhost>...]\n"
+		"       health <sport> [<xhost>...]\n"
+		"       identd <sport> [<xhost>...]\n"
+		"       <host>:<port#>/http <sport> "
+		"<Request-Line> [<xhost>...]\n"
+		"       <host>:<port#>/proxy <sport> <header> [<xhost>...]\n"
+		"       <host>:<port#>/mproxy <sport> <header> [<xhost>...]\n"
+		"port:  <port#>[/<ext>[,<ext>]...]\n"
+		"ext:   tcp | udp"
 #ifdef USE_SSL
-	    " | ssl"
+		" | ssl"
 #endif
 #ifdef AF_INET6
-	    " | v6"
+		" | v6"
 #endif
 #ifdef USE_POP
-	    " | apop"
+		" | apop"
 #endif
-	    " | base | block | nobackup\n"
-	    "sport: [<host>:]<port#>[/<exts>[,<exts>]...]\n"
-	    "exts:  tcp | udp"
+		" | base | block | nobackup\n"
+		"sport: [<host>:]<port#>[/<exts>[,<exts>]...]\n"
+		"exts:  tcp | udp"
 #ifdef USE_SSL
-	    " | ssl"
+		" | ssl"
 #endif
 #ifdef AF_INET6
-	    " | v6"
+		" | v6"
 #endif
-	    " | http | base | block | ident\n"
-	    "xhost: <host>[/<mask>]\n"
+		" | http | base | block | ident\n"
+		"xhost: <host>[/<mask>]\n"
+		, com);
 #ifdef USE_SSL
-	    "SSL:   default          ; reset to default\n"
-	    "       verbose          ; verbose mode\n"
-	    "       verify           ; require peer's certificate\n"
-	    "       verify,once      ; verify client's certificate only once\n"
-	    "       verify,ifany     ; verify client's certificate if any\n"
-	    "       verify,none      ; don't require peer's certificate\n"
-	    "       uniq             ; check serial # of peer's certificate\n"
-	    "       re<n>=<regex>    ; verify depth <n> with <regex>\n"
-	    "       depth=<n>        ; set verification depth to <n>\n"
-	    "       no_tls1          ; turn off TLSv1\n"
-	    "       no_ssl3          ; turn off SSLv3\n"
-	    "       no_ssl2          ; turn off SSLv2\n"
-	    "       bugs             ; SSL implementation bug workarounds\n"
+    } else if (!strcmp(sub, "ssl")) {
+	fprintf(stderr,
+"opt:  -q <SSL>          ; SSL client option\n"
+"      -z <SSL>          ; SSL server option\n"
+"SSL:   default          ; reset to default\n"
+"       verbose          ; verbose mode\n"
+"       verify           ; require peer's certificate\n"
+"       verify,once      ; verify client's certificate only once\n"
+"       verify,ifany     ; verify client's certificate if any\n"
+"       verify,none      ; don't require peer's certificate\n"
+"       uniq             ; check serial # of peer's certificate\n"
+"       re<n>=<regex>    ; verify depth <n> with <regex>\n"
+"       depth=<n>        ; set verification depth to <n>\n"
+"       no_tls1          ; turn off TLSv1\n"
+"       no_ssl3          ; turn off SSLv3\n"
+"       no_ssl2          ; turn off SSLv2\n"
+"       bugs             ; SSL implementation bug workarounds\n"
 #ifdef SSL_OP_CIPHER_SERVER_PREFERENCE
-	    "       serverpref       ; use server's cipher preferences (SSLv2)\n"
+"       serverpref       ; use server's cipher preferences (SSLv2)\n"
 #endif
-	    "       shutdown=<mode>  ; accurate, nowait, unclean\n"
-	    "       sid_ctx=<str>    ; set session ID context\n"
-	    "       key=<file>       ; key file\n"
-	    "       cert=<file>      ; certificate file\n"
-	    "       CAfile=<file>    ; certificate file of CA\n"
-	    "       CApath=<dir>     ; dir of CAs\n"
+"       shutdown=<mode>  ; accurate, nowait, unclean\n"
+"       sid_ctx=<str>    ; set session ID context\n"
+"       key=<file>       ; key file\n"
+"       cert=<file>      ; certificate file\n"
+"       CAfile=<file>    ; certificate file of CA\n"
+"       CApath=<dir>     ; dir of CAs\n"
 #ifdef CRYPTOAPI
-	    "       store=<prop>     ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
+"       store=<prop>     ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
 #endif
-	    "       cipher=<ciphers> ; list of ciphers\n"
-	    "       lb<n>=<m>        ; load balancing based on CN\n"
+"       cipher=<ciphers> ; list of ciphers\n"
+"       lb<n>=<m>        ; load balancing based on CN\n"
+	    );
 #endif
-	    , com);
-#endif
+    } else {
+	goto help;
+    }
     exit(1);
 }
 
@@ -6827,7 +6853,7 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
     } else {
     error:
 	message(LOG_ERR, "Invalid SSL Option: %s", argv[i]);
-	help(argv[0]);
+	help(argv[0], "opt");
     }
     return i;
 }
@@ -7085,6 +7111,9 @@ int doopts(int argc, char *argv[]) {
 		} else switch(*p) {
 		case '-':	/* end of global options */
 		    return i+1;
+		case 'h':
+		    help(argv[0], argv[i+1]);
+		    break;
 		case 'N':
 		    DryRun = 1;
 		    break;
@@ -7101,7 +7130,7 @@ int doopts(int argc, char *argv[]) {
 		    }	/* drop through */
 		default:
 		    message(LOG_ERR, "Invalid Option: %s", argv[i]);
-		    help(argv[0]);
+		    help(argv[0], "opt");
 		}
 		p++;
 	    }
@@ -7118,7 +7147,7 @@ void doargs(int argc, int i, char *argv[]) {
     char *p;
     int j, k;
     proto = sproto = dproto = 0;	/* default: TCP */
-    if (argc - i < 1) help(argv[0]);
+    if (argc - i < 1) help(argv[0], NULL);
     for (; i < argc; i++) {
 	p = argv[i];
 	if (*p == '-') {
@@ -7129,7 +7158,7 @@ void doargs(int argc, int i, char *argv[]) {
 		    i = ret;
 		} else {
 		    message(LOG_ERR, "Invalid Option: %s", argv[i]);
-		    help(argv[0]);
+		    help(argv[0], "opt");
 		}
 		p++;
 	    }
@@ -7139,7 +7168,7 @@ void doargs(int argc, int i, char *argv[]) {
 	if (j > 0) {	/* with hostname */
 	    host = argv[i++];
 	    if (j > 1) serv = host + j; else serv = NULL;
-	    if (argc <= i) help(argv[0]);
+	    if (argc <= i) help(argv[0], NULL);
 	    j = getdist(argv[i], &sproto);
 	    if (j > 0) {
 		shost = argv[i];
@@ -7188,7 +7217,7 @@ void doargs(int argc, int i, char *argv[]) {
 	      extra_arg:
 		p = argv[k++];
 		j--;
-		if (k > argc || j < 0) help(argv[0]);
+		if (k > argc || j < 0) help(argv[0], NULL);
 	    } else if ((dproto & proto_command) == command_iheads) {
 		proto &= ~proto_command;
 		proto |= command_iheads;
@@ -7399,7 +7428,7 @@ void initialize(int argc, char *argv[]) {
 	message(LOG_WARNING, "Can't collect enough random seeds");
 	srand(time(NULL));
 	do {
-	    u_short rnd = (rand() & 0xFFFF);
+	    u_short rnd = (u_short)rand();
 	    RAND_seed(&rnd, sizeof(rnd));
 	} while (!RAND_status());
     }
