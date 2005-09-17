@@ -1,7 +1,7 @@
 
 			    Simple Repeater
 
-			   stone version 2.2e
+			   stone version 2.2f
 
 		Copyright(c)1995-2005 by Hiroaki Sengoku
 			    sengoku@gcd.org
@@ -151,10 +151,12 @@ HOWTO USE
 	bugs		Switch on all SSL implementation bug workarounds.
 	serverpref	Use server's cipher preferences (only SSLv2).
 	sid_ctx=<str>	Set session ID context.
+	passfile=<file>	The filename of the file containing password of the key
 	key=<file>	The filename of the secret key of the certificate.
 	cert=<file>	The filename of the certificate.
 	CAfile=<file>	The filename of the certificate of the CA.
 	CApath=<dir>	The directory of the certificate files.
+	pfx=<file>	The filename of the PKCS#12 bag.
 	cipher=<list>	The list of ciphers.
 	lb<n>=<m>	change the destination according to the
 			certificate of the peer.  The number calculated
@@ -171,6 +173,7 @@ HOWTO USE
 	(3)	proxy <sport> [<xhost>...]
 	(4)	<host>:<port>/http <request> [<hosts>...]
 	(5)	<host>:<port>/proxy <header> [<hosts>...]
+	(6)	health <sport> [<xhost>...]
 
 	The program repeats the connection on port ``<sport>'' to the
 	other machine ``<host>'' port ``<port>''.  If the machine, on
@@ -203,14 +206,31 @@ HOWTO USE
 	Type (5) repeats http request with ``<header>'' in the top of
 	request headers.  The above escapes can be also used.
 
+	Type (6) designates the port that other programs can check
+	whether the stone runs `healthy' or not.  Following commands are
+	available to check the stone.
+
+		HELO <any string>	returns the status of the stone
+		LIMIT <var> <n>		check the value of <var> is
+					less than <n>
+	``<var>'' is one of the following:
+
+		PAIR		the number of ``pair''
+		CONN		the number of ``conn''
+		ESTABLISHED	seconds passed since the last conn established
+		READWRITE	seconds passed since the last read/write
+		ASYNC		the number of threads
+
+	The response of the stone is 2xx when normal, or 5xx when
+	abnormal on the top of line.
+
 	If the ``<xhost>'' are used, only machines ``<xhost>'' can
 	connect to the program.
 
 	If the ``<xhost>/<mask>'' are used, only machines on specified
 	networks are permitted to connect to the program.  In the case
 	of class C network 192.168.1.0, for example, use
-	``192.168.1.0/255.255.255.0''.  ``<mask>'' may be a number such
-	as ``192.168.1.0/24''.
+	``192.168.1.0/24''.
 
 	Use ``!'' instead of ``<xhost>'', to deny machines by following
 	``<xhost>''.

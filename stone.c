@@ -12,6 +12,7 @@
  * Version 2.0	Nov  3, 1997	http proxy & over http
  * Version 2.1	Nov 14, 1998	respawn & pop
  * Version 2.2	May 25, 2003	Posix Thread, XferBufMax, no ALRM, SSL verify
+ * Version 2.3	Oct   , 2005	LB, healthCheck, NonBlock, IPv6, sockaddr_un
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -87,7 +88,7 @@
  * -DWINDOWS	  Windows95/98/NT
  * -DNT_SERVICE	  WindowsNT/2000 native service
  */
-#define VERSION	"2.2e"
+#define VERSION	"2.2f"
 static char *CVS_ID =
 "@(#) $Id$";
 
@@ -5422,12 +5423,12 @@ int scanPairs(fd_set *rop, fd_set *wop, fd_set *eop) {
 	    }
 	    if (idle && pair->timeout > 0
 		&& (time(&clock), clock - pair->clock > pair->timeout)) {
-		if (pair->count > 0 || Debug > 2) {
-		    message(LOG_NOTICE, "%d TCP %d: idle time exceeds",
+		if (Debug > 2) {
+		    message(LOG_DEBUG, "%d TCP %d: idle time exceeds",
 			    pair->stone->sd, sd);
-		    message_pair(LOG_NOTICE, pair);
-		    if (pair->count > 0) pair->count -= REF_UNIT;
+		    message_pair(LOG_DEBUG, pair);
 		}
+		if (pair->count > 0) pair->count -= REF_UNIT;
 		pair->proto |= proto_thread;
 		ASYNC(asyncClose, pair);
 	    }
