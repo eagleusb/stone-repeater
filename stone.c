@@ -365,9 +365,11 @@ typedef struct {
 typedef struct _XHosts {
     struct _XHosts *next;
     short mbits;
+    short mode;
     SockAddr xhost;	/* must be the last member */
 } XHosts;
 #define XHostsBaseSize		(sizeof(XHosts) - sizeof(struct sockaddr))
+#define XHostsMode_Dump		0xF
 
 typedef struct _XPorts {
     struct _XPorts *next;
@@ -444,6 +446,7 @@ typedef struct _Pair {
     SSL *ssl;		/* SSL handle */
     int ssl_flag;
 #endif
+    XHosts *xhost;
     time_t clock;
     int timeout;
     SOCKET sd;		/* socket descriptor */
@@ -471,6 +474,7 @@ typedef struct _Origin {
     Stone *stone;
     SockAddr *from;	/* from where */
     int lock;
+    XHosts *xhost;
     time_t clock;
     struct _Origin *next;
 } Origin;
@@ -490,6 +494,7 @@ Stone *stones = NULL;
 Stone *oldstones = NULL;
 int ReuseAddr = 0;
 PortXHosts *portXHosts = NULL;
+XHosts *XHostsTrue = NULL;
 Chat *healthChat = NULL;
 Backup *backups = NULL;
 LBSet *lbsets = NULL;
@@ -619,7 +624,6 @@ int NForks = 0;
 pid_t *Pid;
 #endif
 int Debug = 0;		/* debugging level */
-int PacketDump = 0;
 #ifdef PTHREAD
 pthread_mutex_t FastMutex = PTHREAD_MUTEX_INITIALIZER;
 char FastMutexs[10];
@@ -785,13 +789,14 @@ int priority(Pair *pair) {
     return pri;
 }
 
-void packet_dump(char *head, char *buf, int len) {
+void packet_dump(char *head, char *buf, int len, XHosts *xhost) {
     char line[LONGSTRMAX+1];
+    int mode = (xhost->mode & XHostsMode_Dump);
     int i, j, k, l;
     int nb = 8;
     k = 0;
     for (i=0; i < len; i += j) {
-	if (PacketDump <= 2) {
+	if (mode <= 2) {
 	    nb = 16;
 	    l = 0;
 	    line[l++] = ' ';
@@ -815,7 +820,7 @@ void packet_dump(char *head, char *buf, int len) {
 	if (k > j/10 || nb < 16) {
 	    j = l = 0;
 	    for (j=0; j < nb && i+j < len; j++) {
-		if (PacketDump == 1 && (' ' <= buf[i+j] && buf[i+j] <= '~'))
+		if (mode == 1 && (' ' <= buf[i+j] && buf[i+j] <= '~'))
 		    sprintf(&line[l], " '%c", buf[i+j]);
 		else {
 		    sprintf(&line[l], " %02x", (unsigned char)buf[i+j]);
@@ -1352,10 +1357,10 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
 }
 
 /* *addrp is permitted to connect to *stonep ? */
-int checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
+XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
     int i;
     int match = 1;
-    if (!xhosts) return 1; /* any hosts can access */
+    if (!xhosts) return XHostsTrue; /* any hosts can access */
     for (; xhosts != NULL; xhosts = xhosts->next) {
 	if (xhosts->mbits < 0) {
 	    match = !match;
@@ -1366,8 +1371,13 @@ int checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
 	    u_long addr = ((struct sockaddr_in*)sa)->sin_addr.s_addr;
 	    u_long xadr = ((struct sockaddr_in*)&xhosts->xhost.addr)
 		->sin_addr.s_addr;
-	    u_long bits = htonl((u_long)~0 << (32 - xhosts->mbits));
-	    if ((addr & bits) == (xadr & bits)) return match;
+	    u_long bits = 0;	/* bits must be 0 when xhosts->mbits is 0 */
+	    if (xhosts->mbits > 0)
+		bits = htonl((u_long)~0 << (32 - xhosts->mbits));
+	    if ((addr & bits) == (xadr & bits)) {
+		if (match) return xhosts;
+		return NULL;
+	    }
 #ifdef AF_INET6
 	} else if (sa->sa_family == AF_INET6
 		   && xhosts->xhost.addr.sa_family == AF_INET6) {
@@ -1386,14 +1396,31 @@ int checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
 			    addr, xadr, mask);
 		if ((addr & mask) != (xadr & mask)) break;
 	    }
-	    if (k <= 0) return match;
+	    if (k <= 0) {
+		if (match) return xhosts;
+		return NULL;
+	    }
+	} else if (sa->sa_family == AF_INET6
+		   && xhosts->xhost.addr.sa_family == AF_INET) {
+	    struct in6_addr *adrp = &((struct sockaddr_in6*)sa)->sin6_addr;
+	    u_long addr = ntohl(*(u_long*)&adrp->s6_addr[12]);
+	    u_long xadr = ((struct sockaddr_in*)&xhosts->xhost.addr)
+		->sin_addr.s_addr;
+	    u_long bits = 0;	/* bits must be 0 when xhosts->mbits is 0 */
+	    if (xhosts->mbits > 0)
+		bits = htonl((u_long)~0 << (32 - xhosts->mbits));
+	    if ((addr & bits) == (xadr & bits)
+		&& *(u_long*)&adrp->s6_addr[0] == 0
+		&& *(u_long*)&adrp->s6_addr[4] == 0
+		&& ntohl(*(u_long*)&adrp->s6_addr[8]) == 0xFFFF) {
+		if (match) return xhosts;
+		return NULL;
+	    }
 #endif
-	} else {
-	    message(LOG_ERR, "checkXhost: unknown family=%d", sa->sa_family);
-	    return 0;	/* deny */
 	}
     }
-    return !match;
+    if (!match) return XHostsTrue;
+    return NULL;
 }
 
 #ifdef WINDOWS
@@ -2114,7 +2141,7 @@ static int recvUDP(SOCKET sd, struct sockaddr *from, socklen_t *fromlenp, PktBuf
 }
 
 static int sendUDP(SOCKET sd, struct sockaddr *sa, socklen_t salen,
-		   int len, PktBuf *pb) {
+		   int len, PktBuf *pb, XHosts *xhost) {
     char addrport[STRMAX+1];
     addrport2str(sa, salen, proto_udp, addrport, STRMAX, 0);
     addrport[STRMAX] = '\0';
@@ -2129,11 +2156,11 @@ static int sendUDP(SOCKET sd, struct sockaddr *sa, socklen_t salen,
     if (Debug > 4)
 	message(LOG_DEBUG, "UDP %d: %d bytes sent to %s",
 		sd, len, addrport);
-    if (PacketDump > 0) {
+    if ((xhost->mode & XHostsMode_Dump) > 0) {
 	char head[STRMAX+1];
 	snprintf(head, STRMAX, "UDP %d:", sd);
 	head[STRMAX] = '\0';
-	packet_dump(head, pb->buf, len);
+	packet_dump(head, pb->buf, len, xhost);
     }
     return len;
 }
@@ -2173,6 +2200,7 @@ static Origin *getOrigins(struct sockaddr *from, socklen_t fromlen,
 	goto memerr;
     }
     origin->lock = 0;
+    origin->xhost = NULL;
     waitMutex(OrigMutex);
     origin->next = origins.next;	/* insert origin */
     origins.next = origin;
@@ -2216,7 +2244,8 @@ void asyncOrg(Origin *origin) {
     if (Debug > 4)
 	message(LOG_DEBUG, "UDP %d: send %d bytes to %d", origin->sd, len, sd);
     if (len > 0
-	&& sendUDP(sd, &origin->from->addr, origin->from->len, len, pb) > 0) {
+	&& sendUDP(sd, &origin->from->addr, origin->from->len,
+		   len, pb, origin->xhost) > 0) {
 	time(&origin->clock);
 	waitMutex(FdRinMutex);
 	waitMutex(FdEinMutex);
@@ -2315,6 +2344,7 @@ void asyncUDP(Stone *stonep) {
     Origin *origin;
     char addrport[STRMAX+1];
     PktBuf *pb = NULL;
+    XHosts *xhost = NULL;
     ASYNC_BEGIN;
     if (Debug > 8) message(LOG_DEBUG, "asyncUDP");
     pb = getPktBuf();
@@ -2324,7 +2354,8 @@ void asyncUDP(Stone *stonep) {
     FdSet(stonep->sd, &rin);
     freeMutex(FdRinMutex);
     if (len <= 0) goto end;	/* drop */
-    if (!checkXhost(stonep->xhosts, from, fromlen)) {
+    xhost = checkXhost(stonep->xhosts, from, fromlen);
+    if (!xhost) {
 	addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
 		     addrport, STRMAX, 0);
 	addrport[STRMAX] = '\0';
@@ -2334,6 +2365,7 @@ void asyncUDP(Stone *stonep) {
     }
     origin = getOrigins(from, fromlen, stonep);
     if (!origin) goto end;
+    origin->xhost = xhost;
     dsd = origin->sd;
     time(&origin->clock);
     waitMutex(FdRinMutex);
@@ -2346,7 +2378,7 @@ void asyncUDP(Stone *stonep) {
 	message(LOG_DEBUG, "UDP %d: send %d bytes to %d",
 		stonep->sd, len, dsd);
     if (sendUDP(dsd, &stonep->dsts[0]->addr, stonep->dsts[0]->len,
-		len, pb) <= 0)
+		len, pb, xhost) <= 0)
 	docloseUDP(origin, 1);	/* wait mutex */
  end:
     if (pb) ungetPktBuf(pb);
@@ -3347,6 +3379,7 @@ Pair *doaccept(Stone *stonep) {
 #ifdef ENLARGE
     int prevXferBufMax = XferBufMax;
 #endif
+    XHosts *xhost;
     char ident[STRMAX+1];
     char fromstr[STRMAX*2+1];
     nsd = INVALID_SOCKET;
@@ -3400,7 +3433,8 @@ Pair *doaccept(Stone *stonep) {
     addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
 		 fromstr+len, STRMAX*2-len, 0);
     fromstr[STRMAX*2] = '\0';
-    if (!checkXhost(stonep->xhosts, from, fromlen)) {
+    xhost = checkXhost(stonep->xhosts, from, fromlen);
+    if (!xhost) {
 	message(LOG_WARNING, "stone %d: access denied: from %s",
 		stonep->sd, fromstr);
 	shutdown(nsd, 2);
@@ -3430,8 +3464,8 @@ Pair *doaccept(Stone *stonep) {
 		
     }
     if (Debug > 1)
-	message(LOG_DEBUG, "stone %d: accepted TCP %d from %s",
-		stonep->sd, nsd, fromstr);
+	message(LOG_DEBUG, "stone %d: accepted TCP %d from %s mode=%d",
+		stonep->sd, nsd, fromstr, xhost->mode);
     pair1 = newPair();
     pair2 = newPair();
     if (!pair1 || !pair2) {
@@ -3443,6 +3477,7 @@ Pair *doaccept(Stone *stonep) {
 	return NULL;
     }
     pair1->stone = pair2->stone = stonep;
+    pair1->xhost = pair2->xhost = xhost;
     pair1->sd = nsd;
     pair1->proto = ((stonep->proto & proto_pair_s & ~proto_command) |
 		    proto_first_r | proto_first_w | command_source);
@@ -3706,7 +3741,7 @@ void message_buf(Pair *pair, int len, char *str) {	/* dump for debug */
 	snprintf(head, STRMAX, "%d %s%d>%d",
 		 pair->stone->sd, str, p->sd, pair->sd);
     }
-    packet_dump(head, pair->t->buf + pair->t->start, len);
+    packet_dump(head, pair->t->buf + pair->t->start, len, pair->xhost);
 }
 
 void message_pairs(int pri) {	/* dump for debug */
@@ -3838,7 +3873,8 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 #endif
     if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: %d bytes written",
 			   pair->stone->sd, sd, len);
-    if (PacketDump > 0 || ((pair->proto & proto_first_w) && Debug > 3))
+    if ((pair->xhost->mode & XHostsMode_Dump) > 0
+	|| ((pair->proto & proto_first_w) && Debug > 3))
 	message_buf(pair, len, "");
     time(&pair->clock);
     p = pair->pair;
@@ -4209,6 +4245,7 @@ int doproxy(Pair *pair, char *host, char *serv) {
     if (pxh) {
 	for (; pxh; pxh=pxh->next) {
 	    XPorts *ports;
+	    XHosts *xhost;
 	    int isok = 0;
 	    short port = getport(sa);
 	    for (ports=pxh->ports; ports; ports=ports->next) {
@@ -4217,10 +4254,17 @@ int doproxy(Pair *pair, char *host, char *serv) {
 		}
 	    }
 	    if (!isok) continue;
-	    if (checkXhost(pxh->xhosts, sa, salen)) {
+	    xhost = checkXhost(pxh->xhosts, sa, salen);
+	    if (xhost) {
+		if (xhost->mode) {
+		    Pair *p = pair->pair;
+		    pair->xhost = xhost;
+		    if (p) p->xhost = xhost;
+		}
 		if (Debug > 7) {
-		    message(LOG_DEBUG, "stone %d: proxy can connect to %s:%s",
-			    pair->stone->sd, host, serv);
+		    message(LOG_DEBUG,
+			    "stone %d: proxy can connect to %s:%s mode=%d",
+			    pair->stone->sd, host, serv, xhost->mode);
 		}
 		break;
 	    } else {
@@ -5894,6 +5938,108 @@ int reusestone(Stone *stone) {
 typedef int sa_family_t;
 #endif
 
+void mkXhostsExt(char *host, char *str, XHosts *ext) {
+    int kind = 0;
+    char *top;
+    u_long num;
+    int i = 0;
+    do {
+	switch(kind) {
+	case -3:	/* pass if digit or '.' until ',' */
+	    if (str[i] == '.') break;
+	case -2:	/* pass if digit until ',' */
+	    if (isdigit(str[i])) break;
+	case -1:	/* pass ',' */
+	    if (str[i] == ',' || str[i] == '\0') {
+		kind = 0;	/* found next ext */
+		break;
+	    }
+	error:
+	    message(LOG_ERR, "Unknown extension: \"%s\" in %s/%s",
+		    &str[i], host, str);
+	    exit(1);
+	case 0:
+	    top = &str[i];
+	    if (isdigit(*top)) {
+		num = *top - '0';
+		kind = 1;
+		break;
+	    }
+	    if (*top == 'v') {
+		i++;
+		if (top[1] == '4') {
+		    ext->xhost.addr.sa_family = AF_INET;
+#ifdef AF_INET6
+		} else if (top[1] == '6') {
+		    ext->xhost.addr.sa_family = AF_INET6;
+#endif
+		} else {
+		    goto error;
+		}
+		kind = -1;	/* expect ',' or end of string */
+		break;
+	    }
+	    if (*top == 'p') {
+		if (isdigit(top[1])) {
+		    ext->mode = atoi(top+1);
+		} else {
+		    ext->mode = 1;
+		}
+		kind = -2;	/* skip to the next ext */
+		break;
+	    }
+	    goto error;
+	case 1:	/* net mask */
+	    if (str[i] == ',' || str[i] == '\0') {
+		ext->mbits = num;
+		if (ext->mbits > 32) {
+#ifdef AF_INET6
+		    /* force to set IPv6 */
+		    ext->xhost.addr.sa_family = AF_INET6;
+		}
+		if (ext->mbits > 128) {
+#endif
+		    goto error;
+		}
+		kind = 0;	/* found next ext */
+		break;
+	    }
+	case 2:	/* nnn.<nnn>.nnn.nnn */
+	case 3:	/* nnn.nnn.<nnn>.nnn */
+	    if (str[i] == '.') {
+		i++;
+		num <<= 8;
+		kind++;
+	    }
+	case 4:	/* nnn.nnn.nnn.<nnn> */
+	    if (isdigit(str[i])) {
+		num = ((num & 0xFFFFFF00)
+		       | ((num & 0xFF) * 10 + (str[i] - '0')));
+		break;
+	    }
+	    ext->xhost.addr.sa_family = AF_INET;	/* force to set IPv4 */
+	    for (ext->mbits=0; ext->mbits < 32 && num; ext->mbits++) {
+		if (!(num & 0x80000000)) {
+		    message(LOG_ERR, "netmask by bits pattern "
+			    "is deprecated: %s/%s", host, top);
+		    exit(1);
+		}
+		num <<= 1;
+	    }
+	    i--;	/* unget */
+	    kind = -1;	/* expect ',' or end of string */
+	    break;
+	default:
+	    message(LOG_ERR, "Can't happen: kind=%d in mkXhostsExt", kind);
+	    exit(1);
+	}
+    } while (str[i++]);
+    if (Debug > 9) message(LOG_DEBUG, "mkXhostsExt: host=%s ext=%s "
+			   "family=%d mbits=%d mode=%d",
+			   host, str, ext->xhost.addr.sa_family,
+			   ext->mbits, ext->mode);
+}
+
 XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
     XHosts *top = NULL;
     XHosts *bot = NULL;
@@ -5910,41 +6056,23 @@ XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
 	    new->mbits = -1;
 	    allow = !allow;
 	} else {
-	    int ndigits;
-	    int mbits = 0;
+	    short mbits = -1;
+	    short mode = 0;
 	    struct sockaddr_storage ss;
 	    struct sockaddr *sa = (struct sockaddr*)&ss;
 	    int salen = sizeof(ss);
 	    strcpy(xhost, hosts[i]);
 	    p = strchr(xhost, '/');
 	    if (p) {
+		XHosts ext;
 		*p++ = '\0';
-		ndigits = isdigitaddr(p);
-		if (ndigits == 1) {
-		    mbits = atoi(p);
-#ifdef AF_INET6
-		    if (mbits > 32) family = AF_INET6;	/* force to set IPv6 */
-#endif
-		    if (mbits <= 0 || 128 < mbits) {
-			message(LOG_ERR, "Illegal netmask: %s", p);
-			exit(1);
-		    }
-		} else if (ndigits == 4) {
-		    u_long bits = ntohl(inet_addr(p));
-		    family = AF_INET;	/* force to set IPv4 */
-		    for (mbits=0; mbits < 32 && bits; mbits++) {
-			if (!(bits & 0x80000000)) {
-			    message(LOG_ERR, "netmask by bits pattern "
-				    "is deprecated: %s/%s", xhost, p);
-			    exit(1);
-			}
-			bits <<= 1;
-		    }
-		} else {
-		    message(LOG_ERR, "Illegal netmask: \"%s\" in \"%s/%s\"",
-			    p, xhost, p);
-		    exit(1);
-		}
+		ext.mbits = mbits;
+		ext.mode = mode;
+		ext.xhost.addr.sa_family = family;
+		mkXhostsExt(xhost, p, &ext);
+		mbits = ext.mbits;
+		mode = ext.mode;
+		family = ext.xhost.addr.sa_family;
 	    }
 	    sa->sa_family = family;
 	    if (!host2sa(xhost, NULL, sa, &salen, NULL, NULL, 0)) exit(1);
@@ -5952,7 +6080,7 @@ XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
 	    if (!new) goto memerr;
 	    new->xhost.len = salen;
 	    bcopy(sa, &new->xhost.addr, salen);
-	    if (!mbits) {
+	    if (mbits < 0) {
 		if (sa->sa_family == AF_INET) {
 		    mbits = 32;
 #ifdef AF_INET6
@@ -5966,6 +6094,7 @@ XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
 		}
 	    }
 	    new->mbits = mbits;
+	    new->mode = mode;
 	    if (mesg) {
 		char str[STRMAX+1];
 		int pos = 0;
@@ -6439,7 +6568,12 @@ void help(char *com, char *sub) {
 		" | v6"
 #endif
 		" | http | base | block | ident\n"
-		"xhost: <host>[/<mask>]\n"
+		"xhost: <host>[/<ex>[,<ex>]...]\n"
+		"ex:    <#bits> | p<mode#>"
+#ifdef AF_INET6
+		" | v6"
+#endif
+		"\n"
 		, com);
 #ifdef USE_SSL
     } else if (!strcmp(sub, "ssl")) {
@@ -6923,6 +7057,7 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
 	    str[i] = c;
 	}
 	str[i] = '\0';
+	fclose(fp);
 	opts->passwd = strdup(str);
 #ifdef CRYPTOAPI
     } else if (!strncmp(argv[i], "store=", 6)) {
@@ -7016,7 +7151,9 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	Debug++;
 	break;
     case 'p':
-	PacketDump++;
+	XHostsTrue->mode = ((XHostsTrue->mode & ~XHostsMode_Dump)
+			    | (((XHostsTrue->mode & XHostsMode_Dump) + 1)
+			       & XHostsMode_Dump));
 	break;
 #ifndef NO_SYSLOG
     case 'l':
@@ -7519,6 +7656,17 @@ void initialize(int argc, char *argv[]) {
     sslopts_default(&ServerOpts, 1);
     sslopts_default(&ClientOpts, 0);
 #endif
+    XHostsTrue = malloc(XHostsBaseSize + sizeof(struct sockaddr_storage));
+    if (!XHostsTrue) {
+	message(LOG_CRIT, "Out of memory.");
+	exit(1);
+    }
+    XHostsTrue->next = NULL;
+    XHostsTrue->mbits = 0;
+    XHostsTrue->mode = 0;
+    XHostsTrue->xhost.len = sizeof(struct sockaddr_storage);
+    bzero(&XHostsTrue->xhost.addr, XHostsTrue->xhost.len);
+    XHostsTrue->xhost.addr.sa_family = AF_UNSPEC;
     i = doopts(argc, argv);
     if (ConfigFile) {
 	getconfig();

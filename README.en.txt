@@ -227,10 +227,22 @@ HOWTO USE
 	If the ``<xhost>'' are used, only machines ``<xhost>'' can
 	connect to the program.
 
-	If the ``<xhost>/<mask>'' are used, only machines on specified
-	networks are permitted to connect to the program.  In the case
-	of class C network 192.168.1.0, for example, use
-	``192.168.1.0/24''.
+	Extentions can be added to the ``<xhost>'' like
+	``<xhost>/<ex>,<ex>...''.  <ex> is:
+
+	<m>	You can designate the length of prefix bits of the
+		netmask, so that only machines on specified.  In the
+		case of class C network 192.168.1.0, for example, use
+		``192.168.1.0/24''.
+
+	v4	<xhost> is resolved as the IP address.
+
+	v6	<xhost> is resolved as the IPv6 address.
+
+	p<m>	the data repeated by the program are dumped, only if it
+		was connected by the machines specified by <xhost>.  <m>
+		is the dump mode, equivalent to the number of ``-p''
+		options.
 
 	Use ``!'' instead of ``<xhost>'', to deny machines by following
 	``<xhost>''.
