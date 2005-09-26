@@ -520,11 +520,14 @@ int AsyncCount = 0;
 const int state_mask =		    0x00ff;
 const int proto_command =	    0x0f00;	/* command (dest. only) */
 						/* only for Stone */
-const int proto_ident =		    0x8000;	  /* need ident */
-const int proto_nobackup =	   0x10000;	  /* no backup */
-const int proto_udp =		   0x20000;	  /* user datagram protocol */
-const int proto_v6_s =		   0x40000;	  /* IPv6 source */
-const int proto_v6_d =		   0x80000;	  /*      destination */
+/*const int proto_ =		    0x1000;	  */
+const int proto_ident =		    0x2000;	  /* need ident */
+const int proto_nobackup =	    0x4000;	  /* no backup */
+const int proto_udp =		    0x8000;	  /* user datagram protocol */
+const int proto_v6_s =		   0x10000;	  /* IPv6 source */
+const int proto_v6_d =		   0x20000;	  /*      destination */
+const int proto_ip_only_s =	   0x40000;	  /* IPv6 only source */
+const int proto_ip_only_d =	   0x80000;	  /*           destination */
 const int proto_unix_s =	  0x100000;       /* unix socket source */
 const int proto_unix_d =	  0x200000;	  /*             destination */
 const int proto_block_s =	  0x400000;	  /* blocking I/O source */
@@ -532,6 +535,9 @@ const int proto_block_d =	  0x800000;	  /*              destination*/
 const int proto_ssl_s =		 0x1000000;	  /* SSL source */
 const int proto_ssl_d =		 0x2000000;	  /*     destination */
 						/* only for Pair */
+/*const int proto_ =		    0x1000;	  */
+/*const int proto_ =		    0x2000;	  */
+/*const int proto_ =		    0x4000;	  */
 const int proto_connect =	    0x8000;	  /* connection established */
 const int proto_first_r =	   0x10000;	  /* first read packet */
 const int proto_first_w =	   0x20000;	  /* first written packet */
@@ -557,16 +563,19 @@ const int proto_base_d =	0x20000000;	/*        destination */
 
 #define proto_ssl	(proto_ssl_s|proto_ssl_d)
 #define proto_v6	(proto_v6_s|proto_v6_d)
+#define proto_ip_only	(proto_ip_only_s|proto_ip_only_d)
 #define proto_unix	(proto_unix_s|proto_unix_d)
 #define proto_block	(proto_block_s|proto_block_d)
 #define proto_ohttp	(proto_ohttp_s|proto_ohttp_d)
 #define proto_base	(proto_base_s|proto_base_d)
 #define proto_stone_s	(proto_udp|proto_command|\
 			 proto_ohttp_s|proto_base_s|\
-			 proto_v6_s|proto_ssl_s|proto_ident)
+			 proto_v6_s|proto_ip_only_s|\
+			 proto_ssl_s|proto_ident)
 #define proto_stone_d	(proto_udp|proto_command|\
 			 proto_ohttp_d|proto_base_d|\
-			 proto_v6_d|proto_ssl_d|proto_nobackup)
+			 proto_v6_d|proto_ip_only_d|\
+			 proto_ssl_d|proto_nobackup)
 #define proto_pair_s	(proto_ohttp_s|proto_base_s)
 #define proto_pair_d	(proto_ohttp_d|proto_base_d|proto_command)
 
@@ -908,8 +917,17 @@ char *ext2str(int ext, char *str, int len) {
     if (ext & proto_v6) {
 	if (i < len) str[i++] = sep;
 	sep = ',';
-	strncpy(str+i, "v6", len-i);
-	i += 2;
+	if (ext & proto_ip_only) {
+	    strncpy(str+i, "v6only", len-i);
+	    i += 6;
+	} else {
+	    strncpy(str+i, "v6", len-i);
+	    i += 2;
+	}
+    } else if (ext & proto_ip_only) {
+	sep = ',';
+	strncpy(str+i, "v4only", len-i);
+	i += 6;
     }
     if (ext & proto_base) {
 	if (i < len) str[i++] = sep;
@@ -4225,7 +4243,16 @@ int doproxy(Pair *pair, char *host, char *serv) {
     struct sockaddr *sa = (struct sockaddr*)&ss;
     socklen_t namelen = sizeof(name_s);
     socklen_t salen = sizeof(ss);
-    sa->sa_family = AF_UNSPEC;
+    if ((pair->stone->proto & proto_ip_only_d)) {
+#ifdef AF_INET6
+	if ((pair->stone->proto & proto_v6_d))
+	    sa->sa_family = AF_INET6;
+	else
+#endif
+	    sa->sa_family = AF_INET;
+    } else {
+	sa->sa_family = AF_UNSPEC;
+    }
     if (!host2sa(host, serv, sa, &salen, NULL, NULL, 0)) {
 	return -1;
     }
@@ -6341,6 +6368,13 @@ Stone *mkstone(
 		    stonep->sd, sa->sa_family, satype, saproto, errno);
 	    exit(1);
 	}
+#ifdef IPV6_V6ONLY
+	if ((proto & proto_v6_s) && (proto & proto_ip_only_s)) {
+	    int i = 1;
+	    setsockopt(stonep->sd, IPPROTO_IPV6, IPV6_V6ONLY,
+		       (char*)&i, sizeof(i));
+	}
+#endif
 	if (!(proto & proto_udp) && ReuseAddr) {
 	    int i = 1;
 	    setsockopt(stonep->sd, SOL_SOCKET, SO_REUSEADDR,
@@ -6902,7 +6936,14 @@ int getdist(	/* return pos where serv begins */
 	    } else if (!strncmp(p, "v6", 2)) {
 		p += 2;
 		*protop |= proto_v6;
+		if (!strncmp(p, "only", 4)) {
+		    p += 4;
+		    *protop |= proto_ip_only;
+		}
 #endif
+	    } else if (!strncmp(p, "v4only", 6)) {
+		p += 6;
+		*protop |= proto_ip_only;
 	    } else if (!strncmp(p, "block", 5)) {
 		p += 5;
 		*protop |= proto_block;
@@ -7412,11 +7453,14 @@ void doargs(int argc, int i, char *argv[]) {
 	if ((dproto & proto_udp) || (sproto & proto_udp)) {
 	    proto |= proto_udp;
 	    if (sproto & proto_v6) proto |= proto_v6_s;
+	    if (sproto & proto_ip_only) proto |= proto_ip_only_s;
 	    if (dproto & proto_v6) proto |= proto_v6_d;
+	    if (dproto & proto_ip_only) proto |= proto_ip_only_d;
 	} else {
 	    if (sproto & proto_ohttp) proto |= proto_ohttp_s;
 	    if (sproto & proto_ssl) proto |= proto_ssl_s;
 	    if (sproto & proto_v6) proto |= proto_v6_s;
+	    if (sproto & proto_ip_only) proto |= proto_ip_only_s;
 	    if (sproto & proto_unix) proto |= proto_unix_s;
 	    if (sproto & proto_block) proto |= proto_block_s;
 	    if (sproto & proto_base) proto |= proto_base_s;
@@ -7452,6 +7496,7 @@ void doargs(int argc, int i, char *argv[]) {
 	    }
 	    if (dproto & proto_ssl) proto |= proto_ssl_d;
 	    if (dproto & proto_v6) proto |= proto_v6_d;
+	    if (dproto & proto_ip_only) proto |= proto_ip_only_d;
 	    if (dproto & proto_unix) proto |= proto_unix_d;
 	    if (dproto & proto_block) proto |= proto_block_d;
 	    if (dproto & proto_base) proto |= proto_base_d;
