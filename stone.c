@@ -1421,7 +1421,7 @@ XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
 	} else if (sa->sa_family == AF_INET6
 		   && xhosts->xhost.addr.sa_family == AF_INET) {
 	    struct in6_addr *adrp = &((struct sockaddr_in6*)sa)->sin6_addr;
-	    u_long addr = ntohl(*(u_long*)&adrp->s6_addr[12]);
+	    u_long addr = *(u_long*)&adrp->s6_addr[12];
 	    u_long xadr = ((struct sockaddr_in*)&xhosts->xhost.addr)
 		->sin_addr.s_addr;
 	    u_long bits = 0;	/* bits must be 0 when xhosts->mbits is 0 */
@@ -6459,7 +6459,11 @@ Stone *mkstone(
     family = AF_INET;
 #ifdef AF_INET6
     if (stonep->proto & proto_v6_s) {
-	family = AF_INET6;
+	if (host == NULL && !(stonep->proto & proto_ip_only_s)) {
+	    family = AF_UNSPEC;
+	} else {
+	    family = AF_INET6;
+	}
     }
 #endif
     stonep->xhosts = mkXhosts(nhosts, hosts, family, mesg);
