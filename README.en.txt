@@ -187,6 +187,13 @@ HOWTO USE
 	program runs, and port ``<sport>'' in the http proxy settings of
 	your WWW browser.
 
+	Extentions can be added to the ``proxy'' like ``<xhost>/<ext''.
+	<ext> is:
+
+	v4only	limit the destination within IP addresses.
+
+	v6only	limit the destination within IPv6 addresses.
+
 	Type (4) relays stream over http request.  ``<request>'' is the
 	request specified in HTTP 1.0.  In the ``<request>'', ``\'' is
 	the escape character, and the following substitution occurs.
@@ -270,6 +277,9 @@ HOWTO USE
 
 	v6	accepts connection using IPv6.  If <shost> is omitted 
 		like (1), IP is also acceptable.
+
+	v6only	accepts connection using IPv6 only.  Even if <shost> is
+		omitted like (1), IP is not acceptable.
 
 	base	forwards with MIME base64 decoding.
 

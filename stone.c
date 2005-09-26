@@ -871,8 +871,8 @@ char *addr2ip6(struct in6_addr *addr, char *str, int len) {
     if (len >= 1) {
 	s = (u_short*)addr;
 	snprintf(str, len-1, "%x:%x:%x:%x:%x:%x:%x:%x",
-		 htons(s[0]), htons(s[1]), htons(s[2]), htons(s[3]),
-		 htons(s[4]), htons(s[5]), htons(s[6]), htons(s[7]));
+		 ntohs(s[0]), ntohs(s[1]), ntohs(s[2]), ntohs(s[3]),
+		 ntohs(s[4]), ntohs(s[5]), ntohs(s[6]), ntohs(s[7]));
 	str[len-1] = '\0';
     }
     return str;
@@ -1386,16 +1386,16 @@ XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
 	}
 	if (sa->sa_family == AF_INET
 	    && xhosts->xhost.addr.sa_family == AF_INET) {
-	    u_long addr = ((struct sockaddr_in*)sa)->sin_addr.s_addr;
-	    u_long xadr = ((struct sockaddr_in*)&xhosts->xhost.addr)
-		->sin_addr.s_addr;
-	    u_long bits = 0;	/* bits must be 0 when xhosts->mbits is 0 */
-	    if (xhosts->mbits > 0)
-		bits = htonl((u_long)~0 << (32 - xhosts->mbits));
-	    if ((addr & bits) == (xadr & bits)) {
-		if (match) return xhosts;
-		return NULL;
+	    if (xhosts->mbits > 0) {
+		u_long addr = ntohl(((struct sockaddr_in*)sa)
+				    ->sin_addr.s_addr);
+		u_long xadr = ntohl(((struct sockaddr_in*)&xhosts->xhost.addr)
+				    ->sin_addr.s_addr);
+		u_long bits = ((u_long)~0 << (32 - xhosts->mbits));
+		if ((addr & bits) != (xadr & bits)) continue;
 	    }
+	    if (match) return xhosts;
+	    return NULL;
 #ifdef AF_INET6
 	} else if (sa->sa_family == AF_INET6
 		   && xhosts->xhost.addr.sa_family == AF_INET6) {
@@ -1408,7 +1408,7 @@ XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
 		addr = ntohl(*(u_long*)&adrp->s6_addr[j]);
 		xadr = ntohl(*(u_long*)&xadp->s6_addr[j]);
 		if (k >= 32) mask = (u_long)~0;
-		else mask = ((u_long)~0 << (32-k));
+		else mask = ((u_long)~0 << (32-k));	/* premise: k > 0 */
 		if (Debug > 12)
 		    message(LOG_DEBUG, "compare addr=%lx x=%lx m=%lx",
 			    addr, xadr, mask);
@@ -1421,19 +1421,18 @@ XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
 	} else if (sa->sa_family == AF_INET6
 		   && xhosts->xhost.addr.sa_family == AF_INET) {
 	    struct in6_addr *adrp = &((struct sockaddr_in6*)sa)->sin6_addr;
-	    u_long addr = *(u_long*)&adrp->s6_addr[12];
-	    u_long xadr = ((struct sockaddr_in*)&xhosts->xhost.addr)
-		->sin_addr.s_addr;
-	    u_long bits = 0;	/* bits must be 0 when xhosts->mbits is 0 */
-	    if (xhosts->mbits > 0)
-		bits = htonl((u_long)~0 << (32 - xhosts->mbits));
-	    if ((addr & bits) == (xadr & bits)
-		&& *(u_long*)&adrp->s6_addr[0] == 0
-		&& *(u_long*)&adrp->s6_addr[4] == 0
-		&& ntohl(*(u_long*)&adrp->s6_addr[8]) == 0xFFFF) {
-		if (match) return xhosts;
-		return NULL;
+	    if (*(u_long*)&adrp->s6_addr[0] != 0
+		|| *(u_long*)&adrp->s6_addr[4] != 0
+		|| ntohl(*(u_long*)&adrp->s6_addr[8]) != 0xFFFF) continue;
+	    if (xhosts->mbits > 0) {
+		u_long addr = ntohl(*(u_long*)&adrp->s6_addr[12]);
+		u_long xadr = ntohl(((struct sockaddr_in*)&xhosts->xhost.addr)
+				    ->sin_addr.s_addr);
+		u_long bits = ((u_long)~0 << (32 - xhosts->mbits));
+		if ((addr & bits) != (xadr & bits)) continue;
 	    }
+	    if (match) return xhosts;
+	    return NULL;
 #endif
 	}
     }
@@ -6578,7 +6577,11 @@ void help(char *com, char *sub) {
     } else if (!strcmp(sub, "stone")) {
 	fprintf(stderr, "Usage: %s <opt>... <stone> [-- <stone>]...\n"
 		"stone: <host>:<port> <sport> [<xhost>...]\n"
-		"       proxy <sport> [<xhost>...]\n"
+		"       proxy"
+#ifdef AF_INET6
+		"[/[v4only | v6only]]"
+#endif
+		" <sport> [<xhost>...]\n"
 		"       health <sport> [<xhost>...]\n"
 		"       identd <sport> [<xhost>...]\n"
 		"       <host>:<port#>/http <sport> "
@@ -6603,7 +6606,7 @@ void help(char *com, char *sub) {
 		" | ssl"
 #endif
 #ifdef AF_INET6
-		" | v6"
+		" | v6 | v6only"
 #endif
 		" | http | base | block | ident\n"
 		"xhost: <host>[/<ex>[,<ex>]...]\n"
