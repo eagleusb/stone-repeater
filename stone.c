@@ -3463,7 +3463,7 @@ Pair *doaccept(Stone *stonep) {
 		tstr, stonep->port, stonep->sd, fromstr, str, port);
 		
     }
-    if (Debug > 1)
+    if ((xhost->mode & XHostsMode_Dump) > 0 || Debug > 1)
 	message(LOG_DEBUG, "stone %d: accepted TCP %d from %s mode=%d",
 		stonep->sd, nsd, fromstr, xhost->mode);
     pair1 = newPair();
