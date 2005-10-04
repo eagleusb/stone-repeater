@@ -7949,7 +7949,9 @@ long svc_main(HANDLE hStopEvent) {	/* Entry point for the service call */
 			   (LPVOID)hStopEvent, 0, &thread_id);
     return hThread != NULL;
 }
-#else
+#define main(argc,argv)	main_cli(argc,argv)
+#endif
+
 static void clear_args(int argc, char *argv[]) {
     char *argend = argv[argc-1] + strlen(argv[argc-1]);
     char *p;
@@ -7966,7 +7968,6 @@ int main(int argc, char *argv[]) {
     for (;;) repeater();
     return 0;
 }
-#endif
 
 /*
   For Gnu Emacs.
