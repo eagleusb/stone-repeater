@@ -345,6 +345,9 @@ char *CppCommand = CPP;
 char *CppOptions = NULL;
 #endif
 
+#ifdef NO_ADDRINFO
+#undef AF_INET6
+#endif
 #ifdef NO_SOCKLEN_T
 typedef int socklen_t;
 #endif
