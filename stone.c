@@ -6500,7 +6500,7 @@ Stone *mkstone(
 void help(char *com, char *sub) {
     message(LOG_INFO, "stone %s  http://www.gcd.org/sengoku/stone/", VERSION);
     message(LOG_INFO, "%s",
-	    "Copyright(C)2004 by Hiroaki Sengoku <sengoku@gcd.org>");
+	    "Copyright(C)2005 by Hiroaki Sengoku <sengoku@gcd.org>");
 #ifdef USE_SSL
     message(LOG_INFO, "%s",
 	    "using " OPENSSL_VERSION_TEXT "  http://www.openssl.org/");

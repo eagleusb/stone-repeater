@@ -182,6 +182,12 @@ mingw-pop:
 mingw-ssl: cryptoapi.o
 	$(MAKE) CC=gcc SSL_FLAGS="$(SSL_FLAGS) -DCRYPTOAPI" SSL_LIBS="cryptoapi.o -lcrypt32 -lssl32 -leay32" TARGET=mingw ssl_stone
 
+mingw-me:
+	$(MAKE) CC=gcc SSL_FLAGS="$(SSL_FLAGS) -DNO_ADDRINFO" SSL_LIBS="-lcrypt32 -lssl32 -leay32" TARGET=mingw ssl_stone
+
+mingw-nt:
+	$(MAKE) CC=gcc SSL_FLAGS="$(SSL_FLAGS) -DCRYPTOAPI -DNO_ADDRINFO" SSL_LIBS="cryptoapi.o -lcrypt32 -lssl32 -leay32" TARGET=mingw svc_stone
+
 mingw-svc:
 	$(MAKE) CC=gcc SSL_FLAGS="$(SSL_FLAGS) -DCRYPTOAPI" SSL_LIBS="cryptoapi.o -lcrypt32 -lssl32 -leay32" TARGET=mingw svc_stone
 
