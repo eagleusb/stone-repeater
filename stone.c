@@ -6506,9 +6506,6 @@ void help(char *com, char *sub) {
 	    "using cryptoapi.c by Peter 'Luna' Runestig <peter@runestig.com>");
 #endif
 #endif
-#ifdef NT_SERVICE
-    exit(1);
-#endif
     if (!sub) {
     help:
 	fprintf(stderr,
@@ -6519,7 +6516,7 @@ void help(char *com, char *sub) {
 		"      -h ssl            ; help for <SSL>, see -q/-z opt\n"
 #endif
 		, com);
-	exit(1);
+	return;
     }
     if (!strcmp(sub, "opt")) {
 	fprintf(stderr, "Usage: %s <opt>... <stone> [-- <stone>]...\n"
@@ -6655,7 +6652,6 @@ void help(char *com, char *sub) {
     } else {
 	goto help;
     }
-    exit(1);
 }
 
 static void skipcomment(FILE *fp) {
@@ -7098,6 +7094,7 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
 	if (!fp) {
 	    message(LOG_ERR, "Can't open passwd file: %s", argv[i]+9);
 	    help(argv[0], "ssl");
+	    exit(1);
 	}
 	for (i=0; i < STRMAX; i++) {
 	    int c = getc(fp);
@@ -7121,6 +7118,7 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
     error:
 	message(LOG_ERR, "Invalid SSL Option: %s", argv[i]);
 	help(argv[0], "ssl");
+	exit(1);
     }
     return i;
 }
@@ -7382,6 +7380,7 @@ int doopts(int argc, char *argv[]) {
 		    return i+1;
 		case 'h':
 		    help(argv[0], argv[i+1]);
+		    exit(1);
 		    break;
 		case 'N':
 		    DryRun = 1;
@@ -7400,6 +7399,7 @@ int doopts(int argc, char *argv[]) {
 		default:
 		    message(LOG_ERR, "Invalid Option: %s", argv[i]);
 		    help(argv[0], "opt");
+		    exit(1);
 		}
 		p++;
 	    }
@@ -7416,7 +7416,10 @@ void doargs(int argc, int i, char *argv[]) {
     char *p;
     int j, k;
     proto = sproto = dproto = 0;	/* default: TCP */
-    if (argc - i < 1) help(argv[0], NULL);
+    if (argc - i < 1) {
+	help(argv[0], NULL);
+	exit(1);
+    }
     for (; i < argc; i++) {
 	p = argv[i];
 	if (*p == '-') {
@@ -7428,6 +7431,7 @@ void doargs(int argc, int i, char *argv[]) {
 		} else {
 		    message(LOG_ERR, "Invalid Option: %s", argv[i]);
 		    help(argv[0], "opt");
+		    exit(1);
 		}
 		p++;
 	    }
@@ -7437,7 +7441,10 @@ void doargs(int argc, int i, char *argv[]) {
 	if (j > 0) {	/* with hostname */
 	    host = argv[i++];
 	    if (j > 1) serv = host + j; else serv = NULL;
-	    if (argc <= i) help(argv[0], NULL);
+	    if (argc <= i) {
+		help(argv[0], NULL);
+		exit(1);
+	    }
 	    j = getdist(argv[i], &sproto);
 	    if (j > 0) {
 		shost = argv[i];
@@ -7489,7 +7496,10 @@ void doargs(int argc, int i, char *argv[]) {
 	      extra_arg:
 		p = argv[k++];
 		j--;
-		if (k > argc || j < 0) help(argv[0], NULL);
+		if (k > argc || j < 0) {
+		    help(argv[0], NULL);
+		    exit(1);
+		}
 	    } else if ((dproto & proto_command) == command_iheads) {
 		proto &= ~proto_command;
 		proto |= command_iheads;
