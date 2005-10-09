@@ -340,7 +340,7 @@ EXAMPLES
 	stone fwall:8080/http 10023 'POST http://outer:8023 HTTP/1.0'
 	stone localhost:telnet 8023/http
 		Run stones on ``inner'' and ``outer'' respectively.
-		Repeats packets over http.
+		Relays stream over http.
 
 	stone fwall:8080/proxy 9080 'Proxy-Authorization: Basic c2VuZ29rdTpoaXJvYWtp'
 		for browser that does not support proxy authorization.
