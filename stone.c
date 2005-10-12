@@ -109,8 +109,8 @@ typedef void (*FuncPtr)(void*);
 #include <ws2tcpip.h>
 #include <time.h>
 #ifdef NT_SERVICE
-#include "service.h"
-#include "svcbody.h"
+#include <windows.h>
+#include "logmsg.h"
 #endif
 #define NO_SYSLOG
 #define NO_FORK
@@ -661,6 +661,15 @@ HMTX FdRinMutex, FdWinMutex, FdEinMutex;
 HMTX ExBufMutex, FPairMutex, PkBufMutex;
 #endif
 
+#ifdef NT_SERVICE
+SERVICE_STATUS NTServiceStatus;
+SERVICE_STATUS_HANDLE NTServiceStatusHandle;
+#define NTServiceDisplayPrefix	"Stone Service: "
+char *NTServiceDisplayName = NULL;
+char *NTServiceName = NULL;
+HANDLE NTServiceLog = NULL;
+#endif
+
 #ifdef NO_VSNPRINTF
 int vsnprintf(char *str, size_t len, char *fmt, va_list ap) {
     int ret;
@@ -761,13 +770,19 @@ void message(int pri, char *fmt, ...) {
 		fprintf(stdout, "%s\n", str);
 	    }
 	}
-    } else
-#endif
+    }
+#else
 #ifdef NT_SERVICE
-	if (FALSE == bSvcDebug) AddToMessageLog(str);
-	else
+    if (NTServiceLog) {
+	LPCTSTR msgs[] = {str, NULL};
+	int type = EVENTLOG_INFORMATION_TYPE;
+	if (pri <= LOG_ERR) type = EVENTLOG_ERROR_TYPE;
+	else if (pri <= LOG_NOTICE) type = EVENTLOG_WARNING_TYPE;
+	ReportEvent(NTServiceLog, type, 0, EVLOG, NULL, 1, 0, msgs, NULL);
+    }
 #endif
-	    if (LogFp) fprintf(LogFp, "%s\n", str);
+#endif
+    else if (LogFp) fprintf(LogFp, "%s\n", str);
 }
 
 void message_time(Pair *pair, int pri, char *fmt, ...) {
@@ -6573,6 +6588,10 @@ void help(char *com, char *sub) {
 "      -z <SSL>          ; SSL server option\n"
 "                        ; `-h ssl' for <SSL>\n"
 #endif
+#ifdef NT_SERVICE
+"      -M install <name> ; install service as <name>\n"
+"      -M remove <name>  ; remove service <name>\n"
+#endif
 		, com);
     } else if (!strcmp(sub, "stone")) {
 	fprintf(stderr, "Usage: %s <opt>... <stone> [-- <stone>]...\n"
@@ -7367,6 +7386,143 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
     return argi;
 }
 
+#ifdef NT_SERVICE
+int quoteToken(char *dst, char *src) {
+    char buf[STRMAX+1];
+    int len;
+    if (strchr(src, ' ')) {
+	snprintf(buf, STRMAX, "\"%s\"", src);
+	len = strlen(buf);
+	if (dst) strncpy(dst, buf, len);
+    } else {
+	len = strlen(src);
+	if (dst) strncpy(dst, src, len);
+    }
+    return len;
+}
+
+void installService(int argc, char *argv[]) {
+    SC_HANDLE scManager;
+    SC_HANDLE scService;
+    char exeName[STRMAX+1];
+    char *command;
+    int commax, len;
+    int i;
+    int state;
+    char *p;
+    if (!GetModuleFileName(0, exeName, sizeof(exeName))) {
+	message(LOG_ERR, "Can't determine exe name. Install failed.\n");
+	exit(1);
+    }
+    scManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (!scManager) {
+	message(LOG_ERR, "Can't open service control manager. "
+		"Install failed");
+	exit(1);
+    }
+    len = strlen(exeName);
+    for (i=1; i < argc; i++) {
+	len += 1 + quoteToken(NULL, argv[i]);
+    }
+    commax = len;
+    len++;	/* for '\0' */
+    command = malloc(len);
+    if (!command) {
+	message(LOG_CRIT, "Out of memory");
+	exit(1);
+    }
+    strcpy(command, exeName);
+    len = strlen(command);
+    state = 0;
+    for (i=1; i < argc; i++) {
+	p = argv[i];
+	switch(state) {
+	case 0:
+	    if (!strcmp(p, "-M")) state++;
+	    break;
+	case 1:
+	    if (!strcmp(p, "install"))
+		p = "run_svc";	/* assume same length */
+	    break;
+	}
+	command[len++] = ' ';
+	len += quoteToken(command+len, p);
+    }
+    command[len] = '\0';
+    if (Debug > 1) message(LOG_DEBUG, "install: %s", command);
+    scService
+	= CreateService(scManager, NTServiceName,
+			NTServiceDisplayName,
+			SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+			SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
+			command, NULL, NULL, "TcpIp\0\0",
+			NULL, NULL);
+    if (!scService) {
+	message(LOG_ERR, "Can't install service err=%d: %s",
+		GetLastError(), NTServiceName);
+	CloseServiceHandle(scManager);
+	exit(1);
+    }
+    message(LOG_INFO, "service installed: %s", NTServiceName);
+    CloseServiceHandle(scService);
+    CloseServiceHandle(scManager);
+}
+
+void removeService(void) {
+    SC_HANDLE scManager;
+    SC_HANDLE scService;
+    scManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (!scManager) {
+	message(LOG_ERR, "Can't open service control manager. Remove failed");
+	exit(1);
+    }
+    scService = OpenService(scManager, NTServiceName,
+			    SERVICE_ALL_ACCESS);
+    if (!scService) {
+	message(LOG_ERR, "Can't open service: %s", NTServiceName);
+	CloseServiceHandle(scManager);
+	exit(1);
+    }
+    if (ControlService(scService, SERVICE_CONTROL_STOP, &NTServiceStatus)) {
+	do {
+	    usleep(1000);
+	} while (QueryServiceStatus(scService, &NTServiceStatus),
+		 NTServiceStatus.dwCurrentState == SERVICE_STOP_PENDING);
+	if (NTServiceStatus.dwCurrentState == SERVICE_STOPPED) {
+	    message(LOG_INFO, "%s stopped", NTServiceName);
+	} else {
+	    message(LOG_ERR, "failed to stop %s", NTServiceName);
+	}
+    }
+    if (!DeleteService(scService)) {
+	message(LOG_ERR, "failed to remove service: %s", NTServiceName);
+	CloseServiceHandle(scService);
+	CloseServiceHandle(scManager);
+	exit(1);
+    }
+    CloseServiceHandle(scService);
+    CloseServiceHandle(scManager);
+    message(LOG_INFO, "service removed: %s", NTServiceName);
+}
+
+void addEventSource(char *name) {
+    HKEY hk;
+    char key[LONGSTRMAX+1];
+    char exeName[STRMAX+1];
+    DWORD data;
+    snprintf(key, LONGSTRMAX, "SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\%s", name);
+    if (RegCreateKey(HKEY_LOCAL_MACHINE, key, &hk)) return;
+    if (!GetModuleFileName(0, exeName, sizeof(exeName))) return;
+    if (RegSetValueEx(hk, "EventMessageFile", 0, REG_EXPAND_SZ,
+		      exeName, strlen(exeName)+1)) return;
+    data = (EVENTLOG_ERROR_TYPE | EVENTLOG_WARNING_TYPE |
+	    EVENTLOG_INFORMATION_TYPE);
+    if (RegSetValueEx(hk, "TypesSupported", 0, REG_DWORD,
+		      (LPBYTE)&data, sizeof(DWORD))) return;
+    RegCloseKey(hk);
+}
+#endif
+
 int doopts(int argc, char *argv[]) {
     int i;
     char *p;
@@ -7388,6 +7544,41 @@ int doopts(int argc, char *argv[]) {
 		case 'N':
 		    DryRun = 1;
 		    break;
+#ifdef NT_SERVICE
+		case 'M':
+		    i++;
+		    if (i+1 >= argc) {
+			message(LOG_ERR, "Illegal Option: -M without args");
+			exit(1);
+		    }
+		    NTServiceName = strdup(argv[i+1]);
+		    NTServiceDisplayName
+			= malloc(strlen(NTServiceName)
+				 + strlen(NTServiceDisplayPrefix) + 1);
+		    if (!NTServiceDisplayName) {
+			message(LOG_CRIT, "Out of memory.");
+			exit(1);
+		    }
+		    strcpy(NTServiceDisplayName, NTServiceDisplayPrefix);
+		    strcat(NTServiceDisplayName, NTServiceName);
+		    if (!strcmp(argv[i], "install")) {
+			installService(argc, argv);
+			exit(0);
+		    } else if (!strcmp(argv[i], "remove")) {
+			removeService();
+			exit(0);
+		    } else if (!strcmp(argv[i], "run_svc")) {
+			addEventSource(NTServiceName);
+			NTServiceLog
+			    = RegisterEventSource(NULL, NTServiceName);
+		    } else {
+			message(LOG_ERR, "Illegal Option: -M %s %s",
+				argv[i], argv[i+1]);
+			exit(1);
+		    }
+		    i++;
+		    break;
+#endif
 		case 'C':
 		    if (!ConfigFile) {
 			i++;
@@ -7920,49 +8111,51 @@ void initialize(int argc, char *argv[]) {
 }
 
 #ifdef NT_SERVICE
-/* Main thread - runs until event becomes signalled */
-DWORD WINAPI ThreadProc(LPVOID lpParms) {
-    HANDLE hStopEvent;
-    char *lpArgs[3];
-    char *p;
-    AddToMessageLog("Starting worker thread");
-    hStopEvent = (HANDLE)lpParms;
-    if (NULL == hStopEvent) {
-	AddToMessageLog("Invalid event handle.");
-	ExitThread(1);
-    }
-    lpArgs[0] = "stone";
-    lpArgs[1] = "-C";
-    lpArgs[2] = (char*)malloc(MAX_PATH * 2);
-    if (! lpArgs[2]) {
-	AddToMessageLog("Can't allocate args buffers.");
-	ExitThread(2);
-    }
-    if (0 == GetModuleFileName(NULL, lpArgs[2], MAX_PATH * 2)) {
-	AddToMessageLog("Can't get module filename.");
-	ExitThread(3);		
-    }
-    p = strrchr(lpArgs[2], '.');
-    if (NULL == p) strcat(lpArgs[2], ".cfg");
-    else strcpy(p, ".cfg");
-    initialize(3, lpArgs);
-    free(lpArgs[2]);
-    do {
-	repeater();
-    } while (WAIT_TIMEOUT == WaitForSingleObject(hStopEvent, 1));
-    AddToMessageLog("Exiting worker thread");
-    ExitThread(0);
-    return 0;
+void scReportStatus(DWORD curState, DWORD exitCode, DWORD hint) {
+    static DWORD checkPoint = 1;
+    if (curState == SERVICE_START_PENDING)
+	NTServiceStatus.dwControlsAccepted = 0;
+    else
+	NTServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+    NTServiceStatus.dwCurrentState = curState;
+    NTServiceStatus.dwWin32ExitCode = exitCode;
+    NTServiceStatus.dwWaitHint = hint;
+    if ((curState == SERVICE_RUNNING) || (curState == SERVICE_STOPPED))
+	NTServiceStatus.dwCheckPoint = 0;
+    else
+	NTServiceStatus.dwCheckPoint = checkPoint++;
+    SetServiceStatus(NTServiceStatusHandle, &NTServiceStatus);
 }
 
-long svc_main(HANDLE hStopEvent) {	/* Entry point for the service call */
-    long thread_id;
-    HANDLE hThread;
-    hThread = CreateThread(0, 0, (LPTHREAD_START_ROUTINE)ThreadProc,
-			   (LPVOID)hStopEvent, 0, &thread_id);
-    return hThread != NULL;
+void WINAPI service_ctrl(DWORD code) {
+    switch(code) {
+    case SERVICE_CONTROL_STOP:
+	scReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 0);
+	message(LOG_INFO, "Service stopping...");
+	break;
+    default:
+	break;
+    }
 }
-#define main(argc,argv)	main_cli(argc,argv)
+
+void WINAPI service_main(DWORD argc, LPTSTR *argv) {
+    NTServiceStatusHandle
+	= RegisterServiceCtrlHandler(NTServiceName, service_ctrl);
+    if (!NTServiceStatusHandle) {
+	message(LOG_ERR, "Can't register ServiceCtrlHandler");
+	return;
+    }
+    NTServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    NTServiceStatus.dwServiceSpecificExitCode = 0;
+    scReportStatus(SERVICE_START_PENDING, NO_ERROR, 3000);
+    message(LOG_INFO, "Service started.");
+    scReportStatus(SERVICE_RUNNING, NO_ERROR, 0);
+    do {
+	repeater();
+    } while (NTServiceStatus.dwCurrentState == SERVICE_RUNNING);
+    message(LOG_INFO, "Service stopped.");
+    scReportStatus(SERVICE_STOPPED, NO_ERROR, 0);
+}
 #endif
 
 static void clear_args(int argc, char *argv[]) {
@@ -7974,6 +8167,18 @@ static void clear_args(int argc, char *argv[]) {
 int main(int argc, char *argv[]) {
     initialize(argc, argv);
     if (DryRun) return 0;
+#ifdef NT_SERVICE
+    if (NTServiceName) {
+	SERVICE_TABLE_ENTRY dispatchTable[] =
+	    {
+		{ NTServiceName, (LPSERVICE_MAIN_FUNCTION)service_main },
+		{ NULL, NULL }
+	    };
+	if (!StartServiceCtrlDispatcher(dispatchTable))
+	    message(LOG_ERR, "StartServiceCtrlDispatcher failed.");
+	return 0;
+    }
+#endif
     clear_args(argc, argv);
 #ifdef MEMLEAK_CHECK
     mtrace();

@@ -28,7 +28,7 @@ SSL_LIBS=	-L$(SSL)/lib -lssl -lcrypto
 POP_FLAGS=	-DUSE_POP
 POP_LIBS=	md5c.o
 
-SVC_LIBS=	logmsg.o service.o svcbody.o
+SVC_LIBS=	logmsg.o
 
 all:
 	@echo "run make with one of the following arguments"
@@ -73,8 +73,8 @@ ssl_stone.exe:
 	$(MAKE) FLAGS="-DUSE_POP -DUSE_SSL" LIBS="ssleay32.lib libeay32.lib" $(TARGET)
 #	$(MAKE) FLAGS=-DUSE_SSL LIBS="ssl32.lib crypt32.lib" $(TARGET)
 
-svc_stone.exe: logmsg.res service.obj svcbody.obj
-	$(MAKE) FLAGS="/DNT_SERVICE $(FLAGS)" LIBS="logmsg.res service.obj svcbody.obj advapi32.lib user32.lib gdi32.lib shell32.lib kernel32.lib" $(TARGET)
+svc_stone.exe: logmsg.res
+	$(MAKE) FLAGS="/DNT_SERVICE $(FLAGS)" LIBS="logmsg.res advapi32.lib user32.lib gdi32.lib shell32.lib kernel32.lib" $(TARGET)
 
 logmsg.rc: logmsg.mc
 	mc $?
