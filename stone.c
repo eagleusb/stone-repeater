@@ -664,10 +664,11 @@ HMTX ExBufMutex, FPairMutex, PkBufMutex;
 #ifdef NT_SERVICE
 SERVICE_STATUS NTServiceStatus;
 SERVICE_STATUS_HANDLE NTServiceStatusHandle;
-#define NTServiceDisplayPrefix	"Stone Service: "
+#define NTServiceDisplayPrefix	"Stone "
 char *NTServiceDisplayName = NULL;
 char *NTServiceName = NULL;
 HANDLE NTServiceLog = NULL;
+HANDLE NTServiceThreadHandle = NULL;
 #endif
 
 #ifdef NO_VSNPRINTF
@@ -8129,20 +8130,31 @@ void scReportStatus(DWORD curState, DWORD exitCode, DWORD hint) {
     SetServiceStatus(NTServiceStatusHandle, &NTServiceStatus);
 }
 
-void WINAPI service_ctrl(DWORD code) {
+void WINAPI serviceCtrl(DWORD code) {
     switch(code) {
     case SERVICE_CONTROL_STOP:
 	scReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 0);
 	message(LOG_INFO, "Service stopping...");
+	if (WaitForSingleObject(NTServiceThreadHandle, 1000) == WAIT_TIMEOUT)
+	    TerminateThread(NTServiceThreadHandle, 0);
 	break;
     default:
 	break;
     }
 }
 
-void WINAPI service_main(DWORD argc, LPTSTR *argv) {
+DWORD WINAPI serviceThread(LPVOID lpParms) {
+    do {
+	repeater();
+    } while (NTServiceStatus.dwCurrentState == SERVICE_RUNNING);
+    ExitThread(0);
+    return 0;
+}
+
+void WINAPI serviceMain(DWORD argc, LPTSTR *argv) {
+    DWORD thid;
     NTServiceStatusHandle
-	= RegisterServiceCtrlHandler(NTServiceName, service_ctrl);
+	= RegisterServiceCtrlHandler(NTServiceName, serviceCtrl);
     if (!NTServiceStatusHandle) {
 	message(LOG_ERR, "Can't register ServiceCtrlHandler");
 	return;
@@ -8152,9 +8164,11 @@ void WINAPI service_main(DWORD argc, LPTSTR *argv) {
     scReportStatus(SERVICE_START_PENDING, NO_ERROR, 3000);
     message(LOG_INFO, "Service started.");
     scReportStatus(SERVICE_RUNNING, NO_ERROR, 0);
-    do {
-	repeater();
-    } while (NTServiceStatus.dwCurrentState == SERVICE_RUNNING);
+    NTServiceThreadHandle = CreateThread(0, 0, serviceThread, NULL, 0, &thid);
+    if (NTServiceThreadHandle) {
+	WaitForSingleObject(NTServiceThreadHandle, INFINITE);
+	CloseHandle(NTServiceThreadHandle);
+    }
     message(LOG_INFO, "Service stopped.");
     scReportStatus(SERVICE_STOPPED, NO_ERROR, 0);
 }
@@ -8173,7 +8187,7 @@ int main(int argc, char *argv[]) {
     if (NTServiceName) {
 	SERVICE_TABLE_ENTRY dispatchTable[] =
 	    {
-		{ NTServiceName, (LPSERVICE_MAIN_FUNCTION)service_main },
+		{ NTServiceName, (LPSERVICE_MAIN_FUNCTION)serviceMain },
 		{ NULL, NULL }
 	    };
 	if (!StartServiceCtrlDispatcher(dispatchTable))
