@@ -1110,17 +1110,19 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
 		serv, sa->sa_family, salen, flags);
     }
     err = getnameinfo(sa, salen, str, len, serv, STRMAX, flags);
-    if (err == EAI_NODATA && !(flags & NI_NUMERICSERV)) {
+#ifdef WSANO_DATA
+    if (err == WSANO_DATA && !(flags & NI_NUMERICSERV)) {
 	/*
-	  WinSock32 returns EAI_NODATA if serv can't be lookup although
+	  WinSock32 returns WSANO_DATA if serv can't be lookup although
 	  the hostname itself is resolvable.  So we must call again
 	  without looking up serv
 	*/
 	if (Debug > 10)
-	    message(LOG_DEBUG, "getnameinfo: EAI_NODATA flags=%d", flags);
+	    message(LOG_DEBUG, "getnameinfo: WSANO_DATA flags=%d", flags);
 	flags |= NI_NUMERICSERV;
 	err = getnameinfo(sa, salen, str, len, serv, STRMAX, flags);
     }
+#endif
     if (err) {
 	if (sa->sa_family == AF_INET) {
 	    addr2ip(&((struct sockaddr_in*)sa)->sin_addr, str, len);
