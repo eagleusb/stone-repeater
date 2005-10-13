@@ -1042,7 +1042,7 @@ char *addr2str(struct sockaddr *sa, socklen_t salen,
 		return str;
 	    }
 	} while (h_errno == TRY_AGAIN && ntry-- > 0);
-	message(LOG_ERR, "Unknown address err=%d: %s", h_errno, str);
+	message(LOG_ERR, "Unknown address: %s err=%d", str, h_errno);
     }
     return str;
 }
@@ -1088,8 +1088,8 @@ char *addr2str(struct sockaddr *sa, socklen_t salen,
 #endif
 	addr2numeric(sa, str, len);
 	if (len >= 1) str[len-1] = '\0';
-	message(LOG_ERR, "Unknown address err=%d errno=%d: %s",
-		err, errno, str);
+	message(LOG_ERR, "Unknown address: %s err=%d errno=%d",
+		str, err, errno);
     }
     return str;
 }
@@ -1143,8 +1143,8 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
-	message(LOG_ERR, "Unknown node:serv len=%d err=%d errno=%d: %s",
-		salen, err, errno, str);
+	message(LOG_ERR, "Unknown node:serv %s len=%d err=%d errno=%d",
+		str, salen, err, errno);
     } else {
 	i = strlen(str);
 	snprintf(str+i, len-i, ":%s", serv);
@@ -1283,7 +1283,7 @@ int host2sa(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp,
 	    }
 	} while (h_errno == TRY_AGAIN && ntry-- > 0);
     }
-    message(LOG_ERR, "Unknown host err=%d: %s", h_errno, name);
+    message(LOG_ERR, "Unknown host: %s err=%d", name, h_errno);
     return 0;
 }
 #else
@@ -1514,7 +1514,7 @@ void waitMutex(int h) {
     for (;;) {
 	err = pthread_mutex_lock(&FastMutex);
 	if (err) {
-	    message(LOG_ERR, "Mutex %d err=%d.", h, err);
+	    message(LOG_ERR, "Mutex %d err=%d", h, err);
 	}
 	if (FastMutexs[h] == 0) {
 	    FastMutexs[h]++;
@@ -1531,7 +1531,7 @@ void waitMutex(int h) {
 void freeMutex(int h) {
     int err = pthread_mutex_lock(&FastMutex);
     if (err) {
-	message(LOG_ERR, "Mutex %d err=%d.", h, err);
+	message(LOG_ERR, "Mutex %d err=%d", h, err);
     }
     if (FastMutexs[h] > 0) {
 	if (FastMutexs[h] > 1)
@@ -1567,7 +1567,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
-	message(LOG_ERR, "health check: can't create socket err=%d.",
+	message(LOG_ERR, "health check: can't create socket err=%d",
 		errno);
 	return 1;	/* I can't tell the master is healthy or not */
     }
@@ -1950,7 +1950,8 @@ int mkChat(int argc, int i, char *argv[]) {
 	}
 	err = regcomp(&cur->expect, argv[i+1], REG_EXTENDED);
 	if (err) {
-	    message(LOG_ERR, "RegEx compiling error %d: %s", err, argv[i+1]);
+	    message(LOG_ERR, "RegEx compiling error: \"%s\" err=%d",
+		    argv[i+1], err);
 	    exit(1);
 	}
 	cur->next = NULL;
@@ -2220,7 +2221,7 @@ static Origin *getOrigins(struct sockaddr *from, socklen_t fromlen,
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
-	message(LOG_ERR, "%d UDP: can't create datagram socket err=%d.",
+	message(LOG_ERR, "%d UDP: can't create datagram socket err=%d",
 		stonep->sd, errno);
 	return NULL;
     }
@@ -3287,8 +3288,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 	errno = WSAGetLastError();
 #endif
 	if (Debug > 0)
-	    message(LOG_DEBUG, "ident: can't create socket err=%d.",
-		    sd, errno);
+	    message(LOG_DEBUG, "ident: can't create socket err=%d", errno);
 	return 0;
     }
     saPort(csa, 0);
@@ -3297,8 +3297,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 	errno = WSAGetLastError();
 #endif
 	if (Debug > 0)
-	    message(LOG_DEBUG, "ident: can't bind socket err=%d.",
-		    sd, errno);
+	    message(LOG_DEBUG, "ident: can't bind socket err=%d", errno);
 	/* hope default source address is adequate */
     }
     saPort(peer, 113);	/* ident protocol */
@@ -3349,7 +3348,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 #endif
 	if (Debug > 0)
 	    message(LOG_DEBUG,
-		    "ident: can't send  to %s, ret=%d, err=%d, buf=%s",
+		    "ident: can't send  to %s ret=%d err=%d buf=%s",
 		    addr, ret, errno, buf);
     error:
 	shutdown(sd, 2);
@@ -3445,7 +3444,7 @@ Pair *doaccept(Stone *stonep) {
 	    return NULL;
 	}
 #endif
-	message(LOG_ERR, "stone %d: accept error err=%d.", stonep->sd, errno);
+	message(LOG_ERR, "stone %d: accept error err=%d", stonep->sd, errno);
 	return NULL;
     }
     len = 0;
@@ -3557,7 +3556,7 @@ Pair *doaccept(Stone *stonep) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
-	message(priority(pair1), "%d TCP %d: can't create socket err=%d.",
+	message(priority(pair1), "%d TCP %d: can't create socket err=%d",
 		pair1->stone->sd, pair1->sd, errno);
     error:
 	freePair(pair1);
@@ -4089,7 +4088,8 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	    if (err == SSL_ERROR_NONE
 		|| err == SSL_ERROR_WANT_READ) {
 		if (Debug > 4)
-		    message(LOG_DEBUG, "%d TCP %d: SSL_read interrupted err=%d",
+		    message(LOG_DEBUG,
+			    "%d TCP %d: SSL_read interrupted err=%d",
 			    pair->stone->sd, sd, err);
 		return 0;	/* EINTR */
 	    } else if (err == SSL_ERROR_WANT_WRITE) {
@@ -4108,7 +4108,8 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 #endif
 		    if (errno == EINTR) {
 			if (Debug > 4)
-			    message(LOG_DEBUG, "%d TCP %d: SSL_read I/O interrupted",
+			    message(LOG_DEBUG,
+				    "%d TCP %d: SSL_read I/O interrupted",
 				    pair->stone->sd, sd);
 			return 0;
 		    }
@@ -4117,13 +4118,15 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 			    pair->stone->sd, sd, errno);
 		    message_pair(LOG_ERR, pair);
 		} else {
-		    message(priority(pair), "%d TCP %d: SSL_read I/O %s, closing",
+		    message(priority(pair),
+			    "%d TCP %d: SSL_read I/O %s, closing",
 			    pair->stone->sd, sd, ERR_error_string(e, NULL));
 		    message_pair(LOG_ERR, pair);
 		}
 		return -1;	/* error */
 	    } else if (err != SSL_ERROR_ZERO_RETURN) {
-		message(priority(pair), "%d TCP %d: SSL_read err=%d %s, closing",
+		message(priority(pair),
+			"%d TCP %d: SSL_read err=%d %s, closing",
 			pair->stone->sd, sd,
 			err, ERR_error_string(ERR_get_error(), NULL));
 		message_pair(LOG_ERR, pair);
@@ -5668,7 +5671,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     ss = malloc(sizeof(StoneSSL));
     if (!ss) {
     memerr:
-	message(LOG_CRIT, "Out of memory.");
+	message(LOG_CRIT, "Out of memory");
 	exit(1);
     }
     ss->verbose = opts->verbose;
@@ -6161,7 +6164,7 @@ XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
     }
     return top;
  memerr:
-    message(LOG_CRIT, "Out of memory.");
+    message(LOG_CRIT, "Out of memory");
     exit(1);
 }
 
@@ -6254,7 +6257,7 @@ int mkPortXhosts(int argc, int i, char *argv[]) {
     portXHosts = pxh;
     return i;
  memerr:
-    message(LOG_CRIT, "Out of memory.");
+    message(LOG_CRIT, "Out of memory");
     exit(1);
 }
 
@@ -6278,7 +6281,7 @@ Stone *mkstone(
     char str[STRMAX+1];
     stonep = calloc(1, sizeof(Stone));
     if (!stonep) {
-	message(LOG_CRIT, "Out of memory.");
+	message(LOG_CRIT, "Out of memory");
 	exit(1);
     }
     stonep->p = NULL;
@@ -6384,7 +6387,7 @@ Stone *mkstone(
 	    errno = WSAGetLastError();
 #endif
 	    message(LOG_ERR, "stone %d: Can't get socket "
-		    "family=%d type=%d proto=%d err=%d.",
+		    "family=%d type=%d proto=%d err=%d",
 		    stonep->sd, sa->sa_family, satype, saproto, errno);
 	    exit(1);
 	}
@@ -6408,7 +6411,7 @@ Stone *mkstone(
 #endif
 		addrport2str(sa, salen, 0, str, STRMAX, 0);
 		str[STRMAX] = '\0';
-		message(LOG_ERR, "stone %d: Can't bind %s err=%d.",
+		message(LOG_ERR, "stone %d: Can't bind %s err=%d",
 			stonep->sd, str, errno);
 		exit(1);
 	    }
@@ -6430,7 +6433,7 @@ Stone *mkstone(
 #ifdef WINDOWS
 		    errno = WSAGetLastError();
 #endif
-		    message(LOG_ERR, "stone %d: Can't listen err=%d.",
+		    message(LOG_ERR, "stone %d: Can't listen err=%d",
 			    stonep->sd, errno);
 		    exit(1);
 		}
@@ -6862,8 +6865,8 @@ void getconfig(void) {
     ConfigArgv = NULL;
     fp = openconfig();
     if (fp == NULL) {
-	message(LOG_ERR, "Can't open config file err=%d: %s",
-		errno, ConfigFile);
+	message(LOG_ERR, "Can't open config file: %s err=%d",
+		ConfigFile, errno);
 	exit(1);
     }
     strcpy(buf, ConfigFile);
@@ -6873,7 +6876,7 @@ void getconfig(void) {
 	if (ConfigArgc >= nptr) {	/* allocate new ptrs */
 	    new = malloc((nptr+BUFMAX)*sizeof(*ConfigArgv));
 	    if (new == NULL) {
-		message(LOG_CRIT, "Out of memory.");
+		message(LOG_CRIT, "Out of memory");
 		exit(1);
 	    }
 	    if (ConfigArgv) {
@@ -7241,8 +7244,8 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	    LogFp = fopen(argv[argi], "a");
 	    if (LogFp == NULL) {
 		LogFp = stderr;
-		message(LOG_ERR, "Can't create log file err=%d: %s",
-			errno, argv[argi]);
+		message(LOG_ERR, "Can't create log file: %s err=%d",
+			argv[argi], errno);
 		exit(1);
 	    }
 	    LogFileName = strdup(argv[argi]);
@@ -7259,8 +7262,8 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	    AccFp = fopen(argv[argi], "a");
 	    if (AccFp == NULL) {
 		message(LOG_ERR,
-			"Can't create account log file err=%d: %s",
-			errno, argv[argi]);
+			"Can't create account log file: %s err=%d",
+			argv[argi], errno);
 		exit(1);
 	    }
 	    AccFileName = strdup(argv[argi]);
@@ -7414,13 +7417,13 @@ void installService(int argc, char *argv[]) {
     int state;
     char *p;
     if (!GetModuleFileName(0, exeName, sizeof(exeName))) {
-	message(LOG_ERR, "Can't determine exe name. Install failed.\n");
+	message(LOG_ERR, "Can't determine exe name err=%d", GetLastError());
 	exit(1);
     }
     scManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!scManager) {
-	message(LOG_ERR, "Can't open service control manager. "
-		"Install failed");
+	message(LOG_ERR, "Can't open service control manager err=%d",
+		GetLastError());
 	exit(1);
     }
     len = strlen(exeName);
@@ -7461,8 +7464,8 @@ void installService(int argc, char *argv[]) {
 			command, NULL, NULL, "TcpIp\0\0",
 			NULL, NULL);
     if (!scService) {
-	message(LOG_ERR, "Can't install service err=%d: %s",
-		GetLastError(), NTServiceName);
+	message(LOG_ERR, "Can't install service: %s err=%d",
+		NTServiceName, GetLastError());
 	CloseServiceHandle(scManager);
 	exit(1);
     }
@@ -7476,13 +7479,15 @@ void removeService(void) {
     SC_HANDLE scService;
     scManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!scManager) {
-	message(LOG_ERR, "Can't open service control manager. Remove failed");
+	message(LOG_ERR, "Can't open service control manager err=%d",
+		GetLastError());
 	exit(1);
     }
     scService = OpenService(scManager, NTServiceName,
 			    SERVICE_ALL_ACCESS);
     if (!scService) {
-	message(LOG_ERR, "Can't open service: %s", NTServiceName);
+	message(LOG_ERR, "Can't open service: %s err=%d",
+		NTServiceName, GetLastError());
 	CloseServiceHandle(scManager);
 	exit(1);
     }
@@ -7498,7 +7503,8 @@ void removeService(void) {
 	}
     }
     if (!DeleteService(scService)) {
-	message(LOG_ERR, "failed to remove service: %s", NTServiceName);
+	message(LOG_ERR, "failed to remove service: %s err=%d",
+		NTServiceName, GetLastError());
 	CloseServiceHandle(scService);
 	CloseServiceHandle(scManager);
 	exit(1);
@@ -7559,7 +7565,7 @@ int doopts(int argc, char *argv[]) {
 			= malloc(strlen(NTServiceName)
 				 + strlen(NTServiceDisplayPrefix) + 1);
 		    if (!NTServiceDisplayName) {
-			message(LOG_CRIT, "Out of memory.");
+			message(LOG_CRIT, "Out of memory");
 			exit(1);
 		    }
 		    strcpy(NTServiceDisplayName, NTServiceDisplayPrefix);
@@ -7587,7 +7593,7 @@ int doopts(int argc, char *argv[]) {
 			i++;
 			ConfigFile = malloc(strlen(argv[i]) + 1);
 			if (ConfigFile == NULL) {
-			    message(LOG_CRIT, "Out of memory.");
+			    message(LOG_CRIT, "Out of memory");
 			    exit(1);
 			}
 			strcpy(ConfigFile, argv[i]);
@@ -7753,7 +7759,7 @@ static void handler(int sig) {
     int i;
     switch(sig) {
     case SIGHUP:
-	if (Debug > 4) message(LOG_DEBUG, "SIGHUP.");
+	if (Debug > 4) message(LOG_DEBUG, "SIGHUP");
 #ifndef NO_FORK
 	if (NForks) {	/* mother process */
 	    if (ConfigFile && !oldstones) {
@@ -7783,8 +7789,8 @@ static void handler(int sig) {
 	    LogFp = fopen(LogFileName, "a");
 	    if (LogFp == NULL) {
 		LogFp = stderr;
-		message(LOG_ERR, "Can't re-create log file err=%d: %s",
-			errno, LogFileName);
+		message(LOG_ERR, "Can't re-create log file: %s err=%d",
+			LogFileName, errno);
 		exit(1);
 	    }
 	    setbuf(LogFp, NULL);
@@ -7793,9 +7799,8 @@ static void handler(int sig) {
 	    fclose(AccFp);
 	    AccFp = fopen(AccFileName, "a");
 	    if (AccFp == NULL) {
-		message(LOG_ERR,
-			"Can't re-create account log file err=%d: %s",
-			errno, AccFileName);
+		message(LOG_ERR, "Can't re-create account log file: %s err=%d",
+			AccFileName, errno);
 		exit(1);
 	    }
 	    setbuf(AccFp, NULL);
@@ -7829,7 +7834,7 @@ static void handler(int sig) {
 	signal(SIGUSR2, handler);
 	break;
     case SIGPIPE:
-	if (Debug > 0) message(LOG_DEBUG, "SIGPIPE.");
+	if (Debug > 0) message(LOG_DEBUG, "SIGPIPE");
 	signal(SIGPIPE, handler);
 	break;
     case SIGSEGV:
@@ -7889,7 +7894,7 @@ void initialize(int argc, char *argv[]) {
 #ifdef WINDOWS
     WSADATA WSAData;
     if (WSAStartup(MAKEWORD(1, 1), &WSAData)) {
-	message(LOG_ERR, "Can't find winsock.");
+	message(LOG_ERR, "Can't find winsock");
 	exit(1);
     }
     atexit((void(*)(void))WSACleanup);
@@ -7917,7 +7922,7 @@ void initialize(int argc, char *argv[]) {
 #endif
     XHostsTrue = malloc(XHostsBaseSize + sizeof(struct sockaddr_storage));
     if (!XHostsTrue) {
-	message(LOG_CRIT, "Out of memory.");
+	message(LOG_CRIT, "Out of memory");
 	exit(1);
     }
     XHostsTrue->next = NULL;
@@ -7985,7 +7990,7 @@ void initialize(int argc, char *argv[]) {
     if (!DryRun && NForks) {
 	Pid = malloc(sizeof(pid_t) * NForks);
 	if (!Pid) {
-	    message(LOG_CRIT, "Out of memory.");
+	    message(LOG_CRIT, "Out of memory");
 	    exit(1);
 	}
 	for (i=0; i < NForks; i++) {
@@ -8093,10 +8098,10 @@ void initialize(int argc, char *argv[]) {
 	if (LogFileName) fchown(fileno(LogFp), SetUID, SetGID);
     }
     if (SetGID) if (setgid(SetGID) < 0 || setgroups(1, &SetGID) < 0) {
-	message(LOG_WARNING, "Can't set gid err=%d.", errno);
+	message(LOG_WARNING, "Can't set gid err=%d", errno);
     }
     if (SetUID) if (setuid(SetUID) < 0) {
-	message(LOG_WARNING, "Can't set uid err=%d.", errno);
+	message(LOG_WARNING, "Can't set uid err=%d", errno);
     }
 #endif
 #ifdef PR_SET_DUMPABLE
@@ -8134,7 +8139,7 @@ void WINAPI serviceCtrl(DWORD code) {
     switch(code) {
     case SERVICE_CONTROL_STOP:
 	scReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 0);
-	message(LOG_INFO, "Service stopping...");
+	message(LOG_INFO, "Service stopping..");
 	if (WaitForSingleObject(NTServiceThreadHandle, 1000) == WAIT_TIMEOUT)
 	    TerminateThread(NTServiceThreadHandle, 0);
 	break;
@@ -8162,14 +8167,14 @@ void WINAPI serviceMain(DWORD argc, LPTSTR *argv) {
     NTServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     NTServiceStatus.dwServiceSpecificExitCode = 0;
     scReportStatus(SERVICE_START_PENDING, NO_ERROR, 3000);
-    message(LOG_INFO, "Service started.");
+    message(LOG_INFO, "Service started");
     scReportStatus(SERVICE_RUNNING, NO_ERROR, 0);
     NTServiceThreadHandle = CreateThread(0, 0, serviceThread, NULL, 0, &thid);
     if (NTServiceThreadHandle) {
 	WaitForSingleObject(NTServiceThreadHandle, INFINITE);
 	CloseHandle(NTServiceThreadHandle);
     }
-    message(LOG_INFO, "Service stopped.");
+    message(LOG_INFO, "Service stopped");
     scReportStatus(SERVICE_STOPPED, NO_ERROR, 0);
 }
 #endif
@@ -8191,7 +8196,7 @@ int main(int argc, char *argv[]) {
 		{ NULL, NULL }
 	    };
 	if (!StartServiceCtrlDispatcher(dispatchTable))
-	    message(LOG_ERR, "StartServiceCtrlDispatcher failed.");
+	    message(LOG_ERR, "StartServiceCtrlDispatcher failed");
 	return 0;
     }
 #endif
