@@ -772,7 +772,7 @@ void message(int pri, char *fmt, ...) {
 		fprintf(stdout, "%s\n", str);
 	    }
 	}
-    }
+    } else
 #else
 #ifdef NT_SERVICE
     if (NTServiceLog) {
@@ -781,10 +781,10 @@ void message(int pri, char *fmt, ...) {
 	if (pri <= LOG_ERR) type = EVENTLOG_ERROR_TYPE;
 	else if (pri <= LOG_NOTICE) type = EVENTLOG_WARNING_TYPE;
 	ReportEvent(NTServiceLog, type, 0, EVLOG, NULL, 1, 0, msgs, NULL);
-    }
+    } else
 #endif
 #endif
-    else if (LogFp) fprintf(LogFp, "%s\n", str);
+    if (LogFp) fprintf(LogFp, "%s\n", str);
 }
 
 void message_time(Pair *pair, int pri, char *fmt, ...) {
