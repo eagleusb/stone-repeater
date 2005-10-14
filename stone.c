@@ -7675,21 +7675,22 @@ void doargs(int argc, int i, char *argv[]) {
 	    }
 	    continue;
 	}
-	j = getdist(argv[i], &dproto);
+	host = strdup(argv[i]);
+	j = getdist(host, &dproto);
 	if (j > 0) {	/* with hostname */
-	    host = argv[i++];
+	    i++;
 	    if (j > 1) serv = host + j; else serv = NULL;
 	    if (argc <= i) {
 		help(argv[0], NULL);
 		exit(1);
 	    }
-	    j = getdist(argv[i], &sproto);
+	    shost = strdup(argv[i]);
+	    j = getdist(shost, &sproto);
 	    if (j > 0) {
-		shost = argv[i];
 		if (j > 1) sserv = shost + j; else sserv = NULL;
 	    } else if (j == 0) {
+		sserv = shost;
 		shost = NULL;
-		sserv = argv[i];
 	    } else {
 		message(LOG_ERR, "Invalid <sport>: %s", argv[i]);
 		exit(1);
