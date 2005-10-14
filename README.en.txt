@@ -145,6 +145,9 @@ HOWTO USE
 	depth=<n>	The maximum of the certificate chain.
 			If the peer's certificate exceeds <n>, the
 			verification fails.  The maximum of <n> is 9.
+	tls1		Just use TLSv1 protocol.
+	ssl3		Just use SSLv3 protocol.
+	ssl2		Just use SSLv2 protocol.
 	no_tls1		Turn off TLSv1 protocol.
 	no_ssl3		Turn off SSLv3 protocol.
 	no_ssl2		Turn off SSLv2 protocol.

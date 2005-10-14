@@ -299,6 +299,7 @@ typedef struct {
     int depth;
     long off;
     long serial;
+    SSL_METHOD *meth;
     int (*callback)(int, X509_STORE_CTX *);
     char *sid_ctx;
     char *keyFile;
@@ -5676,11 +5677,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     }
     ss->verbose = opts->verbose;
     ss->shutdown_mode = opts->shutdown_mode;
-    if (isserver) {
-	ss->ctx = SSL_CTX_new(SSLv23_server_method());
-    } else {
-	ss->ctx = SSL_CTX_new(SSLv23_client_method());
-    }
+    ss->ctx = SSL_CTX_new(opts->meth);
     if (!ss->ctx) {
 	message(LOG_ERR, "SSL_CTX_new error");
 	goto error;
@@ -6655,6 +6652,15 @@ void help(char *com, char *sub) {
 "       uniq             ; check serial # of peer's certificate\n"
 "       re<n>=<regex>    ; verify depth <n> with <regex>\n"
 "       depth=<n>        ; set verification depth to <n>\n"
+#ifndef OPENSSL_NO_TLS1
+"       tls1             ; just use TLSv1\n"
+#endif
+#ifndef OPENSSL_NO_SSL3
+"       ssl3             ; just use SSLv3\n"
+#endif
+#ifndef OPENSSL_NO_SSL2
+"       ssl2             ; just use SSLv2\n"
+#endif
 "       no_tls1          ; turn off TLSv1\n"
 "       no_ssl3          ; turn off SSLv3\n"
 "       no_ssl2          ; turn off SSLv2\n"
@@ -7030,8 +7036,22 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 	char path[BUFMAX];
 	snprintf(path, BUFMAX-1, "%s/stone.pem", X509_get_default_cert_dir());
 	opts->keyFile = opts->certFile = strdup(path);
+#if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
+	opts->meth = SSLv23_server_method();
+#elif !defined(OPENSSL_NO_SSL3)
+	opts->meth = SSLv3_server_method();
+#elif !defined(OPENSSL_NO_SSL2)
+	opts->meth = SSLv2_server_method();
+#endif
     } else {
 	opts->keyFile = opts->certFile = NULL;
+#if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
+	opts->meth = SSLv23_client_method();
+#elif !defined(OPENSSL_NO_SSL3)
+	opts->meth = SSLv3_client_method();
+#elif !defined(OPENSSL_NO_SSL2)
+	opts->meth = SSLv2_client_method();
+#endif
     }
     opts->caFile = opts->caPath = NULL;
     opts->pfxFile = NULL;
@@ -7091,6 +7111,21 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
 	else if (opts->depth < 0) opts->depth = 0;
     } else if (!strcmp(argv[i], "bugs")) {
 	opts->off |= SSL_OP_ALL;
+#ifndef OPENSSL_NO_TLS1
+    } else if (!strcmp(argv[i], "tls1")) {
+	if (isserver) opts->meth = TLSv1_server_method();
+	else opts->meth = TLSv1_client_method();
+#endif
+#ifndef OPENSSL_NO_SSL3
+    } else if (!strcmp(argv[i], "ssl3")) {
+	if (isserver) opts->meth = SSLv3_server_method();
+	else opts->meth = SSLv3_client_method();
+#endif
+#ifndef OPENSSL_NO_SSL2
+    } else if (!strcmp(argv[i], "ssl2")) {
+	if (isserver) opts->meth = SSLv2_server_method();
+	else opts->meth = SSLv2_client_method();
+#endif
     } else if (!strcmp(argv[i], "no_tls1")) {
 	opts->off |= SSL_OP_NO_TLSv1;
     } else if (!strcmp(argv[i], "no_ssl3")) {
@@ -7903,7 +7938,7 @@ void initialize(int argc, char *argv[]) {
     LogFp = stderr;
     setbuf(stderr, NULL);
 #ifdef USE_SSL
-    OpenSSL_add_all_algorithms();
+    SSL_library_init();
     SSL_load_error_strings();
     PairIndex = SSL_get_ex_new_index(0, "Pair index", NULL, NULL, NULL);
     MatchIndex = SSL_SESSION_get_ex_new_index(0, "Match index",
