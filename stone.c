@@ -8214,11 +8214,13 @@ void WINAPI serviceMain(DWORD argc, LPTSTR *argv) {
 }
 #endif
 
+#ifdef CLEAR_ARGS
 static void clear_args(int argc, char *argv[]) {
     char *argend = argv[argc-1] + strlen(argv[argc-1]);
     char *p;
     for (p=argv[1]; p < argend; p++) *p = '\0';	/* clear args */
 }
+#endif
 
 int main(int argc, char *argv[]) {
     initialize(argc, argv);
@@ -8235,7 +8237,9 @@ int main(int argc, char *argv[]) {
 	return 0;
     }
 #endif
+#ifdef CLEAR_ARGS
     clear_args(argc, argv);
+#endif
 #ifdef MEMLEAK_CHECK
     mtrace();
 #endif
