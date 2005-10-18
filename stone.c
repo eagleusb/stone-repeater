@@ -5595,22 +5595,31 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	if (ss->serial == -1 && serial >= 0) {
 	    ss->serial = serial;
 	} else if (ss->serial >= 0 && serial != ss->serial) {
-	    message(LOG_ERR, "SSL callback serial number mismatch %lx != %lx",
+	    message(LOG_ERR, "%d TCP %d: SSL callback serial number mismatch "
+		    "%lx != %lx", pair->stone->sd, pair->sd,
 		    serial, ss->serial);
 	    return 0;	/* fail */
 	}
     }
     if (Debug > 3)
-	message(LOG_DEBUG, "%d TCP %d: callback: err=%d, depth=%d, preverify=%d",
+	message(LOG_DEBUG,
+		"%d TCP %d: callback: err=%d, depth=%d, preverify=%d",
 		pair->stone->sd, pair->sd, err, depth, preverify_ok);
     p = X509_NAME_oneline(X509_get_subject_name(err_cert), buf, BUFMAX-1);
     if (!p) return 0;
-    if (ss->verbose) message(LOG_DEBUG, "[depth%d=%s]", depth, p);
+    if (ss->verbose) message(LOG_DEBUG, "%d TCP %d: [depth%d=%s]",
+			     pair->stone->sd, pair->sd, depth, p);
     if (depth > ss->depth) {
 	preverify_ok = 0;
 	X509_STORE_CTX_set_error(ctx, X509_V_ERR_CERT_CHAIN_TOO_LONG);
     }
-    if (!preverify_ok) return 0;
+    if (!preverify_ok) {
+	if (ss->verbose)
+	    message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s",
+		    pair->stone->sd, pair->sd,
+		    err, X509_verify_cert_error_string(err));
+	return 0;
+    }
     if (depth < DEPTH_MAX && ss->re[depth]) {
 	SSL_SESSION *sess = NULL;
 	regmatch_t pmatch[NMATCH_MAX];
@@ -5690,12 +5699,15 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     ss->serial = opts->serial;
     ss->lbmod = opts->lbmod;
     ss->lbparm = opts->lbparm;
-    if ((opts->caFile || opts->caPath)
-	&& !SSL_CTX_load_verify_locations(ss->ctx,
-					  opts->caFile, opts->caPath)) {
-	message(LOG_ERR, "SSL_CTX_load_verify_locations(%s,%s) error",
-		opts->caFile, opts->caPath);
-	goto error;
+    if (opts->caFile || opts->caPath) {
+	if (!SSL_CTX_load_verify_locations(ss->ctx,
+					   opts->caFile, opts->caPath)) {
+	    message(LOG_ERR, "SSL_CTX_load_verify_locations(%s,%s) error",
+		    opts->caFile, opts->caPath);
+	    goto error;
+	}
+	X509_STORE_set_flags(SSL_CTX_get_cert_store(ss->ctx),
+			     X509_V_FLAG_CRL_CHECK|X509_V_FLAG_CRL_CHECK_ALL);
     }
     if (isserver) {
 	if (opts->sid_ctx) {
