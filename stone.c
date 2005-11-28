@@ -7953,6 +7953,7 @@ void initialize(int argc, char *argv[]) {
 #ifdef USE_SSL
     SSL_library_init();
     SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
     PairIndex = SSL_get_ex_new_index(0, "Pair index", NULL, NULL, NULL);
     MatchIndex = SSL_SESSION_get_ex_new_index(0, "Match index",
 					      newMatch, NULL, freeMatch);
