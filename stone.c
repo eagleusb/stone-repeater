@@ -297,6 +297,7 @@ typedef struct {
     int shutdown_mode;
     int mode;
     int depth;
+    int vflags;
     long off;
     long serial;
     SSL_METHOD *meth;
@@ -5706,8 +5707,9 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 		    opts->caFile, opts->caPath);
 	    goto error;
 	}
-	X509_STORE_set_flags(SSL_CTX_get_cert_store(ss->ctx),
-			     X509_V_FLAG_CRL_CHECK|X509_V_FLAG_CRL_CHECK_ALL);
+	if (opts->vflags)
+	    X509_STORE_set_flags(SSL_CTX_get_cert_store(ss->ctx),
+				 opts->vflags);
     }
     if (isserver) {
 	if (opts->sid_ctx) {
@@ -6661,6 +6663,8 @@ void help(char *com, char *sub) {
 "       verify,once      ; verify client's certificate only once\n"
 "       verify,ifany     ; verify client's certificate if any\n"
 "       verify,none      ; don't require peer's certificate\n"
+"       crl_check        ; lookup CRLs\n"
+"       crl_check_all    ; lookup CRLs for whole chain\n"
 "       uniq             ; check serial # of peer's certificate\n"
 "       re<n>=<regex>    ; verify depth <n> with <regex>\n"
 "       depth=<n>        ; set verification depth to <n>\n"
@@ -7040,6 +7044,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->shutdown_mode = 0;
     opts->mode = SSL_VERIFY_NONE;
     opts->depth = DEPTH_MAX - 1;
+    opts->vflags = 0;
     opts->off = 0;
     opts->serial = -2;
     opts->callback = verify_callback;
@@ -7109,6 +7114,11 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
 	} else {
 	    goto error;
 	}
+    } else if (!strncmp(argv[i], "crl_check", 9)) {
+	opts->vflags |= X509_V_FLAG_CRL_CHECK;
+    } else if (!strncmp(argv[i], "crl_check_all", 13)) {
+	opts->vflags |= (X509_V_FLAG_CRL_CHECK
+			 | X509_V_FLAG_CRL_CHECK_ALL);
     } else if (!strncmp(argv[i], "re", 2) && isdigit(argv[i][2])
 	       && argv[i][3] == '=') {
 	int depth = atoi(argv[i]+2);
