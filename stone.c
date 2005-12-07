@@ -88,7 +88,7 @@
  * -DWINDOWS	  Windows95/98/NT
  * -DNT_SERVICE	  WindowsNT/2000 native service
  */
-#define VERSION	"2.2h"
+#define VERSION	"2.2i"
 static char *CVS_ID =
 "@(#) $Id$";
 
