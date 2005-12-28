@@ -1,6 +1,6 @@
 /*
  * stone.c	simple repeater
- * Copyright(c)1995-2005 by Hiroaki Sengoku <sengoku@gcd.org>
+ * Copyright(c)1995-2006 by Hiroaki Sengoku <sengoku@gcd.org>
  * Version 1.0	Jan 28, 1995
  * Version 1.1	Jun  7, 1995
  * Version 1.2	Aug 20, 1995
@@ -12,7 +12,7 @@
  * Version 2.0	Nov  3, 1997	http proxy & over http
  * Version 2.1	Nov 14, 1998	respawn & pop
  * Version 2.2	May 25, 2003	Posix Thread, XferBufMax, no ALRM, SSL verify
- * Version 2.3	Oct   , 2005	LB, healthCheck, NonBlock, IPv6, sockaddr_un
+ * Version 2.3	Jan  1, 2006	LB, healthCheck, NonBlock, IPv6, sockaddr_un
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -88,7 +88,7 @@
  * -DWINDOWS	  Windows95/98/NT
  * -DNT_SERVICE	  WindowsNT/2000 native service
  */
-#define VERSION	"2.2i"
+#define VERSION	"2.3"
 static char *CVS_ID =
 "@(#) $Id$";
 
