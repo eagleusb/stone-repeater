@@ -5197,6 +5197,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		if (doSSL_accept(p[i]) < 0) {
 		    /* SSL_accept fails */
 		    p[i]->proto |= proto_close;
+		    p[1-i]->proto |= proto_close;
 		}
 		if (p[i]->proto & proto_connect)
 		    reqconn(p[1-i], &p[i]->stone->dsts[0]->addr,
