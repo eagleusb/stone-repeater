@@ -1590,7 +1590,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 	message(LOG_ERR, "health check: can't create epoll err=%d", errno);
 	return 1;	/* I can't tell the master is healthy or not */
     }
-    ev.events = EPOLLOUT;
+    ev.events = (EPOLLOUT | EPOLLONESHOT);
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
 	message(LOG_ERR, "health check: epoll_ctl err=%d", errno);
 	close(epfd);
@@ -1681,7 +1681,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 	len = 0;
 	do {
 #ifdef USE_EPOLL
-	    ev.events = EPOLLIN;
+	    ev.events = (EPOLLIN | EPOLLONESHOT);
 	    epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	    fd_set rout;
@@ -2319,7 +2319,7 @@ static Origin *getOrigins(struct sockaddr *from, socklen_t fromlen,
     origin->lock = 0;
     origin->xhost = NULL;
 #ifdef USE_EPOLL
-    ev.events = 0;
+    ev.events = EPOLLONESHOT;
     ev.data.ptr = origin;
     if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, sd, &ev) < 0) {
 	message(LOG_ERR, "%d UDP %d: epoll_ctl err=%d", stonep->sd, sd, errno);
@@ -2373,7 +2373,7 @@ void asyncOrg(Origin *origin) {
 		   len, pb, origin->xhost) > 0) {
 #ifdef USE_EPOLL
 	struct epoll_event ev;
-	ev.events = EPOLLOUT;
+	ev.events = (EPOLLOUT | EPOLLONESHOT);
 	ev.data.ptr = origin;
 	epoll_ctl(ePollFd, EPOLL_CTL_MOD, origin->sd, &ev);
 #else
@@ -3422,7 +3422,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 	message(LOG_ERR, "ident: can't create epoll err=%d", errno);
 	return 0;	/* I can't tell the master is healthy or not */
     }
-    ev.events = EPOLLOUT;
+    ev.events = (EPOLLOUT | EPOLLONESHOT);
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
 	message(LOG_ERR, "ident: epoll_ctl err=%d", errno);
 	close(epfd);
@@ -3526,7 +3526,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 	return 0;
     } else {
 #ifdef USE_EPOLL
-	ev.events = EPOLLIN;
+	ev.events = (EPOLLIN | EPOLLONESHOT);
 	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	fd_set rout;
@@ -3772,7 +3772,7 @@ Pair *doaccept(Stone *stonep) {
 	}
     }
 #ifdef USE_EPOLL
-    ev.events = 0;
+    ev.events = EPOLLONESHOT;
     ev.data.ptr = pair1;
     if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, pair1->sd, &ev) < 0) {
 	message(priority(pair1), "%d TCP %d: epoll_ctl err=%d",
@@ -5292,7 +5292,7 @@ void proto2fdset(Pair *pair, int isthread,
 	    if (ValidSocket(psd)) {
 #ifdef USE_EPOLL
 		struct epoll_event pev;
-		pev.events = 0;
+		pev.events = EPOLLONESHOT;
 		pev.data.ptr = p;
 		epoll_ctl(epfd, EPOLL_CTL_MOD, psd, &pev);
 #else
@@ -5385,7 +5385,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     }
     for (i=0; i < npairs; i++) {
 	struct epoll_event ev;
-	ev.events = 0;
+	ev.events = EPOLLONESHOT;
 	ev.data.ptr = p[i];
 	if (epoll_ctl(epfd, EPOLL_CTL_ADD, p[i]->sd, &ev) < 0) {
 	    message(LOG_ERR, "%d TCP %d: epoll_ctl err=%d",
@@ -5794,7 +5794,7 @@ void asyncClose(Pair *pair) {
 	    message(LOG_ERR, "asyncClose: can't create epoll err=%d", errno);
 	    goto exit;
 	}
-	ev.events = 0;
+	ev.events = EPOLLONESHOT;
 	ev.data.ptr = pair;
 	if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
 	    message(LOG_ERR, "asyncClose: epoll_ctl err=%d", errno);
@@ -6363,18 +6363,26 @@ void repeater(void) {
 	    int err;
 #endif
 	    int common = *(int*)evs[i].data.ptr;
-	    if (Debug > 10) {
-		message(LOG_DEBUG, "epoll events=%x type=%d",
-			evs[i].events, common);
-	    }
 	    switch(common & type_mask) {
 	    case type_stone:
+		if (Debug > 10)
+		    message(LOG_DEBUG, "stone %d: epoll events=%x type=%d",
+			    ((Stone*)evs[i].data.ptr)->sd,
+			    evs[i].events, common);
 		doStone(evs[i].data.ptr);
 		break;
 	    case type_pair:
+		if (Debug > 10)
+		    message(LOG_DEBUG, "TCP %d: epoll events=%x type=%d",
+			    ((Pair*)evs[i].data.ptr)->sd,
+			    evs[i].events, common);
 		doPair(evs[i].data.ptr);
 		break;
 	    case type_origin:
+		if (Debug > 10)
+		    message(LOG_DEBUG, "UDP %d: epoll events=%x type=%d",
+			    ((Origin*)evs[i].data.ptr)->sd,
+			    evs[i].events, common);
 		doOrigin(evs[i].data.ptr,
 			 (evs[i].events & EPOLLIN) != 0,
 			 (evs[i].events & EPOLLERR) != 0);
@@ -6904,7 +6912,7 @@ Stone *mkstone(
 	    }
 	}	/* !DryRun */
 #ifdef USE_EPOLL
-	ev.events = 0;
+	ev.events = EPOLLONESHOT;
 	ev.data.ptr = stonep;
 	if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, stonep->sd, &ev) < 0) {
 	    message(LOG_ERR, "stone %d: epoll_ctl err=%d", stonep->sd, errno);
