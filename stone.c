@@ -5430,7 +5430,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		if (((Pair*)evs[j].data.ptr)->sd == sd) {
 		    if (evs[j].events & EPOLLIN) ready_r = 1;
 		    if (evs[j].events & EPOLLOUT) ready_w = 1;
-		    if (evs[j].events & (EPOLLPRI | EPOLLERR)) ready_e = 1;
+		    if (evs[j].events & EPOLLPRI) ready_e = 1;
 		    break;
 		}
 	    }
@@ -6300,8 +6300,8 @@ void repeater(void) {
     int ret;
     static int spin = 0;
     static int nerrs = 0;
+    static time_t scantime = 0;
     Pair *pair;
-    time_t now;
 #ifdef USE_EPOLL
     int timeout;
     struct epoll_event evs[EVSMAX];
@@ -6363,23 +6363,24 @@ void repeater(void) {
 	    int err;
 #endif
 	    int common = *(int*)evs[i].data.ptr;
+	    int other = (evs[i].events & ~(EPOLLIN | EPOLLPRI | EPOLLOUT));
 	    switch(common & type_mask) {
 	    case type_stone:
-		if (Debug > 10)
+		if (Debug > 10 || (other && Debug > 2))
 		    message(LOG_DEBUG, "stone %d: epoll events=%x type=%d",
 			    ((Stone*)evs[i].data.ptr)->sd,
 			    evs[i].events, common);
 		doStone(evs[i].data.ptr);
 		break;
 	    case type_pair:
-		if (Debug > 10)
+		if (Debug > 10 || (other && Debug > 2))
 		    message(LOG_DEBUG, "TCP %d: epoll events=%x type=%d",
 			    ((Pair*)evs[i].data.ptr)->sd,
 			    evs[i].events, common);
 		doPair(evs[i].data.ptr);
 		break;
 	    case type_origin:
-		if (Debug > 10)
+		if (Debug > 10 || (other && Debug > 2))
 		    message(LOG_DEBUG, "UDP %d: epoll events=%x type=%d",
 			    ((Origin*)evs[i].data.ptr)->sd,
 			    evs[i].events, common);
@@ -6388,11 +6389,11 @@ void repeater(void) {
 			 (evs[i].events & EPOLLERR) != 0);
 		break;
 	    default:
-		message(LOG_ERR, "Irregular event %d", common);
+		message(LOG_ERR, "Irregular event events=%x type=%d",
+			evs[i].events, common);
 	    }
 	}
-	(void)(scanPairs() > 0 &&
-	       scanUDP() > 0);
+	if (time(NULL) == scantime) return;
 #else
 	(void)(scanStones(&rout, &eout) > 0 &&
 	       scanPairs(&rout, &wout, &eout) > 0 &&
@@ -6423,12 +6424,16 @@ void repeater(void) {
 	}
 	usleep(TICK_SELECT);
     }
-    time(&now);
-    if (backups && now - lastScanBackups >= MinInterval) {
-	lastScanBackups = now;
+    time(&scantime);
+    if (backups && scantime - lastScanBackups >= MinInterval) {
+	lastScanBackups = scantime;
 	scanBackups();
     }
     if (conns.next) scanConns();
+#ifdef USE_EPOLL
+    scanPairs();
+    scanUDP();
+#endif
     scanClose();
     if (oldstones) rmoldstone();
     if (OldConfigArgc) rmoldconfig();
