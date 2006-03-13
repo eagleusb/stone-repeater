@@ -2483,7 +2483,12 @@ void message_pair(int pri, Pair *pair) {
 }
 
 void ungetExBuf(ExBuf *ex) {
-    ex->start = ex->len = 0;
+    if (ex->start < 0) {
+	message(LOG_ERR, "ungetExBuf duplication. can't happen, ignore");
+	return;
+    }
+    ex->start = -1;
+    ex->len = 0;
     waitMutex(ExBufMutex);
     ex->next = freeExBuf;
     freeExBuf = ex;
@@ -2892,12 +2897,15 @@ void freePair(Pair *pair) {
 #endif
     pair->b = NULL;
     ex = pair->t;
+    pair->t = NULL;
     while (ex) {
 	ExBuf *f = ex;
-	ex = ex->next;
+	ex = f->next;
+	f->next = NULL;
 	pair->nbuf--;
-	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: freePair unget ExBuf",
-			       pair->stone->sd, sd);
+	if (Debug > 4) message(LOG_DEBUG,
+			       "%d TCP %d: freePair unget ExBuf nbuf=%d",
+			       pair->stone->sd, sd, pair->nbuf);
 	ungetExBuf(f);
     }
     if (ValidSocket(sd)) closesocket(sd);
@@ -3824,6 +3832,7 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
     if (!ex) return 0;
     while (ex->len <= 0 && ex->next) {
 	pair->t = ex->next;
+	ex->next = NULL;
 	pair->nbuf--;
 	if (Debug > 4) message(LOG_DEBUG,
 			       "%d TCP %d: before dowrite unget ExBuf nbuf=%d",
@@ -3930,6 +3939,7 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
     ex->len -= len;
     if (ex->len <= 0 && ex->next) {
 	pair->t = ex->next;
+	ex->next = NULL;
 	pair->nbuf--;
 	if (Debug > 4) message(LOG_DEBUG,
 			       "%d TCP %d: after dowrite unget ExBuf nbuf=%d",
