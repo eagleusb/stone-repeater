@@ -3023,12 +3023,15 @@ void freePair(Pair *pair) {
 #endif
     pair->b = NULL;
     ex = pair->t;
+    pair->t = NULL;
     while (ex) {
 	ExBuf *f = ex;
-	ex = ex->next;
+	ex = f->next;
+	f->next = NULL;
 	pair->nbuf--;
-	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: freePair unget ExBuf",
-			       pair->stone->sd, sd);
+	if (Debug > 4) message(LOG_DEBUG,
+			       "%d TCP %d: freePair unget ExBuf nbuf=%d",
+			       pair->stone->sd, sd, pair->nbuf);
 	ungetExBuf(f);
     }
     if (ValidSocket(sd)) {
