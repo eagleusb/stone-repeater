@@ -256,6 +256,7 @@ int FdSetBug = 0;
 #define STRMAX		127	/* > 38 */
 #define CONN_TIMEOUT	60	/* 1 min */
 #define	LB_MAX		100
+#define	FREE_TIMEOUT	600	/* 10 min */
 
 #ifndef MAXHOSTNAMELEN
 #define MAXHOSTNAMELEN	255
@@ -513,6 +514,9 @@ Pair *freePairs = NULL;
 int nFreePairs = 0;
 ExBuf *freeExBuf = NULL;
 int nFreeExBuf = 0;
+ExBuf *freeExBot = NULL;
+int nFreeExBot = 0;
+time_t freeExBotClock = 0;
 Conn conns;
 Origin origins;
 int OriginMax = 100;
@@ -2483,26 +2487,59 @@ void message_pair(int pri, Pair *pair) {
 }
 
 void ungetExBuf(ExBuf *ex) {
+    ExBuf *freeptr = NULL;
+    time_t now;
+    time(&now);
+    waitMutex(ExBufMutex);
     if (ex->start < 0) {
+	freeMutex(ExBufMutex);
 	message(LOG_ERR, "ungetExBuf duplication. can't happen, ignore");
 	return;
     }
+    if (now - freeExBotClock > FREE_TIMEOUT) {
+	if (nFreeExBot > 2) {
+	    freeptr = freeExBot->next;
+	    freeExBot->next = NULL;
+	    nFreeExBuf -= (nFreeExBot - 1);
+	} else {
+	    freeExBot = freeExBuf;
+	    nFreeExBot = nFreeExBuf;
+	}
+	freeExBotClock = now;
+    }
     ex->start = -1;
     ex->len = 0;
-    waitMutex(ExBufMutex);
     ex->next = freeExBuf;
     freeExBuf = ex;
     nFreeExBuf++;
     freeMutex(ExBufMutex);
+    if (freeptr) {
+	if (Debug > 3) message(LOG_DEBUG, "freeExBot %d nfex=%d",
+			       nFreeExBot, nFreeExBuf);
+	freeExBot = NULL;
+	nFreeExBot = 0;
+	while (freeptr) {
+	    ExBuf *p = freeptr;
+	    freeptr = freeptr->next;
+	    free(p);
+	}
+    }
 }
 
 ExBuf *getExBuf(void) {
     ExBuf *ret = NULL;
+    time_t now;
+    time(&now);
     waitMutex(ExBufMutex);
     if (freeExBuf) {
 	ret = freeExBuf;
 	freeExBuf = ret->next;
 	nFreeExBuf--;
+	if (nFreeExBuf < nFreeExBot) {
+	    nFreeExBot = nFreeExBuf;
+	    freeExBot = freeExBuf;
+	    freeExBotClock = now;
+	}
     }
     freeMutex(ExBufMutex);
     if (!ret) {
@@ -2903,13 +2940,19 @@ void freePair(Pair *pair) {
 	ex = f->next;
 	f->next = NULL;
 	pair->nbuf--;
-	if (Debug > 4) message(LOG_DEBUG,
-			       "%d TCP %d: freePair unget ExBuf nbuf=%d",
-			       pair->stone->sd, sd, pair->nbuf);
+	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: freePair "
+			       "unget ExBuf nbuf=%d nfex=%d",
+			       pair->stone->sd, sd, pair->nbuf, nFreeExBuf);
 	ungetExBuf(f);
     }
     if (ValidSocket(sd)) closesocket(sd);
     waitMutex(FPairMutex);
+    if (pair->clock == 0) {
+	freeMutex(FPairMutex);
+	message(LOG_ERR, "freePair duplication. can't happen, ignore");
+	return;
+    }
+    pair->clock = 0;
     pair->next = freePairs;
     freePairs = pair;
     nFreePairs++;
@@ -3834,9 +3877,10 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 	pair->t = ex->next;
 	ex->next = NULL;
 	pair->nbuf--;
-	if (Debug > 4) message(LOG_DEBUG,
-			       "%d TCP %d: before dowrite unget ExBuf nbuf=%d",
-			       pair->stone->sd, pair->sd, pair->nbuf);
+	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: before dowrite "
+			       "unget ExBuf nbuf=%d nfex=%d",
+			       pair->stone->sd, pair->sd,
+			       pair->nbuf, nFreeExBuf);
 	ungetExBuf(ex);
     }
     if (ex->len <= 0) return 0;	/* nothing to write */
@@ -3941,9 +3985,10 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 	pair->t = ex->next;
 	ex->next = NULL;
 	pair->nbuf--;
-	if (Debug > 4) message(LOG_DEBUG,
-			       "%d TCP %d: after dowrite unget ExBuf nbuf=%d",
-			       pair->stone->sd, pair->sd, pair->nbuf);
+	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: after dowrite "
+			       "unget ExBuf nbuf=%d nfex=%d",
+			       pair->stone->sd, pair->sd,
+			       pair->nbuf, nFreeExBuf);
 	ungetExBuf(ex);
     }
     pair->tx += len;
@@ -4736,11 +4781,11 @@ int healthHELO(Pair *pair, char *parm, int start) {
     snprintf(str, LONGSTRMAX,
 	     "stone=%d pair=%d trash=%d conn=%d origin=%d "
 	     "established=%d readwrite=%d "
-	     "async=%d fpair=%d nfexbuf=%d nfpktbuf=%d",
+	     "async=%d fpair=%d nfexbuf=%d nfexbot=%d nfpktbuf=%d",
 	     nStones(), nPairs(pairs.next), nPairs(trash.next), nConns(),
 	     nOrigins(),
 	     (int)(now - lastEstablished), (int)(now - lastReadWrite),
-	     AsyncCount, nFreePairs, nFreeExBuf, nFreePktBuf);
+	     AsyncCount, nFreePairs, nFreeExBuf, nFreeExBot, nFreePktBuf);
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
     commOutput(pair, "250 stone:%s debug=%d %s\r\n",
