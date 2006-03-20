@@ -3770,6 +3770,7 @@ int scanClose(void) {	/* scan close request */
 	SOCKET sd;
 	p2 = p1;
 	p1 = p1->next;
+	if (p2->proto & proto_thread) continue;
 	if (p2->count > 0) {
 	    p2->count--;
 	    n++;
