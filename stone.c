@@ -5303,8 +5303,7 @@ void proto2fdset(Pair *pair, int isthread,
     if (!isthread && (pair->proto & proto_thread)) return;
     if (pair->proto & proto_conninprog) {
 #ifdef USE_EPOLL
-	ev.events |= EPOLLOUT;
-	ev.events |= EPOLLPRI;
+	ev.events |= (EPOLLOUT | EPOLLPRI);
 	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	FdSet(sd, woutp);
@@ -5411,7 +5410,8 @@ void proto2fdset(Pair *pair, int isthread,
 }
 
 int doReadWritePair(Pair *pair, Pair *opposite,
-		    int ready_r, int ready_w, int ready_e) {
+		    int ready_r, int ready_w, int ready_e,
+		    int hangup, int error) {
     Pair *rPair, *wPair;
     SOCKET stsd, sd, rsd, wsd;
     int len;
@@ -5421,7 +5421,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
     stsd = pair->stone->sd;
     pair->loop++;
     if ((pair->proto & proto_conninprog)
-	&& (ready_w || ready_e)) {
+	&& (ready_w || ready_e || hangup)) {
 	int optval;
 	socklen_t optlen = sizeof(optval);
 	pair->proto &= ~proto_conninprog;
@@ -5474,12 +5474,12 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		    stsd, sd, len, errno);
 	}
 #ifdef USE_SSL
-    } else if (((pair->ssl_flag & sf_sb_on_r) && ready_r)
+    } else if (((pair->ssl_flag & sf_sb_on_r) && (ready_r || hangup))
 	       || ((pair->ssl_flag & sf_sb_on_w) && ready_w)
 	) {
 	pair->ssl_flag &= ~(sf_sb_on_r | sf_sb_on_w);
 	doSSL_shutdown(pair, -1);
-    } else if (((pair->ssl_flag & sf_cb_on_r) && ready_r)
+    } else if (((pair->ssl_flag & sf_cb_on_r) && (ready_r || hangup))
 	       || ((pair->ssl_flag & sf_cb_on_w) && ready_w)) {
 	pair->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
 	if (doSSL_connect(pair) < 0) {
@@ -5490,7 +5490,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	    opposite->proto |= proto_close;
 	    pair->proto |= proto_close;
 	}
-    } else if (((pair->ssl_flag & sf_ab_on_r) && ready_r)
+    } else if (((pair->ssl_flag & sf_ab_on_r) && (ready_r || hangup))
 	       || ((pair->ssl_flag & sf_ab_on_w) && ready_w)) {
 	pair->ssl_flag &= ~(sf_ab_on_r | sf_ab_on_w);
 	if (doSSL_accept(pair) < 0) {
@@ -5502,7 +5502,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	    reqconn(opposite, &pair->stone->dsts[0]->addr,
 		    pair->stone->dsts[0]->len);
 #endif
-    } else if ((!(pair->proto & proto_eof) && ready_r	/* read */
+    } else if ((!(pair->proto & proto_eof) && (ready_r || hangup)  /* read */
 #ifdef USE_SSL
 		&& !(pair->ssl_flag & sf_wb_on_r))
 	       || ((pair->ssl_flag & sf_rb_on_w)
@@ -5590,7 +5590,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
     } else if ((!(pair->proto & proto_shutdown)	&& ready_w) /* write */
 #ifdef USE_SSL
 	       || ((pair->ssl_flag & sf_wb_on_r)
-		   && ready_r)	/* WANT_READ */
+		   && (ready_r || hangup))	/* WANT_READ */
 #endif
 	) {
 #ifdef USE_SSL
@@ -5674,6 +5674,11 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		wPair->proto |= proto_select_w;
 	    }
 	}
+    } else if (error) {
+	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: error", stsd, sd);
+	pair->proto |= proto_close;
+	opposite->proto |= proto_close;
+	return 0;	/* leave */
     }
     return ret;
 }
@@ -5746,11 +5751,12 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	for (i=0; i < nev; i++) {
 	    if (!doReadWritePair((Pair*)evs[i].data.ptr,
 				 ((Pair*)evs[i].data.ptr)->pair,
-				 (evs[i].events
-				  & (EPOLLIN | EPOLLHUP | EPOLLERR)) != 0,
-				 (evs[i].events
-				  & (EPOLLOUT | EPOLLHUP | EPOLLERR)) != 0,
-				 (evs[i].events & EPOLLPRI) != 0))
+				 (evs[i].events & EPOLLIN) != 0,
+				 (evs[i].events & EPOLLOUT) != 0,
+				 (evs[i].events & EPOLLPRI) != 0,
+				 (evs[i].events & EPOLLHUP) != 0,
+				 (evs[i].events & EPOLLERR) != 0
+				 ))
 		goto leave;
 	}
 #else
@@ -5760,7 +5766,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    sd = p[i]->sd;
 	    if (InvalidSocket(sd)) continue;
 	    if (!doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
-				 FD_ISSET(sd, &wo), FD_ISSET(sd, &eo)))
+				 FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0))
 		goto leave;
 	}
 #endif
@@ -6368,6 +6374,7 @@ void repeater(void) {
     static int spin = 0;
     static int nerrs = 0;
     static time_t scantime = 0;
+    time_t now;
     Pair *pair;
 #ifdef USE_EPOLL
     int timeout;
@@ -6460,7 +6467,6 @@ void repeater(void) {
 			evs[i].events, common);
 	    }
 	}
-	if (!conns.next && time(NULL) == scantime) return;
 #else
 	(void)(scanStones(&rout, &eout) > 0 &&
 	       scanPairs(&rout, &wout, &eout) > 0 &&
@@ -6491,12 +6497,14 @@ void repeater(void) {
 	}
 	usleep(TICK_SELECT);
     }
-    time(&scantime);
+    if (conns.next) scanConns();
+    time(&now);
+    if (now == scantime) return;
+    scantime = now;
     if (backups && scantime - lastScanBackups >= MinInterval) {
 	lastScanBackups = scantime;
 	scanBackups();
     }
-    if (conns.next) scanConns();
 #ifdef USE_EPOLL
     scanPairs();
     scanUDP();
