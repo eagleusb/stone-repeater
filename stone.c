@@ -5420,6 +5420,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
     if (InvalidSocket(sd)) return ret;
     stsd = pair->stone->sd;
     pair->loop++;
+    if (hangup && (pair->proto & proto_connect)) ready_r = 1;
     if ((pair->proto & proto_conninprog)
 	&& (ready_w || ready_e || hangup)) {
 	int optval;
@@ -5474,12 +5475,12 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		    stsd, sd, len, errno);
 	}
 #ifdef USE_SSL
-    } else if (((pair->ssl_flag & sf_sb_on_r) && (ready_r || hangup))
+    } else if (((pair->ssl_flag & sf_sb_on_r) && ready_r)
 	       || ((pair->ssl_flag & sf_sb_on_w) && ready_w)
 	) {
 	pair->ssl_flag &= ~(sf_sb_on_r | sf_sb_on_w);
 	doSSL_shutdown(pair, -1);
-    } else if (((pair->ssl_flag & sf_cb_on_r) && (ready_r || hangup))
+    } else if (((pair->ssl_flag & sf_cb_on_r) && ready_r)
 	       || ((pair->ssl_flag & sf_cb_on_w) && ready_w)) {
 	pair->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
 	if (doSSL_connect(pair) < 0) {
@@ -5490,7 +5491,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	    opposite->proto |= proto_close;
 	    pair->proto |= proto_close;
 	}
-    } else if (((pair->ssl_flag & sf_ab_on_r) && (ready_r || hangup))
+    } else if (((pair->ssl_flag & sf_ab_on_r) && ready_r)
 	       || ((pair->ssl_flag & sf_ab_on_w) && ready_w)) {
 	pair->ssl_flag &= ~(sf_ab_on_r | sf_ab_on_w);
 	if (doSSL_accept(pair) < 0) {
@@ -5502,7 +5503,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	    reqconn(opposite, &pair->stone->dsts[0]->addr,
 		    pair->stone->dsts[0]->len);
 #endif
-    } else if ((!(pair->proto & proto_eof) && (ready_r || hangup)  /* read */
+    } else if ((!(pair->proto & proto_eof) && ready_r	/* read */
 #ifdef USE_SSL
 		&& !(pair->ssl_flag & sf_wb_on_r))
 	       || ((pair->ssl_flag & sf_rb_on_w)
@@ -5590,7 +5591,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
     } else if ((!(pair->proto & proto_shutdown)	&& ready_w) /* write */
 #ifdef USE_SSL
 	       || ((pair->ssl_flag & sf_wb_on_r)
-		   && (ready_r || hangup))	/* WANT_READ */
+		   && ready_r)	/* WANT_READ */
 #endif
 	) {
 #ifdef USE_SSL
