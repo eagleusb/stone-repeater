@@ -5304,6 +5304,7 @@ void proto2fdset(Pair *pair, int isthread,
     if (pair->proto & proto_conninprog) {
 #ifdef USE_EPOLL
 	ev.events |= EPOLLOUT;
+	ev.events |= EPOLLPRI;
 	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	FdSet(sd, woutp);
@@ -5401,6 +5402,7 @@ void proto2fdset(Pair *pair, int isthread,
 	}
 	if (isset)
 #ifdef USE_EPOLL
+	    ev.events |= EPOLLPRI;
 	    epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	    FdSet(sd, eoutp);
@@ -5408,12 +5410,278 @@ void proto2fdset(Pair *pair, int isthread,
     }
 }
 
-void doReadWrite(Pair *pair) {	/* pair must be source side */
-    int npairs = 1;
-    Pair *p[2];
+int doReadWritePair(Pair *pair, Pair *opposite,
+		    int ready_r, int ready_w, int ready_e) {
     Pair *rPair, *wPair;
     SOCKET stsd, sd, rsd, wsd;
     int len;
+    int ret = 1;	/* assume to continue */
+    sd = pair->sd;
+    if (InvalidSocket(sd)) return ret;
+    stsd = pair->stone->sd;
+    pair->loop++;
+    if ((pair->proto & proto_conninprog)
+	&& (ready_w || ready_e)) {
+	int optval;
+	socklen_t optlen = sizeof(optval);
+	pair->proto &= ~proto_conninprog;
+	if (getsockopt(sd, SOL_SOCKET, SO_ERROR,
+		       (char*)&optval, &optlen) < 0) {
+#ifdef WINDOWS
+	    errno = WSAGetLastError();
+#endif
+	    message(LOG_ERR, "%d TCP %d: getsockopt err=%d", stsd, sd, errno);
+	    pair->proto |= proto_close;
+	    opposite->proto |= proto_close;
+	    return 0;	/* leave */
+	}
+	if (optval) {
+	    message(LOG_ERR, "%d TCP %d: connect getsockopt err=%d",
+		    stsd, sd, optval);
+	    pair->proto |= proto_close;
+	    opposite->proto |= proto_close;
+	    return 0;	/* leave */
+	} else {	/* succeed in connecting */
+	    if (Debug > 4)
+		message(LOG_DEBUG, "%d TCP %d: connecting completed",
+			stsd, sd);
+	    connected(pair);
+	}
+    } else if (ready_e) {	/* Out-of-Band Data */
+	char buf[1];
+	len = recv(sd, buf, 1, MSG_OOB);
+	if (len == 1) {
+	    if (opposite) wsd = opposite->sd; else wsd = INVALID_SOCKET;
+	    if (Debug > 3)
+		message(LOG_DEBUG, "%d TCP %d: MSG_OOB 0x%02x to %d",
+			stsd, sd, buf[0], wsd);
+	    if (ValidSocket(wsd)) {
+		len = send(wsd, buf, 1, MSG_OOB);
+		if (len != 1) {
+#ifdef WINDOWS
+		    errno = WSAGetLastError();
+#endif
+		    message(LOG_ERR,
+			    "%d TCP %d: send MSG_OOB ret=%d, err=%d",
+			    stsd, sd, len, errno);
+		}
+	    }
+	} else {
+#ifdef WINDOWS
+	    errno = WSAGetLastError();
+#endif
+	    message(LOG_ERR, "%d TCP %d: recv MSG_OOB ret=%d, err=%d",
+		    stsd, sd, len, errno);
+	}
+#ifdef USE_SSL
+    } else if (((pair->ssl_flag & sf_sb_on_r) && ready_r)
+	       || ((pair->ssl_flag & sf_sb_on_w) && ready_w)
+	) {
+	pair->ssl_flag &= ~(sf_sb_on_r | sf_sb_on_w);
+	doSSL_shutdown(pair, -1);
+    } else if (((pair->ssl_flag & sf_cb_on_r) && ready_r)
+	       || ((pair->ssl_flag & sf_cb_on_w) && ready_w)) {
+	pair->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
+	if (doSSL_connect(pair) < 0) {
+	    /* SSL_connect fails, shutdown pairs */
+	    if (opposite && !(opposite->proto & proto_shutdown))
+		if (doshutdown(opposite, 2) >= 0)
+		    opposite->proto |= proto_shutdown;
+	    opposite->proto |= proto_close;
+	    pair->proto |= proto_close;
+	}
+    } else if (((pair->ssl_flag & sf_ab_on_r) && ready_r)
+	       || ((pair->ssl_flag & sf_ab_on_w) && ready_w)) {
+	pair->ssl_flag &= ~(sf_ab_on_r | sf_ab_on_w);
+	if (doSSL_accept(pair) < 0) {
+	    /* SSL_accept fails */
+	    pair->proto |= proto_close;
+	    opposite->proto |= proto_close;
+	}
+	if (pair->proto & proto_connect)
+	    reqconn(opposite, &pair->stone->dsts[0]->addr,
+		    pair->stone->dsts[0]->len);
+#endif
+    } else if ((!(pair->proto & proto_eof) && ready_r	/* read */
+#ifdef USE_SSL
+		&& !(pair->ssl_flag & sf_wb_on_r))
+	       || ((pair->ssl_flag & sf_rb_on_w)
+		   && ready_w	/* WANT_WRITE */
+#endif
+		   )) {
+#ifdef USE_SSL
+	pair->ssl_flag &= ~sf_rb_on_w;
+#endif
+	rPair = pair;
+	wPair = opposite;
+	rsd = sd;
+	if (wPair) wsd = wPair->sd; else wsd = INVALID_SOCKET;
+    read_pending:
+	rPair->proto &= ~proto_select_r;
+	rPair->count += REF_UNIT;
+	len = doread(rPair);
+	rPair->count -= REF_UNIT;
+	if (len < 0 || (rPair->proto & proto_close) || wPair == NULL) {
+	    if (len == -2	/* if EOF w/ pair, */
+		&& !(rPair->proto & proto_shutdown)
+		/* and not yet shutdowned, */
+		&& wPair
+		&& !(wPair->proto & (proto_eof | proto_shutdown
+				     | proto_close))
+		/* and not bi-directional EOF
+		   and peer is not yet shutdowned, */
+		&& (wPair->proto & proto_connect)
+		&& ValidSocket(wsd)) {	/* and pair is valid, */
+		/*
+		  recevied EOF from rPair,
+		  so reply SSL notify to rPair
+		  and send SSL notify and FIN to wPair...
+		*/
+		rPair->proto |= proto_eof;	/* no more to read */
+		/*
+		  Don't send notify, or further SSL_write will fail
+		  if (rPair->ssl) doSSL_shutdown(rPair, 0);
+		*/
+		if (!(wPair->proto & proto_shutdown))
+		    if (doshutdown(wPair, 1) >= 0)	/* send FIN */
+			wPair->proto |= proto_shutdown;
+		wPair->proto &= ~proto_select_w;
+	    } else {
+		/*
+		  error, already shutdowned, or bi-directional EOF,
+		  so reply SSL notify to rPair,
+		  send SSL notify to wPair and shutdown wPair,
+		  set close flag
+		*/
+		int flag = 0;
+		if (!(rPair->proto & proto_shutdown))
+		    if (doshutdown(rPair, 2) >= 0)
+			flag = proto_shutdown;
+		rPair->proto &= ~proto_select_w;
+		setclose(rPair, (proto_eof | flag));
+		flag = 0;
+		if (!(wPair->proto & proto_shutdown))
+		    if (doshutdown(wPair, 2) >= 0)
+			flag = proto_shutdown;
+		wPair->proto &= ~proto_select_w;
+		setclose(wPair, flag);
+	    }
+	} else {
+	    if (len > 0) {
+		int first_flag;
+		first_flag = (rPair->proto & proto_first_r);
+		if (first_flag) len = first_read(rPair);
+		if (len > 0 && ValidSocket(wsd)
+		    && (wPair->proto & proto_connect)
+		    && !(wPair->proto & (proto_shutdown | proto_close))
+		    && !(rPair->proto & proto_close)) {
+		    /* (wPair->proto & proto_eof) may be true */
+		    wPair->proto |= proto_select_w;
+#ifdef ALWAYS_BUFFERING
+		    rPair->proto |= proto_select_r;
+#endif
+		} else {
+		    return 0;	/* leave */
+		}
+	    } else {	/* EINTR */
+		rPair->proto |= proto_select_r;
+	    }
+	}
+    } else if ((!(pair->proto & proto_shutdown)	&& ready_w) /* write */
+#ifdef USE_SSL
+	       || ((pair->ssl_flag & sf_wb_on_r)
+		   && ready_r)	/* WANT_READ */
+#endif
+	) {
+#ifdef USE_SSL
+	pair->ssl_flag &= ~sf_wb_on_r;
+#endif
+	wPair = pair;
+	rPair = opposite;
+	wsd = sd;
+	if (rPair) rsd = rPair->sd; else rsd = INVALID_SOCKET;
+	wPair->proto &= ~proto_select_w;
+	if (((wPair->proto & proto_command) == command_ihead) ||
+	    ((wPair->proto & proto_command) == command_iheads)) {
+	    int state = (wPair->proto & state_mask);
+	    if (state == 0) {
+		if (insheader(wPair) >= 0)	/* insert header */
+		    wPair->proto |= ++state;
+	    }
+	}
+	wPair->count += REF_UNIT;
+	len = dowrite(wPair);
+	wPair->count -= REF_UNIT;
+	if (len < 0 || (wPair->proto & proto_close) || rPair == NULL) {
+	    int flag = 0;
+	    if (rPair && ValidSocket(rsd)
+		&& !(rPair->proto & proto_shutdown))
+		if (doshutdown(rPair, 2) >= 0) flag = proto_shutdown;
+	    rPair->proto &= ~proto_select_w;
+	    setclose(rPair, flag);
+	    flag = 0;
+	    if (!(wPair->proto & proto_shutdown))
+		if (doshutdown(wPair, 2) >= 0) flag = proto_shutdown;
+	    setclose(wPair, flag);
+	} else {
+	    ExBuf *ex;
+	    ex = wPair->t;	/* top */
+	    /* (wPair->proto & proto_eof) may be true */
+	    if (ex->len <= 0) {	/* all written */
+		if (wPair->proto & proto_first_w) {
+		    wPair->proto &= ~proto_first_w;
+		    if (rPair && ValidSocket(rsd)
+			&& ((rPair->proto & proto_command)
+			    == command_proxy)
+			&& ((rPair->proto & state_mask) == 1)) {
+			message_time_log(rPair);
+			if (Debug > 7)
+			    message(LOG_DEBUG,
+				    "%d TCP %d: reconnect proxy",
+				    stsd, wPair->sd);
+			wPair->proto |= proto_first_r;
+		    }
+		}
+		if (rPair && ValidSocket(rsd)
+		    && ((rPair->proto & proto_command)
+			== command_iheads)) {
+		    if (Debug > 7)
+			message(LOG_DEBUG,
+				"%d TCP %d: insheader again",
+				stsd, wPair->sd);
+		    rPair->proto &= ~state_mask;
+		}
+		if (rPair && ValidSocket(rsd)
+		    && (rPair->proto & proto_connect)
+		    && !(rPair->proto & (proto_eof | proto_close))
+		    && !(wPair->proto & (proto_shutdown | proto_close))
+		    ) {
+#ifdef USE_SSL
+		    if (rPair->ssl && SSL_pending(rPair->ssl)) {
+			if (Debug > 4)
+			    message(LOG_DEBUG,
+				    "%d TCP %d: SSL_pending, read again",
+				    stsd, rPair->sd);
+			ret = 0;	/* read once */
+			goto read_pending;
+		    }
+#endif
+		    rPair->proto |= proto_select_r;
+		} else {
+		    return 0;	/* leave */
+		}
+	    } else {	/* EINTR */
+		wPair->proto |= proto_select_w;
+	    }
+	}
+    }
+    return ret;
+}
+
+void doReadWrite(Pair *pair) {	/* pair must be source side */
+    int npairs = 1;
+    Pair *p[2];
+    SOCKET stsd;
     int i;
 #ifdef USE_EPOLL
     int epfd;
@@ -5457,7 +5725,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     for (;;) {	/* loop until timeout or EOF/error */
 #ifdef USE_EPOLL
 	struct epoll_event evs[2];
-	int nev, j;
+	int nev;
 	for (i=0; i < npairs; i++) proto2fdset(p[i], 1, epfd);
 	nev = epoll_wait(epfd, evs, 2, TICK_SELECT / 1000);
 	if (nev <= 0) goto leave;
@@ -5474,285 +5742,28 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	if (Debug > 10)
 	    message_select(LOG_DEBUG, "selectReadWrite2", &ro, &wo, &eo);
 #endif
+#ifdef USE_EPOLL
+	for (i=0; i < nev; i++) {
+	    if (!doReadWritePair((Pair*)evs[i].data.ptr,
+				 ((Pair*)evs[i].data.ptr)->pair,
+				 (evs[i].events
+				  & (EPOLLIN | EPOLLHUP | EPOLLERR)) != 0,
+				 (evs[i].events
+				  & (EPOLLOUT | EPOLLHUP | EPOLLERR)) != 0,
+				 (evs[i].events & EPOLLPRI) != 0))
+		goto leave;
+	}
+#else
 	for (i=0; i < npairs; i++) {
-	    int ready_r = 0;
-	    int ready_w = 0;
-	    int ready_e = 0;
+	    SOCKET sd;
 	    if (!p[i] || (p[i]->proto & proto_close)) continue;
 	    sd = p[i]->sd;
 	    if (InvalidSocket(sd)) continue;
-#ifdef USE_EPOLL
-	    for (j=0; j < nev; j++) {
-		if (((Pair*)evs[j].data.ptr)->sd == sd) {
-		    if (evs[j].events & EPOLLIN) ready_r = 1;
-		    if (evs[j].events & EPOLLOUT) ready_w = 1;
-		    if (evs[j].events & EPOLLPRI) ready_e = 1;
-		    break;
-		}
-	    }
-#else
-	    ready_r = FD_ISSET(sd, &ro);
-	    ready_w = FD_ISSET(sd, &wo);
-	    ready_e = FD_ISSET(sd, &eo);
-#endif
-	    p[i]->loop++;
-	    if ((p[i]->proto & proto_conninprog)
-		&& (ready_w || ready_e)) {
-		int optval;
-		socklen_t optlen = sizeof(optval);
-		p[i]->proto &= ~proto_conninprog;
-		if (getsockopt(sd, SOL_SOCKET, SO_ERROR,
-			       (char*)&optval, &optlen) < 0) {
-#ifdef WINDOWS
-		    errno = WSAGetLastError();
-#endif
-		    message(LOG_ERR, "%d TCP %d: getsockopt err=%d",
-			    stsd, sd, errno);
-		    p[i]->proto |= proto_close;
-		    p[1-i]->proto |= proto_close;
-		    goto leave;
-		}
-		if (optval) {
-		    message(LOG_ERR, "%d TCP %d: connect getsockopt err=%d",
-			    stsd, sd, optval);
-		    p[i]->proto |= proto_close;
-		    p[1-i]->proto |= proto_close;
-		    goto leave;
-		} else {	/* succeed in connecting */
-		    if (Debug > 4)
-			message(LOG_DEBUG, "%d TCP %d: connecting completed",
-				stsd, sd);
-		    connected(p[i]);
-		}
-	    } else if (ready_e) {	/* Out-of-Band Data */
-		char buf[1];
-		len = recv(sd, buf, 1, MSG_OOB);
-		if (len == 1) {
-		    if (p[1-i]) wsd = p[1-i]->sd; else wsd = INVALID_SOCKET;
-		    if (Debug > 3)
-			message(LOG_DEBUG, "%d TCP %d: MSG_OOB 0x%02x to %d",
-				stsd, sd, buf[0], wsd);
-		    if (ValidSocket(wsd)) {
-			len = send(wsd, buf, 1, MSG_OOB);
-			if (len != 1) {
-#ifdef WINDOWS
-			    errno = WSAGetLastError();
-#endif
-			    message(LOG_ERR,
-				    "%d TCP %d: send MSG_OOB ret=%d, err=%d",
-				    stsd, sd, len, errno);
-			}
-		    }
-		} else {
-#ifdef WINDOWS
-		    errno = WSAGetLastError();
-#endif
-		    message(LOG_ERR, "%d TCP %d: recv MSG_OOB ret=%d, err=%d",
-			    stsd, sd, len, errno);
-		}
-#ifdef USE_SSL
-	    } else if (((p[i]->ssl_flag & sf_sb_on_r) && ready_r)
-		       || ((p[i]->ssl_flag & sf_sb_on_w) && ready_w)
-		) {
-		p[i]->ssl_flag &= ~(sf_sb_on_r | sf_sb_on_w);
-		doSSL_shutdown(p[i], -1);
-	    } else if (((p[i]->ssl_flag & sf_cb_on_r) && ready_r)
-		       || ((p[i]->ssl_flag & sf_cb_on_w) && ready_w)) {
-		p[i]->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
-		if (doSSL_connect(p[i]) < 0) {
-		    /* SSL_connect fails, shutdown pairs */
-		    if (p[1-i] && !(p[1-i]->proto & proto_shutdown))
-			if (doshutdown(p[1-i], 2) >= 0)
-			    p[1-i]->proto |= proto_shutdown;
-		    p[1-i]->proto |= proto_close;
-		    p[i]->proto |= proto_close;
-		}
-	    } else if (((p[i]->ssl_flag & sf_ab_on_r) && ready_r)
-		       || ((p[i]->ssl_flag & sf_ab_on_w) && ready_w)) {
-		p[i]->ssl_flag &= ~(sf_ab_on_r | sf_ab_on_w);
-		if (doSSL_accept(p[i]) < 0) {
-		    /* SSL_accept fails */
-		    p[i]->proto |= proto_close;
-		    p[1-i]->proto |= proto_close;
-		}
-		if (p[i]->proto & proto_connect)
-		    reqconn(p[1-i], &p[i]->stone->dsts[0]->addr,
-			    p[i]->stone->dsts[0]->len);
-#endif
-	    } else if ((!(p[i]->proto & proto_eof) && ready_r	/* read */
-#ifdef USE_SSL
-			&& !(p[i]->ssl_flag & sf_wb_on_r))
-		       || ((p[i]->ssl_flag & sf_rb_on_w)
-			   && ready_w	/* WANT_WRITE */
-#endif
-			   )) {
-#ifdef USE_SSL
-		p[i]->ssl_flag &= ~sf_rb_on_w;
-#endif
-		rPair = p[i];
-		wPair = p[1-i];
-		rsd = sd;
-		if (wPair) wsd = wPair->sd; else wsd = INVALID_SOCKET;
-	    read_pending:
-		rPair->proto &= ~proto_select_r;
-		rPair->count += REF_UNIT;
-		len = doread(rPair);
-		rPair->count -= REF_UNIT;
-		if (len < 0 || (rPair->proto & proto_close) || wPair == NULL) {
-		    if (len == -2	/* if EOF w/ pair, */
-			&& !(rPair->proto & proto_shutdown)
-			/* and not yet shutdowned, */
-			&& wPair
-			&& !(wPair->proto & (proto_eof | proto_shutdown
-					     | proto_close))
-			/* and not bi-directional EOF
-			   and peer is not yet shutdowned, */
-			&& (wPair->proto & proto_connect)
-			&& ValidSocket(wsd)) {	/* and pair is valid, */
-			/*
-			  recevied EOF from rPair,
-			  so reply SSL notify to rPair
-			  and send SSL notify and FIN to wPair...
-			*/
-			rPair->proto |= proto_eof;	/* no more to read */
-			/*
-			  Don't send notify, or further SSL_write will fail
-			  if (rPair->ssl) doSSL_shutdown(rPair, 0);
-			*/
-			if (!(wPair->proto & proto_shutdown))
-			    if (doshutdown(wPair, 1) >= 0)	/* send FIN */
-				wPair->proto |= proto_shutdown;
-			wPair->proto &= ~proto_select_w;
-		    } else {
-			/*
-			  error, already shutdowned, or bi-directional EOF,
-			  so reply SSL notify to rPair,
-			  send SSL notify to wPair and shutdown wPair,
-			  set close flag
-			*/
-			int flag = 0;
-			if (!(rPair->proto & proto_shutdown))
-			    if (doshutdown(rPair, 2) >= 0)
-				flag = proto_shutdown;
-			rPair->proto &= ~proto_select_w;
-			setclose(rPair, (proto_eof | flag));
-			flag = 0;
-			if (!(wPair->proto & proto_shutdown))
-			    if (doshutdown(wPair, 2) >= 0)
-				flag = proto_shutdown;
-			wPair->proto &= ~proto_select_w;
-			setclose(wPair, flag);
-		    }
-		} else {
-		    if (len > 0) {
-			int first_flag;
-			first_flag = (rPair->proto & proto_first_r);
-			if (first_flag) len = first_read(rPair);
-			if (len > 0 && ValidSocket(wsd)
-			    && (wPair->proto & proto_connect)
-			    && !(wPair->proto & (proto_shutdown | proto_close))
-			    && !(rPair->proto & proto_close)) {
-			    /* (wPair->proto & proto_eof) may be true */
-			    wPair->proto |= proto_select_w;
-#ifdef ALWAYS_BUFFERING
-			    rPair->proto |= proto_select_r;
-#endif
-			} else {
-			    goto leave;
-			}
-		    } else {	/* EINTR */
-			rPair->proto |= proto_select_r;
-		    }
-		}
-	    } else if ((!(p[i]->proto & proto_shutdown)	&& ready_w) /* write */
-#ifdef USE_SSL
-		       || ((p[i]->ssl_flag & sf_wb_on_r)
-			   && ready_r)	/* WANT_READ */
-#endif
-		) {
-#ifdef USE_SSL
-		p[i]->ssl_flag &= ~sf_wb_on_r;
-#endif
-		wPair = p[i];
-		rPair = p[1-i];
-		wsd = sd;
-		if (rPair) rsd = rPair->sd; else rsd = INVALID_SOCKET;
-		wPair->proto &= ~proto_select_w;
-		if (((wPair->proto & proto_command) == command_ihead) ||
-		    ((wPair->proto & proto_command) == command_iheads)) {
-		    int state = (wPair->proto & state_mask);
-		    if (state == 0) {
-			if (insheader(wPair) >= 0)	/* insert header */
-			    wPair->proto |= ++state;
-		    }
-		}
-		wPair->count += REF_UNIT;
-		len = dowrite(wPair);
-		wPair->count -= REF_UNIT;
-		if (len < 0 || (wPair->proto & proto_close) || rPair == NULL) {
-		    int flag = 0;
-		    if (rPair && ValidSocket(rsd)
-			&& !(rPair->proto & proto_shutdown))
-			if (doshutdown(rPair, 2) >= 0) flag = proto_shutdown;
-		    rPair->proto &= ~proto_select_w;
-		    setclose(rPair, flag);
-		    flag = 0;
-		    if (!(wPair->proto & proto_shutdown))
-			if (doshutdown(wPair, 2) >= 0) flag = proto_shutdown;
-		    setclose(wPair, flag);
-		} else {
-		    ExBuf *ex;
-		    ex = wPair->t;	/* top */
-		    /* (wPair->proto & proto_eof) may be true */
-		    if (ex->len <= 0) {	/* all written */
-			if (wPair->proto & proto_first_w) {
-			    wPair->proto &= ~proto_first_w;
-			    if (rPair && ValidSocket(rsd)
-				&& ((rPair->proto & proto_command)
-				    == command_proxy)
-				&& ((rPair->proto & state_mask) == 1)) {
-				message_time_log(rPair);
-				if (Debug > 7)
-				    message(LOG_DEBUG,
-					    "%d TCP %d: reconnect proxy",
-					    stsd, wPair->sd);
-				wPair->proto |= proto_first_r;
-			    }
-			}
-			if (rPair && ValidSocket(rsd)
-			    && ((rPair->proto & proto_command)
-				== command_iheads)) {
-			    if (Debug > 7)
-				message(LOG_DEBUG,
-					"%d TCP %d: insheader again",
-					stsd, wPair->sd);
-			    rPair->proto &= ~state_mask;
-			}
-			if (rPair && ValidSocket(rsd)
-			    && (rPair->proto & proto_connect)
-			    && !(rPair->proto & (proto_eof | proto_close))
-			    && !(wPair->proto & (proto_shutdown | proto_close))
-			    ) {
-#ifdef USE_SSL
-			    if (rPair->ssl && SSL_pending(rPair->ssl)) {
-				if (Debug > 4)
-				    message(LOG_DEBUG,
-					    "%d TCP %d: SSL_pending, read again",
-					    stsd, rPair->sd);
-				i = npairs;	/* read once */
-				goto read_pending;
-			    }
-#endif
-			    rPair->proto |= proto_select_r;
-			} else {
-			    goto leave;
-			}
-		    } else {	/* EINTR */
-			wPair->proto |= proto_select_w;
-		    }
-		}
-	    }
+	    if (!doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
+				 FD_ISSET(sd, &wo), FD_ISSET(sd, &eo)))
+		goto leave;
 	}
+#endif
     }
  leave:
 #ifdef USE_EPOLL
@@ -6449,7 +6460,7 @@ void repeater(void) {
 			evs[i].events, common);
 	    }
 	}
-	if (time(NULL) == scantime) return;
+	if (!conns.next && time(NULL) == scantime) return;
 #else
 	(void)(scanStones(&rout, &eout) > 0 &&
 	       scanPairs(&rout, &wout, &eout) > 0 &&
@@ -8324,7 +8335,7 @@ void doargs(int argc, int i, char *argv[]) {
     for (stone=stones; stone != NULL; stone=stone->next) {
 #ifdef USE_EPOLL
 	struct epoll_event ev;
-	ev.events = (EPOLLIN | EPOLLONESHOT);
+	ev.events = (EPOLLIN | EPOLLPRI | EPOLLONESHOT);
 	ev.data.ptr = stone;
 	epoll_ctl(ePollFd, EPOLL_CTL_MOD, stone->sd, &ev);
 #else
