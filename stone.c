@@ -5503,7 +5503,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	    reqconn(opposite, &pair->stone->dsts[0]->addr,
 		    pair->stone->dsts[0]->len);
 #endif
-    } else if ((!(pair->proto & proto_eof) && ready_r	/* read */
+    } else if (((pair->proto & proto_select_r) && ready_r	/* read */
 #ifdef USE_SSL
 		&& !(pair->ssl_flag & sf_wb_on_r))
 	       || ((pair->ssl_flag & sf_rb_on_w)
@@ -5588,7 +5588,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		rPair->proto |= proto_select_r;
 	    }
 	}
-    } else if ((!(pair->proto & proto_shutdown)	&& ready_w) /* write */
+    } else if (((pair->proto & proto_select_w) && ready_w) /* write */
 #ifdef USE_SSL
 	       || ((pair->ssl_flag & sf_wb_on_r)
 		   && ready_r)	/* WANT_READ */
