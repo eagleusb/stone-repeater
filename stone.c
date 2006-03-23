@@ -561,9 +561,9 @@ const int proto_block_d =	  0x800000;	  /*              destination*/
 const int proto_ssl_s =		 0x1000000;	  /* SSL source */
 const int proto_ssl_d =		 0x2000000;	  /*     destination */
 						/* only for Pair */
-/*const int proto_ =		    0x1000;	  */
+const int proto_dirty =		    0x1000;	  /* ev must be updated */
 /*const int proto_ =		    0x2000;	  */
-/*const int proto_ =		    0x4000;	  */
+const int proto_noconnect =	    0x4000;	  /* no connection needed */
 const int proto_connect =	    0x8000;	  /* connection established */
 const int proto_first_r =	   0x10000;	  /* first read packet */
 const int proto_first_w =	   0x20000;	  /* first written packet */
@@ -2727,6 +2727,7 @@ int doSSL_accept(Pair *pair) {
 	pair->ssl = ssl;
     }
     pair->ssl_flag &= ~(sf_ab_on_r | sf_ab_on_w);
+    pair->proto |= proto_dirty;
     ret = SSL_accept(ssl);
     if (Debug > 7)
 	message(LOG_DEBUG, "%d TCP %d: SSL_accept ret=%d, state=%x, "
@@ -2742,7 +2743,8 @@ int doSSL_accept(Pair *pair) {
 	    }
 	    return -1;	/* unexpected EOF */
 	}
-	pair->proto |= proto_connect;	/* src & pair is connected */
+	/* src & pair is connected */
+	pair->proto |= (proto_connect | proto_dirty);
 	if (Debug > 3) {
 	    SSL_CTX *ctx = pair->stone->ssl_server->ctx;
 	    message(LOG_DEBUG, "%d TCP %d: SSL_accept succeeded "
@@ -2814,9 +2816,11 @@ int doSSL_connect(Pair *pair) {
 	pair->ssl = ssl;
     }
     pair->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
+    pair->proto |= proto_dirty;
     ret = SSL_connect(ssl);
     if (ret > 0) {	/* success */
-	pair->proto |= proto_connect;	/* pair & dst is connected */
+	/* pair & dst is connected */
+	pair->proto |= (proto_connect | proto_dirty);
 	if (Debug > 3) {
 	    SSL_CTX *ctx = pair->stone->ssl_client->ctx;
 	    message(LOG_DEBUG, "%d TCP %d: SSL_connect succeeded "
@@ -3078,6 +3082,10 @@ void freePair(Pair *pair) {
     }
     if (ValidSocket(sd)) {
 #ifdef USE_EPOLL
+	if (Debug > 6)
+	    message(LOG_DEBUG, "%d TCP %d: freePair "
+		    "epoll_ctl %d DEL %x",
+		    pair->stone->sd, sd, ePollFd, pair);
 	epoll_ctl(ePollFd, EPOLL_CTL_DEL, sd, NULL);
 #endif
 	closesocket(sd);
@@ -3121,14 +3129,15 @@ void connected(Pair *pair) {
 	if (doSSL_connect(pair) < 0) {
 	    /* SSL_connect fails, shutdown pairs */
 	    if (!(p->proto & proto_shutdown))
-		if (doshutdown(p, 2) >= 0) p->proto |= proto_shutdown;
-	    p->proto |= proto_close;
-	    pair->proto |= proto_close;
+		if (doshutdown(p, 2) >= 0)
+		    p->proto |= (proto_shutdown | proto_dirty);
+	    p->proto |= (proto_close | proto_dirty);
+	    pair->proto |= (proto_close | proto_dirty);
 	    return;
 	}
     } else
-#endif
-	pair->proto |= proto_connect;	/* pair & dst is connected */
+#endif	/* pair & dst is connected */
+	pair->proto |= (proto_connect | proto_dirty);
     /*
       SSL connection may not be established yet,
       but we can prepare for read/write
@@ -3137,24 +3146,28 @@ void connected(Pair *pair) {
 	if (Debug > 8)
 	    message(LOG_DEBUG, "%d TCP %d: waiting %d bytes to write",
 		    pair->stone->sd, pair->sd, pair->t->len);
-	if (!(pair->proto & proto_shutdown)) pair->proto |= proto_select_w;
+	if (!(pair->proto & proto_shutdown))
+	    pair->proto |= (proto_select_w | proto_dirty);
     } else if (!(pair->proto & proto_ohttp_d)) {
 	if (Debug > 8)
 	    message(LOG_DEBUG, "%d TCP %d: request to read 1st",
 		    pair->stone->sd, p->sd);
-	if (!(p->proto & proto_eof)) p->proto |= proto_select_r;
+	if (!(p->proto & proto_eof))
+	    p->proto |= (proto_select_r | proto_dirty);
     }
     if (!(p->proto & proto_ohttp_s)) {
 	if (p->t->len > 0) {
 	    if (Debug > 8)
 		message(LOG_DEBUG, "%d TCP %d: waiting %d bytes to write",
 			pair->stone->sd, p->sd, p->t->len);
-	    if (!(p->proto & proto_shutdown)) p->proto |= proto_select_w;
+	    if (!(p->proto & proto_shutdown))
+		p->proto |= (proto_select_w | proto_dirty);
 	} else {
 	    if (Debug > 8)
 		message(LOG_DEBUG, "%d TCP %d: request to read",
 			pair->stone->sd, pair->sd);
-	    if (!(pair->proto & proto_eof)) pair->proto |= proto_select_r;
+	    if (!(pair->proto & proto_eof))
+		pair->proto |= (proto_select_r | proto_dirty);
 	}
     }
 }
@@ -3302,7 +3315,7 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 	errno = WSAGetLastError();
 #endif
 	if (errno == EINPROGRESS) {
-	    p1->proto |= proto_conninprog;
+	    p1->proto |= (proto_conninprog | proto_dirty);
 	    if (Debug > 3)
 		message(LOG_DEBUG, "%d TCP %d: connection in progress",
 			p1->stone->sd, p1->sd);
@@ -3334,9 +3347,10 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 	|| (p1->proto & proto_close)
 	|| (p2->proto & proto_close)) {
 	if (!(p2->proto & proto_shutdown))
-	    if (doshutdown(p2, 2) >= 0) p2->proto |= proto_shutdown;
-	p2->proto |= proto_close;
-	p1->proto |= proto_close;
+	    if (doshutdown(p2, 2) >= 0)
+		p2->proto |= (proto_shutdown | proto_dirty);
+	p2->proto |= (proto_close | proto_dirty);
+	p1->proto |= (proto_close | proto_dirty);
 	return -1;
     }
     connected(p1);
@@ -3356,8 +3370,11 @@ int reqconn(Pair *pair,		/* request pair to connect to destination */
     if ((pair->proto & proto_command) == command_proxy
 	|| (pair->proto & proto_command) == command_health
 	|| (pair->proto & proto_command) == command_identd) {
-	if (p && !(p->proto & (proto_eof | proto_close)))
-	    p->proto |= proto_select_r;	/* must read request header */
+	pair->proto |= proto_noconnect;
+	if (p && !(p->proto & (proto_eof | proto_close))) {
+	    /* must read request header */
+	    p->proto |= (proto_select_r | proto_dirty);
+	}
 	return 0;
     }
     ret = doconnect(pair, dst, dstlen);
@@ -3401,12 +3418,50 @@ void asyncConn(Conn *conn) {
 	conn->lock = 0;
     }
     if (p1) {
+#ifdef USE_EPOLL
+	if (!(p1->proto & (proto_noconnect | proto_close))) {
+	    struct epoll_event ev;
+	    ev.events = EPOLLONESHOT;
+	    ev.data.ptr = p1;
+	    if (Debug > 6)
+		message(LOG_DEBUG, "%d TCP %d: asyncConn1 "
+			"epoll_ctl %d ADD %x",
+			p1->stone->sd, p1->sd, ePollFd, ev.data.ptr);
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: asyncConn1 "
+			"epoll_ctl %d ADD err=%d",
+			p1->stone->sd, p1->sd, ePollFd, errno);
+	    }
+	}
+	/* must be added to ePollFd before unset proto_thread */
+#endif
 	p1->proto &= ~proto_thread;
+	p1->proto |= proto_dirty;
 	p2 = p1->pair;
     } else {
 	p2 = NULL;
     }
-    if (p2) p2->proto &= ~proto_thread;
+    if (p2) {
+#ifdef USE_EPOLL
+	if (!(p2->proto & proto_close)) {
+	    struct epoll_event ev;
+	    ev.events = EPOLLONESHOT;
+	    ev.data.ptr = p2;
+	    if (Debug > 6)
+		message(LOG_DEBUG, "%d TCP %d: asyncConn2 "
+			"epoll_ctl %d ADD %x",
+			p2->stone->sd, p2->sd, ePollFd, ev.data.ptr);
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: asyncConn2 "
+			"epoll_ctl %d ADD err=%d",
+			p2->stone->sd, p2->sd, ePollFd, errno);
+	    }
+	}
+	/* must be added to ePollFd before unset proto_thread */
+#endif
+	p2->proto &= ~proto_thread;
+	p2->proto |= proto_dirty;
+    }
     ASYNC_END;
 }
 
@@ -3430,8 +3485,8 @@ int scanConns(void) {
 		!(p2->proto & proto_thread)) {
 		conn->lock = 1;		/* lock conn */
 		if (Debug > 4) message_conn(LOG_DEBUG, conn);
-		p1->proto |= proto_thread;
-		p2->proto |= proto_thread;
+		p1->proto |= (proto_thread | proto_dirty);
+		p2->proto |= (proto_thread | proto_dirty);
 		ASYNC(asyncConn, conn);
 	    }
 	} else {
@@ -3642,9 +3697,6 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 
 /* *stonep accept connection */
 Pair *doaccept(Stone *stonep) {
-#ifdef USE_EPOLL
-    struct epoll_event ev;
-#endif
     struct sockaddr_storage ss1, ss2;
     struct sockaddr *from = (struct sockaddr*)&ss1;
     socklen_t fromlen = sizeof(ss1);
@@ -3659,6 +3711,9 @@ Pair *doaccept(Stone *stonep) {
     XHosts *xhost;
     char ident[STRMAX+1];
     char fromstr[STRMAX*2+1];
+#ifdef USE_EPOLL
+    struct epoll_event ev;
+#endif
     nsd = INVALID_SOCKET;
     pair1 = pair2 = NULL;
     nsd = accept(stonep->sd, from, &fromlen);
@@ -3781,8 +3836,8 @@ Pair *doaccept(Stone *stonep) {
     if (stonep->proto & proto_ssl_s) {
 	if (doSSL_accept(pair1) < 0) goto error;
     } else
-#endif
-	pair1->proto |= proto_connect;	/* src & pair1 is connected */
+#endif	/* src & pair1 is connected */
+	pair1->proto |= (proto_connect | proto_dirty);
     /*
       SSL connection may not be established yet,
       but we can prepare the pair for connecting to the destination
@@ -3822,21 +3877,6 @@ Pair *doaccept(Stone *stonep) {
 		    stonep->sd, str, errno);
 	}
     }
-#ifdef USE_EPOLL
-    ev.events = EPOLLONESHOT;
-    ev.data.ptr = pair1;
-    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, pair1->sd, &ev) < 0) {
-	message(priority(pair1), "%d TCP %d: epoll_ctl err=%d",
-		pair1->stone->sd, pair1->sd, errno);
-	goto error;
-    }
-    ev.data.ptr = pair2;
-    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, pair2->sd, &ev) < 0) {
-	message(priority(pair2), "%d TCP %d: epoll_ctl err=%d",
-		pair2->stone->sd, pair2->sd, errno);
-	goto error;
-    }
-#endif
     pair2->pair = pair1;
     pair1->pair = pair2;
     return pair1;
@@ -3987,6 +4027,7 @@ int scanClose(void) {	/* scan close request */
 	sd = p2->sd;
 	if (p2->proto & (proto_select_r | proto_select_w)) {
 	    p2->proto &= ~(proto_select_r | proto_select_w);
+	    p2->proto |= proto_dirty;
 	    p2->count = REF_UNIT;
 	}
 #ifdef USE_SSL
@@ -4506,7 +4547,7 @@ int commOutput(Pair *pair, char *fmt, ...) {
 	ex->len += baseEncode(str, strlen(str),
 			       ex->bufmax-1 - (ex->start + ex->len));
     else ex->len += strlen(str);
-    p->proto |= proto_select_w;	/* need to write */
+    p->proto |= (proto_select_w | proto_dirty);	/* need to write */
     return ex->len;
 }
 
@@ -4603,7 +4644,7 @@ int doproxy(Pair *pair, char *host, char *serv) {
 		    pair->stone->sd, sd,
 		    addrport2str(name, namelen, 0, str, STRMAX, 0));
 	}
-	if (p) p->proto |= proto_first_w;
+	if (p) p->proto |= (proto_first_w | proto_dirty);
 	if (saComp(sa, name)) return 0;	/* same sa, so need not to connect */
 	reconnect = 1;
     }
@@ -4701,8 +4742,8 @@ int proxyCommon(Pair *pair, char *parm, int start) {
 	message(LOG_DEBUG, "proxy %d -> http://%s:%s",
 		(r ? r->sd : INVALID_SOCKET), host, port);
     }
-    pair->proto &= ~state_mask;
-    pair->proto |= 1;
+    pair->proto &= ~(proto_noconnect | state_mask);
+    pair->proto |= (proto_dirty | 1);
     return doproxy(pair, host, port);
 }
 
@@ -5233,7 +5274,7 @@ int first_read(Pair *pair) {
 		    message(LOG_DEBUG, "%d TCP %d: request to read, "
 			    "because response header from %d finished",
 			    pair->stone->sd, psd, sd);
-		p->proto |= proto_select_r;
+		p->proto |= (proto_select_r | proto_dirty);
 	    }
 	}
     }
@@ -5263,8 +5304,8 @@ int first_read(Pair *pair) {
 	if (Debug > 8) {
 	    message(LOG_DEBUG, "%d TCP %d: read more", pair->stone->sd, sd);
 	}
-	pair->proto |= proto_select_r;	/* read more */
-	if (len < 0) pair->proto |= proto_first_r;
+	pair->proto |= (proto_select_r | proto_dirty);	/* read more */
+	if (len < 0) pair->proto |= (proto_first_r | proto_dirty);
     }
     return len;
 }
@@ -5351,6 +5392,10 @@ void proto2fdset(Pair *pair, int isthread,
 		pev.events = EPOLLONESHOT;
 		pev.data.ptr = p;
 		epoll_ctl(epfd, EPOLL_CTL_MOD, psd, &pev);
+		if (Debug > 7)
+		    message(LOG_DEBUG, "%d TCP %d: proto2fdset2 "
+			    "epoll_ctl %d MOD %x events=%x",
+			    p->stone->sd, psd, epfd, pev.data.ptr, pev.events);
 #else
 		FD_CLR(psd, routp);
 		FD_CLR(psd, woutp);
@@ -5402,11 +5447,18 @@ void proto2fdset(Pair *pair, int isthread,
 	if (isset)
 #ifdef USE_EPOLL
 	    ev.events |= EPOLLPRI;
-	    epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	    FdSet(sd, eoutp);
 #endif
     }
+#ifdef USE_EPOLL
+    if (Debug > 7)
+	message(LOG_DEBUG, "%d TCP %d: proto2fdset "
+		"epoll_ctl %d MOD %x events=%x",
+		pair->stone->sd, sd, epfd, ev.data.ptr, ev.events);
+#endif
+    pair->proto &= ~proto_dirty;
 }
 
 int doReadWritePair(Pair *pair, Pair *opposite,
@@ -5426,21 +5478,22 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	int optval;
 	socklen_t optlen = sizeof(optval);
 	pair->proto &= ~proto_conninprog;
+	pair->proto |= proto_dirty;
 	if (getsockopt(sd, SOL_SOCKET, SO_ERROR,
 		       (char*)&optval, &optlen) < 0) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
 	    message(LOG_ERR, "%d TCP %d: getsockopt err=%d", stsd, sd, errno);
-	    pair->proto |= proto_close;
-	    opposite->proto |= proto_close;
+	    pair->proto |= (proto_close | proto_dirty);
+	    opposite->proto |= (proto_close | proto_dirty);
 	    return 0;	/* leave */
 	}
 	if (optval) {
 	    message(LOG_ERR, "%d TCP %d: connect getsockopt err=%d",
 		    stsd, sd, optval);
-	    pair->proto |= proto_close;
-	    opposite->proto |= proto_close;
+	    pair->proto |= (proto_close | proto_dirty);
+	    opposite->proto |= (proto_close | proto_dirty);
 	    return 0;	/* leave */
 	} else {	/* succeed in connecting */
 	    if (Debug > 4)
@@ -5479,25 +5532,28 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	       || ((pair->ssl_flag & sf_sb_on_w) && ready_w)
 	) {
 	pair->ssl_flag &= ~(sf_sb_on_r | sf_sb_on_w);
+	pair->proto |= proto_dirty;
 	doSSL_shutdown(pair, -1);
     } else if (((pair->ssl_flag & sf_cb_on_r) && ready_r)
 	       || ((pair->ssl_flag & sf_cb_on_w) && ready_w)) {
 	pair->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
+	pair->proto |= proto_dirty;
 	if (doSSL_connect(pair) < 0) {
 	    /* SSL_connect fails, shutdown pairs */
 	    if (opposite && !(opposite->proto & proto_shutdown))
 		if (doshutdown(opposite, 2) >= 0)
-		    opposite->proto |= proto_shutdown;
-	    opposite->proto |= proto_close;
-	    pair->proto |= proto_close;
+		    opposite->proto |= (proto_shutdown | proto_dirty);
+	    opposite->proto |= (proto_close | proto_dirty);
+	    pair->proto |= (proto_close | proto_dirty);
 	}
     } else if (((pair->ssl_flag & sf_ab_on_r) && ready_r)
 	       || ((pair->ssl_flag & sf_ab_on_w) && ready_w)) {
 	pair->ssl_flag &= ~(sf_ab_on_r | sf_ab_on_w);
+	pair->proto |= proto_dirty;
 	if (doSSL_accept(pair) < 0) {
 	    /* SSL_accept fails */
-	    pair->proto |= proto_close;
-	    opposite->proto |= proto_close;
+	    pair->proto |= (proto_close | proto_dirty);
+	    opposite->proto |= (proto_close | proto_dirty);
 	}
 	if (pair->proto & proto_connect)
 	    reqconn(opposite, &pair->stone->dsts[0]->addr,
@@ -5512,6 +5568,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		   )) {
 #ifdef USE_SSL
 	pair->ssl_flag &= ~sf_rb_on_w;
+	pair->proto |= proto_dirty;
 #endif
 	rPair = pair;
 	wPair = opposite;
@@ -5519,6 +5576,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	if (wPair) wsd = wPair->sd; else wsd = INVALID_SOCKET;
     read_pending:
 	rPair->proto &= ~proto_select_r;
+	rPair->proto |= proto_dirty;
 	rPair->count += REF_UNIT;
 	len = doread(rPair);
 	rPair->count -= REF_UNIT;
@@ -5538,15 +5596,17 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		  so reply SSL notify to rPair
 		  and send SSL notify and FIN to wPair...
 		*/
-		rPair->proto |= proto_eof;	/* no more to read */
+		/* no more to read */
+		rPair->proto |= (proto_eof | proto_dirty);
 		/*
 		  Don't send notify, or further SSL_write will fail
 		  if (rPair->ssl) doSSL_shutdown(rPair, 0);
 		*/
 		if (!(wPair->proto & proto_shutdown))
 		    if (doshutdown(wPair, 1) >= 0)	/* send FIN */
-			wPair->proto |= proto_shutdown;
+			wPair->proto |= (proto_shutdown | proto_dirty);
 		wPair->proto &= ~proto_select_w;
+		wPair->proto |= proto_dirty;
 	    } else {
 		/*
 		  error, already shutdowned, or bi-directional EOF,
@@ -5559,12 +5619,14 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		    if (doshutdown(rPair, 2) >= 0)
 			flag = proto_shutdown;
 		rPair->proto &= ~proto_select_w;
+		rPair->proto |= proto_dirty;
 		setclose(rPair, (proto_eof | flag));
 		flag = 0;
 		if (!(wPair->proto & proto_shutdown))
 		    if (doshutdown(wPair, 2) >= 0)
 			flag = proto_shutdown;
 		wPair->proto &= ~proto_select_w;
+		wPair->proto |= proto_dirty;
 		setclose(wPair, flag);
 	    }
 	} else {
@@ -5577,15 +5639,15 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		    && !(wPair->proto & (proto_shutdown | proto_close))
 		    && !(rPair->proto & proto_close)) {
 		    /* (wPair->proto & proto_eof) may be true */
-		    wPair->proto |= proto_select_w;
+		    wPair->proto |= (proto_select_w | proto_dirty);
 #ifdef ALWAYS_BUFFERING
-		    rPair->proto |= proto_select_r;
+		    rPair->proto |= (proto_select_r | proto_dirty);
 #endif
 		} else {
 		    return 0;	/* leave */
 		}
 	    } else {	/* EINTR */
-		rPair->proto |= proto_select_r;
+		rPair->proto |= (proto_select_r | proto_dirty);
 	    }
 	}
     } else if (((pair->proto & proto_select_w) && ready_w) /* write */
@@ -5596,12 +5658,14 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	) {
 #ifdef USE_SSL
 	pair->ssl_flag &= ~sf_wb_on_r;
+	pair->proto |= proto_dirty;
 #endif
 	wPair = pair;
 	rPair = opposite;
 	wsd = sd;
 	if (rPair) rsd = rPair->sd; else rsd = INVALID_SOCKET;
 	wPair->proto &= ~proto_select_w;
+	wPair->proto |= proto_dirty;
 	if (((wPair->proto & proto_command) == command_ihead) ||
 	    ((wPair->proto & proto_command) == command_iheads)) {
 	    int state = (wPair->proto & state_mask);
@@ -5619,6 +5683,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		&& !(rPair->proto & proto_shutdown))
 		if (doshutdown(rPair, 2) >= 0) flag = proto_shutdown;
 	    rPair->proto &= ~proto_select_w;
+	    rPair->proto |= proto_dirty;
 	    setclose(rPair, flag);
 	    flag = 0;
 	    if (!(wPair->proto & proto_shutdown))
@@ -5631,6 +5696,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	    if (ex->len <= 0) {	/* all written */
 		if (wPair->proto & proto_first_w) {
 		    wPair->proto &= ~proto_first_w;
+		    wPair->proto |= proto_dirty;
 		    if (rPair && ValidSocket(rsd)
 			&& ((rPair->proto & proto_command)
 			    == command_proxy)
@@ -5640,7 +5706,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 			    message(LOG_DEBUG,
 				    "%d TCP %d: reconnect proxy",
 				    stsd, wPair->sd);
-			wPair->proto |= proto_first_r;
+			wPair->proto |= (proto_first_r | proto_dirty);
 		    }
 		}
 		if (rPair && ValidSocket(rsd)
@@ -5667,18 +5733,18 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 			goto read_pending;
 		    }
 #endif
-		    rPair->proto |= proto_select_r;
+		    rPair->proto |= (proto_select_r | proto_dirty);
 		} else {
 		    return 0;	/* leave */
 		}
 	    } else {	/* EINTR */
-		wPair->proto |= proto_select_w;
+		wPair->proto |= (proto_select_w | proto_dirty);
 	    }
 	}
     } else if (error) {
 	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: error", stsd, sd);
-	pair->proto |= proto_close;
-	opposite->proto |= proto_close;
+	pair->proto |= (proto_close | proto_dirty);
+	opposite->proto |= (proto_close | proto_dirty);
 	return 0;	/* leave */
     }
     return ret;
@@ -5717,9 +5783,14 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	struct epoll_event ev;
 	ev.events = EPOLLONESHOT;
 	ev.data.ptr = p[i];
+	if (Debug > 6)
+	    message(LOG_DEBUG, "%d TCP %d: doReadWrite%d "
+		    "epoll_ctl %d ADD %x",
+		    stsd, p[i]->sd, i, epfd, ev.data.ptr);
 	if (epoll_ctl(epfd, EPOLL_CTL_ADD, p[i]->sd, &ev) < 0) {
-	    message(LOG_ERR, "%d TCP %d: epoll_ctl err=%d",
-		    stsd, p[i]->sd, errno);
+	    message(LOG_ERR, "%d TCP %d: doReadWrite%d "
+		    "epoll_ctl %d err=%d",
+		    stsd, p[i]->sd, i, epfd, errno);
 	    goto leave;
 	}
     }
@@ -5732,7 +5803,8 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 #ifdef USE_EPOLL
 	struct epoll_event evs[2];
 	int nev;
-	for (i=0; i < npairs; i++) proto2fdset(p[i], 1, epfd);
+	for (i=0; i < npairs; i++)
+	    if ((p[i]->proto & proto_dirty)) proto2fdset(p[i], 1, epfd);
 	nev = epoll_wait(epfd, evs, 2, TICK_SELECT / 1000);
 	if (nev <= 0) goto leave;
 #else
@@ -5777,7 +5849,25 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     close(epfd);
 #endif
     for (i=0; i < npairs; i++) {
+#ifdef USE_EPOLL
+	if (!(p[i]->proto & (proto_noconnect | proto_close))) {
+	    struct epoll_event ev;
+	    ev.events = EPOLLONESHOT;
+	    ev.data.ptr = p[i];
+	    if (Debug > 6)
+		message(LOG_DEBUG, "%d TCP %d: doReadWrite%d "
+			"epoll_ctl %d ADD %x",
+			stsd, p[i]->sd, i, ePollFd, ev.data.ptr);
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p[i]->sd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: doReadWrite%d "
+			"epoll_ctl %d ADD err=%d",
+			stsd, p[i]->sd, i, ePollFd, errno);
+	    }
+	}
+	/* must be added to ePollFd before unset proto_thread */
+#endif
 	p[i]->proto &= ~proto_thread;
+	p[i]->proto |= proto_dirty;
 	p[i]->count -= REF_UNIT;
     }
     if (Debug > 8) message(LOG_DEBUG, "%d TCP %d, %d: doReadWrite end", stsd,
@@ -5822,8 +5912,8 @@ void asyncAccept(Stone *stone) {
 	    goto exit;
 	}
     }
-    p1->proto |= proto_thread;
-    p2->proto |= proto_thread;
+    p1->proto |= (proto_thread | proto_dirty);
+    p2->proto |= (proto_thread | proto_dirty);
     waitMutex(PairMutex);
     p2->next = pairs.next;	/* insert pair */
     if (pairs.next != NULL) pairs.next->prev = p2;
@@ -5837,8 +5927,39 @@ void asyncAccept(Stone *stone) {
     }
     if (ret > 0) doReadWrite(p1);
     else {
+#ifdef USE_EPOLL
+	struct epoll_event ev;
+	ev.events = EPOLLONESHOT;
+	if (!(p1->proto & proto_close)) {
+	    ev.data.ptr = p1;
+	    if (Debug > 6)
+		message(LOG_DEBUG, "%d TCP %d: asyncAccept1 "
+			"epoll_ctl %d ADD %x",
+			stone->sd, p1->sd, ePollFd, ev.data.ptr);
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: asyncAccept1 "
+			"epoll_ctl %d ADD err=%d",
+			stone->sd, p1->sd, ePollFd, errno);
+	    }
+	}
+	if (!(p2->proto & (proto_noconnect | proto_close))) {
+	    ev.data.ptr = p2;
+	    if (Debug > 6)
+		message(LOG_DEBUG, "%d TCP %d: asyncAccept2 "
+			"epoll_ctl %d ADD %x",
+			stone->sd, p2->sd, ePollFd, ev.data.ptr);
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: asyncAccept2 "
+			"epoll_ctl %d ADD err=%d",
+			stone->sd, p2->sd, ePollFd, errno);
+	    }
+	}
+	/* must be added to ePollFd before unset proto_thread */
+#endif
 	p1->proto &= ~proto_thread;
 	p2->proto &= ~proto_thread;
+	p1->proto |= proto_dirty;
+	p2->proto |= proto_dirty;
     }
  exit:
     ASYNC_END;
@@ -5922,6 +6043,7 @@ void asyncClose(Pair *pair) {
 #endif
     setclose(pair, proto_shutdown);
     pair->proto &= ~proto_thread;
+    pair->proto |= proto_dirty;
     ASYNC_END;
 }
 
@@ -5937,8 +6059,17 @@ int doPair(Pair *pair) {
     if (InvalidSocket(psd)) return 0;
     pair->count += REF_UNIT;
     p->count += REF_UNIT;
-    pair->proto |= proto_thread;
-    p->proto |= proto_thread;
+    pair->proto |= (proto_thread | proto_dirty);
+    p->proto |= (proto_thread | proto_dirty);
+#ifdef USE_EPOLL
+    /* must be set proto_thread before delete from ePollFd */
+    if (Debug > 6)
+	message(LOG_DEBUG, "%d TCP %d: %d doPair "
+		    "epoll_ctl %d DEL %x %x",
+		    pair->stone->sd, pair->sd, p->sd, ePollFd, pair, p);
+    epoll_ctl(ePollFd, EPOLL_CTL_DEL, pair->sd, NULL);
+    epoll_ctl(ePollFd, EPOLL_CTL_DEL, p->sd, NULL);
+#endif
     if ((pair->proto & proto_command) == command_source) {
 	ASYNC(asyncReadWrite, pair);
     } else {
@@ -5980,7 +6111,15 @@ int scanPairs(
 		    message_pair(LOG_DEBUG, pair);
 		}
 		if (pair->count > 0) pair->count -= REF_UNIT;
-		pair->proto |= proto_thread;
+		pair->proto |= (proto_thread | proto_dirty);
+#ifdef USE_EPOLL
+		/* must be set proto_thread before delete from ePollFd */
+		if (Debug > 6)
+		    message(LOG_DEBUG, "%d TCP %d: scanPairs "
+			    "epoll_ctl %d DEL %x",
+			    pair->stone->sd, sd, ePollFd, pair);
+		epoll_ctl(ePollFd, EPOLL_CTL_DEL, pair->sd, NULL);
+#endif
 		ASYNC(asyncClose, pair);
 	    }
 	}
@@ -6381,7 +6520,7 @@ void repeater(void) {
     int timeout;
     struct epoll_event evs[EVSMAX];
     for (pair=pairs.next; pair != NULL; pair=pair->next)
-	if (!(pair->proto & proto_thread))
+	if (!(pair->proto & proto_thread) && (pair->proto & proto_dirty))
 	    proto2fdset(pair, 0, ePollFd);
     if (conns.next || trash.next || spin > 0 || AsyncCount > 0) {
 	if (AsyncCount == 0 && spin > 0) spin--;
@@ -6437,8 +6576,13 @@ void repeater(void) {
 	    pthread_t thread;
 	    int err;
 #endif
-	    int common = *(int*)evs[i].data.ptr;
-	    int other = (evs[i].events & ~(EPOLLIN | EPOLLPRI | EPOLLOUT));
+	    int common;
+	    int other;
+	    if (Debug > 8)
+		message(LOG_DEBUG, "epoll main: evs[%d].data=%x",
+			i, evs[i].data.ptr);
+	    common = *(int*)evs[i].data.ptr;
+	    other = (evs[i].events & ~(EPOLLIN | EPOLLPRI | EPOLLOUT));
 	    switch(common & type_mask) {
 	    case type_stone:
 		if (Debug > 10 || (other && Debug > 2))
@@ -6931,9 +7075,6 @@ Stone *mkstone(
     stonep->proto = proto;
     stonep->from = ConnectFrom;
     if (!reusestone(stonep)) {	/* recycle stone */
-#ifdef USE_EPOLL
-	struct epoll_event ev;
-#endif
 	stonep->sd = socket(sa->sa_family, satype, saproto);
 	if (InvalidSocket(stonep->sd)) {
 #ifdef WINDOWS
@@ -6992,14 +7133,6 @@ Stone *mkstone(
 		}
 	    }
 	}	/* !DryRun */
-#ifdef USE_EPOLL
-	ev.events = EPOLLONESHOT;
-	ev.data.ptr = stonep;
-	if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, stonep->sd, &ev) < 0) {
-	    message(LOG_ERR, "stone %d: epoll_ctl err=%d", stonep->sd, errno);
-	    exit(1);
-	}
-#endif
     }
 #ifdef USE_SSL
     if (proto & proto_ssl_s) {	/* server side SSL */
@@ -8341,17 +8474,12 @@ void doargs(int argc, int i, char *argv[]) {
 	stones = stone;
 	proto = sproto = dproto = 0;	/* default: TCP */
     }
+#ifndef USE_EPOLL
     for (stone=stones; stone != NULL; stone=stone->next) {
-#ifdef USE_EPOLL
-	struct epoll_event ev;
-	ev.events = (EPOLLIN | EPOLLPRI | EPOLLONESHOT);
-	ev.data.ptr = stone;
-	epoll_ctl(ePollFd, EPOLL_CTL_MOD, stone->sd, &ev);
-#else
 	FdSet(stone->sd, &rin);
 	FdSet(stone->sd, &ein);
-#endif
     }
+#endif
 }
 
 #ifdef FD_SET_BUG
@@ -8578,13 +8706,7 @@ void initialize(int argc, char *argv[]) {
     trash.next = NULL;
     conns.next = NULL;
     origins.next = NULL;
-#ifdef USE_EPOLL
-    ePollFd = epoll_create(BACKLOG_MAX);
-    if (ePollFd < 0) {
-	message(LOG_CRIT, "Can't create epoll err=%d", errno);
-	exit(1);
-    }
-#else
+#ifndef USE_EPOLL
 #ifdef FD_SET_BUG
     checkFdSetBug();
 #endif
@@ -8744,6 +8866,29 @@ void initialize(int argc, char *argv[]) {
     }
     time(&lastEstablished);
     lastReadWrite = lastEstablished;
+#ifdef USE_EPOLL
+    /* ePollFd must be created in each process */
+    ePollFd = epoll_create(BACKLOG_MAX);
+    if (ePollFd < 0) {
+	message(LOG_CRIT, "Can't create epoll err=%d", errno);
+	exit(1);
+    } else {
+	Stone *stone;
+	for (stone=stones; stone != NULL; stone=stone->next) {
+	    struct epoll_event ev;
+	    ev.events = (EPOLLIN | EPOLLPRI | EPOLLONESHOT);
+	    ev.data.ptr = stone;
+	    if (Debug > 6)
+		message(LOG_DEBUG, "stone %d: epoll_ctl %d ADD %x",
+			stone->sd, ePollFd, ev.data.ptr);
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, stone->sd, &ev) < 0) {
+		message(LOG_CRIT, "stone %d: epoll_ctl %d ADD err=%d",
+			stone->sd, ePollFd, errno);
+		exit(1);
+	    }
+	}
+    }
+#endif
 }
 
 #ifdef NT_SERVICE
