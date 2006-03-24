@@ -82,6 +82,8 @@
  * -DNO_SOCKLEN_T without socklen_t
  * -DNO_ADDRINFO  without getaddrinfo
  * -DNO_FAMILY_T  without sa_family_t
+ * -DADDRCACHE    cache address used in proxy
+ * -DUSE_EPOLL	  use epoll(4) (Linux)
  * -DPTHREAD      use Posix Thread
  * -DPRCTL	  use prctl(2) - operations on a process
  * -DOS2	  OS/2 with EMX
@@ -105,6 +107,7 @@ typedef void (*FuncPtr)(void*);
 
 #ifdef WINDOWS
 #define FD_SETSIZE	4096
+#define	ADDRCACHE
 #include <process.h>
 #include <ws2tcpip.h>
 #include <time.h>
@@ -659,9 +662,14 @@ int NForks = 0;
 pid_t *Pid;
 #endif
 int Debug = 0;		/* debugging level */
+
+#ifdef ADDRCACHE
+#define	CACHE_TIMEOUT	180	/* 3 min */
+int AddrCacheSize = 0;
+#endif
 #ifdef PTHREAD
 pthread_mutex_t FastMutex = PTHREAD_MUTEX_INITIALIZER;
-char FastMutexs[10];
+char FastMutexs[11];
 #define PairMutex	0
 #define ConnMutex	1
 #define OrigMutex	2
@@ -674,16 +682,25 @@ char FastMutexs[10];
 #define ExBufMutex	7
 #define FPairMutex	8
 #define	PkBufMutex	9
+#ifdef ADDRCACHE
+#define	HashMutex	10
+#endif
 #endif
 #ifdef WINDOWS
 HANDLE PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HANDLE FdRinMutex, FdWinMutex, FdEinMutex;
 HANDLE ExBufMutex, FPairMutex, PkBufMutex;
+#ifdef ADDRCACHE
+HANDLE HashMutex;
+#endif
 #endif
 #ifdef OS2
 HMTX PairMutex, ConnMutex, OrigMutex, AsyncMutex;
 HMTX FdRinMutex, FdWinMutex, FdEinMutex;
 HMTX ExBufMutex, FPairMutex, PkBufMutex;
+#ifdef ADDRCACHE
+HMTX HashMutex;
+#endif
 #endif
 
 #ifdef NT_SERVICE
@@ -4563,6 +4580,74 @@ static char *comm_match(char *buf, char *str) {
     return buf;
 }
 
+#ifdef ADDRCACHE
+unsigned int str2hash(char *str) {
+    unsigned int hash = 0;
+    while (*str) {
+	hash  = hash * 7 + *str;
+	str++;
+    }
+    return hash;
+}
+
+struct hashtable {
+    char *host;
+    char *serv;
+    time_t clock;
+    int len;
+    struct sockaddr_storage ss;
+} *hashtable;
+
+int addrcache(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp) {
+    struct hashtable *t;
+    time_t now;
+    time(&now);
+    if (!hashtable) {
+	hashtable = malloc(AddrCacheSize * sizeof(struct hashtable));
+	if (!hashtable) {
+	    message(LOG_ERR, "addrcache: out of memory");
+	    return host2sa(name, serv, sa, salenp, NULL, NULL, 0);
+	}
+	bzero(hashtable, AddrCacheSize * sizeof(struct hashtable));
+    }
+    t = &hashtable[(str2hash(name) ^ str2hash(serv)) % AddrCacheSize];
+    waitMutex(HashMutex);
+    if (t->host && strcmp(t->host, name) == 0
+	&& t->serv && strcmp(t->serv, serv) == 0
+	&& t->len <= *salenp
+	&& now - t->clock < CACHE_TIMEOUT) {
+	bcopy(&t->ss, sa, t->len);
+	*salenp = t->len;
+	freeMutex(HashMutex);
+	if (Debug > 5) message(LOG_DEBUG, "addrcache hit: %s:%s %d",
+			       name, serv, now - t->clock);
+	return 1;
+    }
+    freeMutex(HashMutex);
+    if (Debug > 9) message(LOG_DEBUG, "addrcache %s %s", name, serv);
+    if (!host2sa(name, serv, sa, salenp, NULL, NULL, 0)) {
+	return 0;
+    }
+    waitMutex(HashMutex);
+    if ((t->host && strcmp(t->host, name) != 0) ||
+	(t->serv && strcmp(t->serv, serv) != 0) ||
+	(t->len > *salenp)) {
+	free(t->host);
+	free(t->serv);
+	t->host = NULL;
+	t->serv = NULL;
+	t->len = sizeof(t->ss);
+    }
+    if (!t->host) t->host = strdup(name);
+    if (!t->serv) t->serv = strdup(serv);
+    bcopy(sa, &t->ss, *salenp);
+    t->len = *salenp;
+    t->clock = now;
+    freeMutex(HashMutex);
+    return 1;
+}
+#endif
+
 int doproxy(Pair *pair, char *host, char *serv) {
     SOCKET sd = pair->sd;
     int reconnect = 0;
@@ -4583,9 +4668,12 @@ int doproxy(Pair *pair, char *host, char *serv) {
     } else {
 	sa->sa_family = AF_UNSPEC;
     }
-    if (!host2sa(host, serv, sa, &salen, NULL, NULL, 0)) {
-	return -1;
-    }
+#ifdef ADDRCACHE
+    if (AddrCacheSize > 0) {
+	if (!addrcache(host, serv, sa, &salen)) return -1;
+    } else
+#endif
+	if (!host2sa(host, serv, sa, &salen, NULL, NULL, 0)) return -1;
     if (islocalhost(sa)) {
 	TimeLog *log = pair->log;
 	pair->log = NULL;
@@ -4636,7 +4724,8 @@ int doproxy(Pair *pair, char *host, char *serv) {
 	    return -1;
 	}
     }
-    if (getpeername(sd, name, &namelen) >= 0) {	/* reconnect proxy */
+    if ((pair->proto & proto_connect) && !(pair->proto & proto_close)
+	  && getpeername(sd, name, &namelen) >= 0) {	/* reconnect proxy */
 	Pair *p = pair->pair;
 	if (Debug > 7) {
 	    char str[STRMAX+1];
@@ -7271,6 +7360,9 @@ void help(char *com, char *sub) {
 "                        ; use <backup>:<port>, if check failed\n"
 "      -B <host>:<port>... --\n"
 "                        ; load balancing hosts\n"
+#ifdef ADDRCACHE
+"      -H <size>         ; cache addresses used in proxy\n"
+#endif
 "      -I <host>         ; local end of its connections to\n"
 #ifndef NO_SETUID
 "      -o <n>            ; set uid to <n>\n"
@@ -8069,6 +8161,11 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
     case 'B':
 	argi = lbsopts(argc, argi, argv);
 	break;
+#ifdef ADDRCACHE
+    case 'H':
+	AddrCacheSize = atoi(argv[++argi]);
+	break;
+#endif
     case 'I':
 	++argi;
 	if (!argv[argi] || argv[argi][0] == '\0') {
@@ -8795,7 +8892,10 @@ void initialize(int argc, char *argv[]) {
 #endif
 	!(ExBufMutex=CreateMutex(NULL, FALSE, NULL)) ||
 	!(FPairMutex=CreateMutex(NULL, FALSE, NULL)) ||
-	!(PkBufMutex=CreateMutex(NULL, FALSE, NULL))) {
+#ifdef ADDRCACHE
+	!(HashMutex=CreateMutex(NULL, FALSE, NULL)) ||
+#endif
+	!(PkBufMutex=CreateMutex(NULL, FALSE, NULL)) ) {
 	message(LOG_ERR, "Can't create Mutex err=%d", GetLastError());
     }
 #endif
@@ -8812,7 +8912,10 @@ void initialize(int argc, char *argv[]) {
 #endif
 	(j=DosCreateMutexSem(NULL, &ExBufMutex, 0, FALSE)) ||
 	(j=DosCreateMutexSem(NULL, &FPairMutex, 0, FALSE)) ||
-	(j=DosCreateMutexSem(NULL, &PkBufMutex, 0, FALSE))) {
+#ifdef ADDRCACHE
+	(j=DosCreateMutexSem(NULL, &HashMutex, 0, FALSE)) ||
+#endif
+	(j=DosCreateMutexSem(NULL, &PkBufMutex, 0, FALSE)) ) {
 	message(LOG_ERR, "Can't create Mutex err=%d", j);
     }
 #endif
