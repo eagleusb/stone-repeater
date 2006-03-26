@@ -107,7 +107,7 @@ typedef void (*FuncPtr)(void*);
 
 #ifdef WINDOWS
 #define FD_SETSIZE	4096
-#define	ADDRCACHE
+#define	NO_GETTIMEOFDAY
 #include <process.h>
 #include <ws2tcpip.h>
 #include <time.h>
@@ -128,8 +128,8 @@ typedef void (*FuncPtr)(void*);
 #define bzero(b,n)	memset(b,0,n)
 #define	usleep(usec)	Sleep(usec)
 #define ASYNC(func,arg)	\
-    waitMutex(AsyncMutex);\
     if (Debug > 7) message(LOG_DEBUG,"ASYNC: %d",AsyncCount);\
+    waitMutex(AsyncMutex);\
     AsyncCount++;\
     freeMutex(AsyncMutex);\
     if (_beginthread((FuncPtr)func,0,arg) < 0) {\
@@ -145,8 +145,8 @@ typedef void (*FuncPtr)(void*);
 #include <os2.h>
 #define NO_SYSLOG
 #define ASYNC(func,arg)	\
-    waitMutex(AsyncMutex);\
     if (Debug > 7) message(LOG_DEBUG,"ASYNC: %d",AsyncCount);\
+    waitMutex(AsyncMutex);\
     AsyncCount++;\
     freeMutex(AsyncMutex);\
     if (_beginthread((FuncPtr)func,NULL,32768,arg) < 0) {\
@@ -159,8 +159,8 @@ typedef void (*FuncPtr)(void*);
 pthread_attr_t thread_attr;
 typedef void *(*aync_start_routine) (void *);
 #define ASYNC(func,arg)	\
-    waitMutex(AsyncMutex);\
     if (Debug > 7) message(LOG_DEBUG,"ASYNC: %d",AsyncCount);\
+    waitMutex(AsyncMutex);\
     AsyncCount++;\
     freeMutex(AsyncMutex);\
     err=pthread_create(&thread,&thread_attr,(aync_start_routine)func,arg);\
@@ -225,8 +225,8 @@ int FdSetBug = 0;
 #define ASYNC_BEGIN	\
     if (Debug > 7) message(LOG_DEBUG,"ASYNC_BEGIN: %d",AsyncCount)
 #define _ASYNC_END	\
-    waitMutex(AsyncMutex);\
     if (Debug > 7) message(LOG_DEBUG,"ASYNC_END: %d",AsyncCount);\
+    waitMutex(AsyncMutex);\
     AsyncCount--;\
     freeMutex(AsyncMutex)
 #endif
@@ -758,7 +758,7 @@ char *rindex(char *p, int ch) {
 }
 #endif
 
-char *strntime(char *str, int len, time_t *clock) {
+char *strntime(char *str, int len, time_t *clock, long micro) {
     char *p, *q;
     int i;
     p = ctime(clock);
@@ -769,7 +769,12 @@ char *strntime(char *str, int len, time_t *clock) {
 	i = 0;
 	len--;
 	while (p <= q && i < len) str[i++] = *p++;
-	str[i] = '\0';
+	if (micro >= 0) {
+	    i--;
+	    snprintf(str+i, len-i, ".%06ld ", micro);
+	} else {
+	    str[i] = '\0';
+	}
     } else {
 	snprintf(str, len, "%lu ", *clock);
     }
@@ -779,16 +784,35 @@ char *strntime(char *str, int len, time_t *clock) {
 void message(int pri, char *fmt, ...) {
     char str[LONGSTRMAX+1];
     int pos = 0;
+    unsigned long thid = 0;
     va_list ap;
 #ifndef NO_SYSLOG
     if (!Syslog)
 #endif
     {
+#ifdef NO_GETTIMEOFDAY
 	time_t clock;
 	time(&clock);
-	strntime(str+pos, LONGSTRMAX-pos, &clock);
+	strntime(str+pos, LONGSTRMAX-pos, &clock, -1);
+#else
+	struct timeval tv;
+	if (gettimeofday(&tv, NULL) >= 0) {
+	    strntime(str+pos, LONGSTRMAX-pos, &tv.tv_sec, tv.tv_usec);
+	}
+#endif
 	str[LONGSTRMAX] = '\0';
 	pos = strlen(str);
+    }
+#ifdef WINDOWS
+    thid = (unsigned long)GetCurrentThreadId();
+#else
+#ifdef PTHREAD
+    thid = (unsigned long)pthread_self();
+#endif
+#endif
+    if (thid) {
+	snprintf(str+pos, LONGSTRMAX-pos, "%lu ", thid);
+	pos += strlen(str+pos);
     }
     va_start(ap, fmt);
     vsnprintf(str+pos, LONGSTRMAX-pos, fmt, ap);
@@ -798,21 +822,7 @@ void message(int pri, char *fmt, ...) {
     if (Syslog) {
 	if (Syslog == 1
 	    || pri != LOG_DEBUG) syslog(pri, "%s", str);
-	if (Syslog > 1) {	/* daemontools */
-	    unsigned long thid = 0;
-#ifdef WINDOWS
-	    thid = (unsigned long)GetCurrentThreadId();
-#else
-#ifdef PTHREAD
-	    thid = (unsigned long)pthread_self();
-#endif
-#endif
-	    if (thid) {
-		fprintf(stdout, "%lu %s\n", thid, str);
-	    } else {
-		fprintf(stdout, "%s\n", str);
-	    }
-	}
+	if (Syslog > 1) fprintf(stdout, "%s\n", str);	/* daemontools */
     } else
 #else
 #ifdef NT_SERVICE
@@ -825,7 +835,7 @@ void message(int pri, char *fmt, ...) {
     } else
 #endif
 #endif
-    if (LogFp) fprintf(LogFp, "%s\n", str);
+	if (LogFp) fprintf(LogFp, "%s\n", str);
 }
 
 void message_time(Pair *pair, int pri, char *fmt, ...) {
@@ -1613,7 +1623,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
     }
     ev.events = (EPOLLOUT | EPOLLONESHOT);
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
-	message(LOG_ERR, "health check: epoll_ctl err=%d", errno);
+	message(LOG_ERR, "health check: epoll_ctl ADD err=%d", errno);
 	close(epfd);
 	return 1;	/* I can't tell the master is healthy or not */
     }
@@ -2166,7 +2176,7 @@ void message_origin(int pri, Origin *origin) {
     int i;
     char str[LONGSTRMAX+1];
     str[LONGSTRMAX] = '\0';
-    strntime(str, LONGSTRMAX, &origin->clock);
+    strntime(str, LONGSTRMAX, &origin->clock, -1);
     i = strlen(str);
     if (ValidSocket(origin->sd)) {
 	if (getsockname(origin->sd, name, &namelen) < 0) {
@@ -2343,7 +2353,8 @@ static Origin *getOrigins(struct sockaddr *from, socklen_t fromlen,
     ev.events = EPOLLONESHOT;
     ev.data.ptr = origin;
     if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, sd, &ev) < 0) {
-	message(LOG_ERR, "%d UDP %d: epoll_ctl err=%d", stonep->sd, sd, errno);
+	message(LOG_ERR, "%d UDP %d: epoll_ctl ADD err=%d",
+		stonep->sd, sd, errno);
 	freeOrigin(origin);
 	return NULL;
     }
@@ -2373,6 +2384,72 @@ void docloseUDP(Origin *origin, int wait) {
     }
 #endif
     origin->lock = -1;	/* request to close */
+}
+
+/* *stonep repeat UDP connection */
+void doUDP(Stone *stonep, int ismain) {
+#ifdef USE_EPOLL
+    struct epoll_event ev;
+#endif
+    struct sockaddr_storage ss;
+    struct sockaddr *from = (struct sockaddr*)&ss;
+    socklen_t fromlen = sizeof(ss);
+    SOCKET dsd;
+    int len;
+    Origin *origin;
+    char addrport[STRMAX+1];
+    PktBuf *pb = NULL;
+    XHosts *xhost = NULL;
+    if (Debug > 8) message(LOG_DEBUG, "doUDP");
+    pb = getPktBuf();
+    if (!pb) goto end;
+    len = recvUDP(stonep->sd, from, &fromlen, pb);
+    if (ismain) {
+#ifdef USE_EPOLL
+	ev.events = (EPOLLIN | EPOLLONESHOT);
+	ev.data.ptr = stonep;
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, stonep->sd, &ev);
+#else
+	waitMutex(FdRinMutex);
+	FdSet(stonep->sd, &rin);
+	freeMutex(FdRinMutex);
+#endif
+    }
+    if (len <= 0) goto end;	/* drop */
+    xhost = checkXhost(stonep->xhosts, from, fromlen);
+    if (!xhost) {
+	addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
+		     addrport, STRMAX, 0);
+	addrport[STRMAX] = '\0';
+	message(LOG_WARNING, "stone %d: recv UDP denied: from %s",
+		stonep->sd, addrport);
+	goto end;
+    }
+    origin = getOrigins(from, fromlen, stonep);
+    if (!origin) goto end;
+    origin->xhost = xhost;
+    dsd = origin->sd;
+    time(&origin->clock);
+#ifdef USE_EPOLL
+    ev.events = (EPOLLIN | EPOLLONESHOT);
+    ev.data.ptr = origin;
+    epoll_ctl(ePollFd, EPOLL_CTL_MOD, origin->sd, &ev);
+#else
+    waitMutex(FdRinMutex);
+    waitMutex(FdEinMutex);
+    FdSet(origin->sd, &rin);
+    FdSet(origin->sd, &ein);
+    freeMutex(FdEinMutex);
+    freeMutex(FdRinMutex);
+#endif
+    if (Debug > 4)
+	message(LOG_DEBUG, "UDP %d: send %d bytes to %d",
+		stonep->sd, len, dsd);
+    if (sendUDP(dsd, &stonep->dsts[0]->addr, stonep->dsts[0]->len,
+		len, pb, xhost) <= 0)
+	docloseUDP(origin, 1);	/* wait mutex */
+ end:
+    if (pb) ungetPktBuf(pb);
 }
 
 void asyncOrg(Origin *origin) {
@@ -2509,72 +2586,6 @@ int scanUDP(
     }
     return 1;
 }
-
-/* *stonep repeat UDP connection */
-void asyncUDP(Stone *stonep) {
-#ifdef USE_EPOLL
-    struct epoll_event ev;
-#endif
-    struct sockaddr_storage ss;
-    struct sockaddr *from = (struct sockaddr*)&ss;
-    socklen_t fromlen = sizeof(ss);
-    SOCKET dsd;
-    int len;
-    Origin *origin;
-    char addrport[STRMAX+1];
-    PktBuf *pb = NULL;
-    XHosts *xhost = NULL;
-    ASYNC_BEGIN;
-    if (Debug > 8) message(LOG_DEBUG, "asyncUDP");
-    pb = getPktBuf();
-    if (!pb) goto end;
-    len = recvUDP(stonep->sd, from, &fromlen, pb);
-#ifdef USE_EPOLL
-    ev.events = (EPOLLIN | EPOLLONESHOT);
-    ev.data.ptr = stonep;
-    epoll_ctl(ePollFd, EPOLL_CTL_MOD, stonep->sd, &ev);
-#else
-    waitMutex(FdRinMutex);
-    FdSet(stonep->sd, &rin);
-    freeMutex(FdRinMutex);
-#endif
-    if (len <= 0) goto end;	/* drop */
-    xhost = checkXhost(stonep->xhosts, from, fromlen);
-    if (!xhost) {
-	addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
-		     addrport, STRMAX, 0);
-	addrport[STRMAX] = '\0';
-	message(LOG_WARNING, "stone %d: recv UDP denied: from %s",
-		stonep->sd, addrport);
-	goto end;
-    }
-    origin = getOrigins(from, fromlen, stonep);
-    if (!origin) goto end;
-    origin->xhost = xhost;
-    dsd = origin->sd;
-    time(&origin->clock);
-#ifdef USE_EPOLL
-    ev.events = (EPOLLIN | EPOLLONESHOT);
-    ev.data.ptr = origin;
-    epoll_ctl(ePollFd, EPOLL_CTL_MOD, origin->sd, &ev);
-#else
-    waitMutex(FdRinMutex);
-    waitMutex(FdEinMutex);
-    FdSet(origin->sd, &rin);
-    FdSet(origin->sd, &ein);
-    freeMutex(FdEinMutex);
-    freeMutex(FdRinMutex);
-#endif
-    if (Debug > 4)
-	message(LOG_DEBUG, "UDP %d: send %d bytes to %d",
-		stonep->sd, len, dsd);
-    if (sendUDP(dsd, &stonep->dsts[0]->addr, stonep->dsts[0]->len,
-		len, pb, xhost) <= 0)
-	docloseUDP(origin, 1);	/* wait mutex */
- end:
-    if (pb) ungetPktBuf(pb);
-    ASYNC_END;
-}
 
 /* relay TCP */
 
@@ -2587,7 +2598,7 @@ void message_pair(int pri, Pair *pair) {
     int i;
     char str[LONGSTRMAX+1];
     str[LONGSTRMAX] = '\0';
-    strntime(str, LONGSTRMAX, &pair->clock);
+    strntime(str, LONGSTRMAX, &pair->clock, -1);
     i = strlen(str);
     sd = pair->sd;
     if (ValidSocket(sd)) {
@@ -3199,7 +3210,7 @@ void message_conn(int pri, Conn *conn) {
     p1 = conn->pair;
     if (p1) {
 	p2 = p1->pair;
-	strntime(str, LONGSTRMAX, &p1->clock);
+	strntime(str, LONGSTRMAX, &p1->clock, -1);
 	i = strlen(str);
 	proto = p1->proto;
 	if (p2) sd = p2->sd;
@@ -3547,7 +3558,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
     }
     ev.events = (EPOLLOUT | EPOLLONESHOT);
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
-	message(LOG_ERR, "ident: epoll_ctl err=%d", errno);
+	message(LOG_ERR, "ident: epoll_ctl ADD err=%d", errno);
 	close(epfd);
 	return 0;	/* I can't tell the master is healthy or not */
     }
@@ -3713,7 +3724,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 }
 
 /* *stonep accept connection */
-Pair *doaccept(Stone *stonep) {
+Pair *doaccept(Stone *stonep, int ismain) {
     struct sockaddr_storage ss1, ss2;
     struct sockaddr *from = (struct sockaddr*)&ss1;
     socklen_t fromlen = sizeof(ss1);
@@ -3734,15 +3745,17 @@ Pair *doaccept(Stone *stonep) {
     nsd = INVALID_SOCKET;
     pair1 = pair2 = NULL;
     nsd = accept(stonep->sd, from, &fromlen);
+    if (ismain) {
 #ifdef USE_EPOLL
-    ev.events = (EPOLLIN | EPOLLONESHOT);
-    ev.data.ptr = stonep;
-    epoll_ctl(ePollFd, EPOLL_CTL_MOD, stonep->sd, &ev);
+	ev.events = (EPOLLIN | EPOLLONESHOT);
+	ev.data.ptr = stonep;
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, stonep->sd, &ev);
 #else
-    waitMutex(FdRinMutex);
-    FdSet(stonep->sd, &rin);
-    freeMutex(FdRinMutex);
+	waitMutex(FdRinMutex);
+	FdSet(stonep->sd, &rin);
+	freeMutex(FdRinMutex);
 #endif
+    }
     if (InvalidSocket(nsd)) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -3812,7 +3825,7 @@ Pair *doaccept(Stone *stonep) {
 #endif
 	addr2str(from, fromlen, str, STRMAX, NI_NUMERICHOST);
 	str[STRMAX] = '\0';
-	strntime(tstr, STRMAX, &clock);
+	strntime(tstr, STRMAX, &clock, -1);
 	tstr[STRMAX] = '\0';
 	fprintf(AccFp, "%s%d[%d] %s[%s]%d\n",
 		tstr, stonep->port, stonep->sd, fromstr, str, port);
@@ -4470,6 +4483,12 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 		    message(LOG_DEBUG, "%d TCP %d: read interrupted",
 			    pair->stone->sd, sd);
 		return 0;	/* EINTR */
+	    }
+	    if (errno == ECONNRESET) {
+		if (Debug > 3)
+		    message(LOG_DEBUG, "%d TCP %d: read but reset by peer",
+			    pair->stone->sd, sd);
+		return -1;
 	    }
 	    message(priority(pair), "%d TCP %d: read error err=%d, closing",
 		    pair->stone->sd, sd, errno);
@@ -5171,7 +5190,7 @@ int healthQUIT(Pair *pair, char *parm, int start) {
 }
 
 int healthErr(Pair *pair, char *parm, int start) {
-    message(LOG_ERR, "Unknown health command: %s", parm);
+    if (*parm) message(LOG_ERR, "Unknown health command: %s", parm);
     return -1;
 }
 
@@ -5878,7 +5897,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 		    stsd, p[i]->sd, i, epfd, ev.data.ptr);
 	if (epoll_ctl(epfd, EPOLL_CTL_ADD, p[i]->sd, &ev) < 0) {
 	    message(LOG_ERR, "%d TCP %d: doReadWrite%d "
-		    "epoll_ctl %d err=%d",
+		    "epoll_ctl %d ADD err=%d",
 		    stsd, p[i]->sd, i, epfd, errno);
 	    goto leave;
 	}
@@ -5964,19 +5983,12 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			   (p[1] ? p[1]->sd : INVALID_SOCKET));
 }
 
-void asyncReadWrite(Pair *pair) {	/* pair must be source side */
-    ASYNC_BEGIN;
-    doReadWrite(pair);
-    ASYNC_END;
-}
-
-void asyncAccept(Stone *stone) {
+void doAcceptConnect(Stone *stone, int ismain) {
     Pair *p1, *p2;
     int ret;
-    ASYNC_BEGIN;
-    if (Debug > 8) message(LOG_DEBUG, "asyncAccept");
-    p1 = doaccept(stone);
-    if (p1 == NULL) goto exit;
+    if (Debug > 8) message(LOG_DEBUG, "doAcceptConnect");
+    p1 = doaccept(stone, ismain);
+    if (p1 == NULL) return;
     p2 = p1->pair;
     p1->next = p2;	/* link pair each other */
     p2->prev = p1;
@@ -5998,7 +6010,7 @@ void asyncAccept(Stone *stone) {
 	if (ret < 0) {
 	    freePair(p2);
 	    freePair(p1);
-	    goto exit;
+	    return;
 	}
     }
     p1->proto |= (proto_thread | proto_dirty);
@@ -6022,11 +6034,11 @@ void asyncAccept(Stone *stone) {
 	if (!(p1->proto & proto_close)) {
 	    ev.data.ptr = p1;
 	    if (Debug > 6)
-		message(LOG_DEBUG, "%d TCP %d: asyncAccept1 "
+		message(LOG_DEBUG, "%d TCP %d: doAcceptConnect1 "
 			"epoll_ctl %d ADD %x",
 			stone->sd, p1->sd, ePollFd, ev.data.ptr);
 	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
-		message(LOG_ERR, "%d TCP %d: asyncAccept1 "
+		message(LOG_ERR, "%d TCP %d: doAcceptConnect1 "
 			"epoll_ctl %d ADD err=%d",
 			stone->sd, p1->sd, ePollFd, errno);
 	    }
@@ -6034,11 +6046,11 @@ void asyncAccept(Stone *stone) {
 	if (!(p2->proto & (proto_noconnect | proto_close))) {
 	    ev.data.ptr = p2;
 	    if (Debug > 6)
-		message(LOG_DEBUG, "%d TCP %d: asyncAccept2 "
+		message(LOG_DEBUG, "%d TCP %d: doAcceptConnect2 "
 			"epoll_ctl %d ADD %x",
 			stone->sd, p2->sd, ePollFd, ev.data.ptr);
 	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
-		message(LOG_ERR, "%d TCP %d: asyncAccept2 "
+		message(LOG_ERR, "%d TCP %d: doAcceptConnect2 "
 			"epoll_ctl %d ADD err=%d",
 			stone->sd, p2->sd, ePollFd, errno);
 	    }
@@ -6050,7 +6062,48 @@ void asyncAccept(Stone *stone) {
 	p1->proto |= proto_dirty;
 	p2->proto |= proto_dirty;
     }
- exit:
+}
+
+#ifdef USE_EPOLL
+void doStone(Stone *stone) {
+    int nloop = 0;
+    struct epoll_event ev;
+    struct epoll_event evs[1];
+    int epfd = epoll_create(BACKLOG_MAX);
+    if (epfd < 0) {
+	message(LOG_ERR, "stone %d: can't create epoll err=%d",
+		stone->sd, errno);
+	return;
+    }
+    ev.events = (EPOLLIN | EPOLLPRI);
+    ev.data.ptr = stone;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, stone->sd, &ev) < 0) {
+	message(LOG_ERR, "stone %d: epoll_ctl %d ADD err=%d",
+		stone->sd, epfd, errno);
+	close(epfd);
+	return;
+    }
+    while (epoll_wait(epfd, evs, 1, TICK_SELECT / 1000) > 0) {
+	nloop++;
+	if (Debug > 8)
+	    message(LOG_DEBUG, "stone %d: epoll %d events=%x loop=%d",
+		    stone->sd, epfd, evs[0].events, nloop);
+	if (stone->proto & proto_udp) {
+	    doUDP(stone, 0);
+	} else {
+	    doAcceptConnect(stone, 0);
+	}
+    }
+    if (Debug > 7)
+	message(LOG_DEBUG, "stone %d: end of doStone epoll %d loop=%d",
+		stone->sd, epfd, nloop);
+    close(epfd);
+}
+#endif
+
+void asyncReadWrite(Pair *pair) {	/* pair must be source side */
+    ASYNC_BEGIN;
+    doReadWrite(pair);
     ASYNC_END;
 }
 
@@ -6081,7 +6134,8 @@ void asyncClose(Pair *pair) {
 	ev.events = EPOLLONESHOT;
 	ev.data.ptr = pair;
 	if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
-	    message(LOG_ERR, "asyncClose: epoll_ctl err=%d", errno);
+	    message(LOG_ERR, "asyncClose: epoll_ctl %d ADD err=%d",
+		    epfd, errno);
 	    close(epfd);
 	    goto exit;
 	}
@@ -6133,6 +6187,19 @@ void asyncClose(Pair *pair) {
     setclose(pair, proto_shutdown);
     pair->proto &= ~proto_thread;
     pair->proto |= proto_dirty;
+    ASYNC_END;
+}
+
+void asyncStone(Stone *stone) {
+    ASYNC_BEGIN;
+    if (stone->proto & proto_udp) {
+	doUDP(stone, 1);
+    } else {
+	doAcceptConnect(stone, 1);
+    }
+#ifdef USE_EPOLL
+    doStone(stone);
+#endif
     ASYNC_END;
 }
 
@@ -6526,18 +6593,6 @@ void rmStoneSSL(StoneSSL *ss) {
 }
 #endif
 
-void doStone(Stone *stone) {
-#ifdef PTHREAD
-    pthread_t thread;
-    int err;
-#endif
-    if (stone->proto & proto_udp) {
-	ASYNC(asyncUDP, stone);
-    } else {
-	ASYNC(asyncAccept, stone);
-    }
-}
-
 #ifndef USE_EPOLL
 int scanStones(fd_set *rop, fd_set *eop) {
     Stone *stone;
@@ -6550,11 +6605,15 @@ int scanStones(fd_set *rop, fd_set *eop) {
 	if (isset) {
 	    message(LOG_ERR, "stone %d: exception", stone->sd);
 	} else {
+#ifdef PTHREAD
+	    pthread_t thread;
+	    int err;
+#endif
 	    waitMutex(FdRinMutex);
 	    isset = (FD_ISSET(stone->sd, rop) && FD_ISSET(stone->sd, &rin));
 	    if (isset) FD_CLR(stone->sd, &rin);
 	    freeMutex(FdRinMutex);
-	    if (isset) doStone(stone);
+	    if (isset) ASYNC(asyncStone, stone);
 	}
     }
     return 1;
@@ -6621,7 +6680,7 @@ void repeater(void) {
     }
     ret = epoll_wait(ePollFd, evs, EVSMAX, timeout);
     if (Debug > 10) {
-	message(LOG_DEBUG, "epoll main: %d", ret);
+	message(LOG_DEBUG, "epoll %d: %d", ePollFd, ret);
     }
 #else
     struct timeval tv, *timeout;
@@ -6668,29 +6727,29 @@ void repeater(void) {
 	    int common;
 	    int other;
 	    if (Debug > 8)
-		message(LOG_DEBUG, "epoll main: evs[%d].data=%x",
-			i, evs[i].data.ptr);
+		message(LOG_DEBUG, "epoll %d: evs[%d].data=%x",
+			ePollFd, i, evs[i].data.ptr);
 	    common = *(int*)evs[i].data.ptr;
 	    other = (evs[i].events & ~(EPOLLIN | EPOLLPRI | EPOLLOUT));
 	    switch(common & type_mask) {
 	    case type_stone:
 		if (Debug > 10 || (other && Debug > 2))
-		    message(LOG_DEBUG, "stone %d: epoll events=%x type=%d",
-			    ((Stone*)evs[i].data.ptr)->sd,
+		    message(LOG_DEBUG, "stone %d: epoll %d events=%x type=%d",
+			    ((Stone*)evs[i].data.ptr)->sd, ePollFd,
 			    evs[i].events, common);
-		doStone(evs[i].data.ptr);
+		ASYNC(asyncStone, evs[i].data.ptr);
 		break;
 	    case type_pair:
 		if (Debug > 10 || (other && Debug > 2))
-		    message(LOG_DEBUG, "TCP %d: epoll events=%x type=%d",
-			    ((Pair*)evs[i].data.ptr)->sd,
+		    message(LOG_DEBUG, "TCP %d: epoll %d events=%x type=%d",
+			    ((Pair*)evs[i].data.ptr)->sd, ePollFd,
 			    evs[i].events, common);
 		doPair(evs[i].data.ptr);
 		break;
 	    case type_origin:
 		if (Debug > 10 || (other && Debug > 2))
-		    message(LOG_DEBUG, "UDP %d: epoll events=%x type=%d",
-			    ((Origin*)evs[i].data.ptr)->sd,
+		    message(LOG_DEBUG, "UDP %d: epoll %d events=%x type=%d",
+			    ((Origin*)evs[i].data.ptr)->sd, ePollFd,
 			    evs[i].events, common);
 		doOrigin(evs[i].data.ptr,
 			 (evs[i].events & EPOLLIN) != 0,
@@ -6712,13 +6771,14 @@ void repeater(void) {
 #endif
 	if (errno != EINTR) {
 #ifdef USE_EPOLL
-	    message(LOG_ERR, "epoll error err=%d", errno);
+	    message(LOG_ERR, "epoll %d error err=%d", ePollFd, errno);
 #else
 	    message(LOG_ERR, "select error err=%d", errno);
 #endif
 	    if (++nerrs >= NERRS_MAX) {
 #ifdef USE_EPOLL
-		message(LOG_ERR, "epoll error %d times, exiting", nerrs);
+		message(LOG_ERR, "epoll %d error %d times, exiting",
+			ePollFd, nerrs);
 #else
 		message(LOG_ERR, "select error %d times, exiting", nerrs);
 		message_select(LOG_INFO, "IN", &rin, &win, &ein);
