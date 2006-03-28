@@ -90,7 +90,7 @@
  * -DWINDOWS	  Windows95/98/NT
  * -DNT_SERVICE	  WindowsNT/2000 native service
  */
-#define VERSION	"2.3"
+#define VERSION	"2.3a"
 static char *CVS_ID =
 "@(#) $Id$";
 
@@ -545,6 +545,7 @@ fd_set rin, win, ein;
 #endif
 int PairTimeOut = 10 * 60;	/* 10 min */
 int AsyncCount = 0;
+int MutexConflict = 0;
 
 const int state_mask =		    0x00ff;
 const int proto_command =	    0x0f00;	/* command (dest. only) */
@@ -1569,13 +1570,15 @@ void waitMutex(int h) {
 	    message(LOG_ERR, "Mutex %d err=%d", h, err);
 	}
 	if (FastMutexs[h] == 0) {
-	    FastMutexs[h]++;
-	    if (Debug > 20) message(LOG_DEBUG, "Lock Mutex %d = %d",
-				    h, FastMutexs[h]);
+	    int i = ++FastMutexs[h];
 	    pthread_mutex_unlock(&FastMutex);
+	    if (Debug > 20) message(LOG_DEBUG, "Lock Mutex %d = %d", h, i);
 	    break;
 	}
 	pthread_mutex_unlock(&FastMutex);
+	if (Debug > 10) message(LOG_DEBUG, "Mutex conflict %d = %d",
+				h, FastMutexs[h]);
+	MutexConflict++;
 	usleep(100);
     }
 }
@@ -3041,6 +3044,8 @@ Pair *newPair(void) {
 	pair->loop = 0;
 	time(&pair->clock);
 	pair->pair = NULL;
+	pair->next = NULL;
+	pair->prev = NULL;
 #ifdef USE_SSL
 	pair->ssl = NULL;
 	pair->ssl_flag = 0;
@@ -3129,6 +3134,23 @@ void freePair(Pair *pair) {
     freePairs = pair;
     nFreePairs++;
     freeMutex(FPairMutex);
+}
+
+void insertPairs(Pair *p1) {
+    Pair *p2 = p1->pair;
+    p1->next = p2;	/* link pair each other */
+    p2->prev = p1;
+    waitMutex(PairMutex);
+    p2->next = pairs.next;	/* insert pair */
+    if (pairs.next != NULL) pairs.next->prev = p2;
+    p1->prev = &pairs;
+    pairs.next = p1;
+    freeMutex(PairMutex);
+    if (Debug > 4) {
+	message(LOG_DEBUG, "%d TCP %d: pair %d inserted",
+		p1->stone->sd, p1->sd, p2->sd);
+	message_pair(LOG_DEBUG, p1);
+    }
 }
 
 void message_time_log(Pair *pair) {
@@ -3724,7 +3746,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 }
 
 /* *stonep accept connection */
-Pair *doaccept(Stone *stonep, int ismain) {
+Pair *doaccept(Stone *stonep, int stage) {
     struct sockaddr_storage ss1, ss2;
     struct sockaddr *from = (struct sockaddr*)&ss1;
     socklen_t fromlen = sizeof(ss1);
@@ -3745,7 +3767,7 @@ Pair *doaccept(Stone *stonep, int ismain) {
     nsd = INVALID_SOCKET;
     pair1 = pair2 = NULL;
     nsd = accept(stonep->sd, from, &fromlen);
-    if (ismain) {
+    if (stage == 0) {	/* stage 0: main loop */
 #ifdef USE_EPOLL
 	ev.events = (EPOLLIN | EPOLLONESHOT);
 	ev.data.ptr = stonep;
@@ -4144,6 +4166,12 @@ void setclose(Pair *pair, int flag) {	/* set close flag */
 	    message(LOG_DEBUG, "%d TCP %d: close tx:%d rx:%d lp:%d",
 		    pair->stone->sd, sd, pair->tx, pair->rx, pair->loop);
     }
+#ifdef USE_EPOLL
+    if (ValidSocket(sd)) {
+	pair->sd = INVALID_SOCKET;
+	closesocket(sd);
+    }
+#endif
 }
 
 int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
@@ -5134,18 +5162,52 @@ Comm limitComm[] = {
 
 int healthHELO(Pair *pair, char *parm, int start) {
     char str[LONGSTRMAX+1];
+    snprintf(str, LONGSTRMAX,
+	     "stone=%d pair=%d trash=%d conn=%d origin=%d",
+	     nStones(), nPairs(pairs.next), nPairs(trash.next),
+	     nConns(), nOrigins());
+    str[LONGSTRMAX] = '\0';
+    if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
+    commOutput(pair, "250 stone:%s debug=%d %s\r\n",
+	       VERSION, Debug, str);
+    return -2;	/* read more */
+}
+
+int healthSTAT(Pair *pair, char *parm, int start) {
+    char str[LONGSTRMAX+1];
+    int mc = MutexConflict;
+    MutexConflict = 0;
+    snprintf(str, LONGSTRMAX,
+	     "async=%d mutex=%d",
+	     AsyncCount, mc);
+    str[LONGSTRMAX] = '\0';
+    if (Debug) message(LOG_DEBUG, ": STAT %s: %s", parm, str);
+    commOutput(pair, "250 stone:%s debug=%d %s\r\n",
+	       VERSION, Debug, str);
+    return -2;	/* read more */
+}
+
+int healthFREE(Pair *pair, char *parm, int start) {
+    char str[LONGSTRMAX+1];
+    snprintf(str, LONGSTRMAX,
+	     "fpair=%d nfexbuf=%d nfexbot=%d nfpktbuf=%d",
+	     nFreePairs, nFreeExBuf, nFreeExBot, nFreePktBuf);
+    str[LONGSTRMAX] = '\0';
+    if (Debug) message(LOG_DEBUG, ": FREE %s: %s", parm, str);
+    commOutput(pair, "250 stone:%s debug=%d %s\r\n",
+	       VERSION, Debug, str);
+    return -2;	/* read more */
+}
+
+int healthCLOCK(Pair *pair, char *parm, int start) {
+    char str[LONGSTRMAX+1];
     time_t now;
     time(&now);
     snprintf(str, LONGSTRMAX,
-	     "stone=%d pair=%d trash=%d conn=%d origin=%d "
-	     "established=%d readwrite=%d "
-	     "async=%d fpair=%d nfexbuf=%d nfexbot=%d nfpktbuf=%d",
-	     nStones(), nPairs(pairs.next), nPairs(trash.next), nConns(),
-	     nOrigins(),
-	     (int)(now - lastEstablished), (int)(now - lastReadWrite),
-	     AsyncCount, nFreePairs, nFreeExBuf, nFreeExBot, nFreePktBuf);
+	     "now=%d established=%d readwrite=%d", now,
+	     (int)(now - lastEstablished), (int)(now - lastReadWrite));
     str[LONGSTRMAX] = '\0';
-    if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
+    if (Debug) message(LOG_DEBUG, ": CLOCK %s: %s", parm, str);
     commOutput(pair, "250 stone:%s debug=%d %s\r\n",
 	       VERSION, Debug, str);
     return -2;	/* read more */
@@ -5196,6 +5258,9 @@ int healthErr(Pair *pair, char *parm, int start) {
 
 Comm healthComm[] = {
     { "HELO", healthHELO },
+    { "STAT", healthSTAT },
+    { "FREE", healthFREE },
+    { "CLOCK", healthCLOCK },
     { "CVS_ID", healthCVS_ID },
     { "CONFIG", healthCONFIG },
     { "STONE", healthSTONE },
@@ -5865,6 +5930,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     int i;
 #ifdef USE_EPOLL
     int epfd;
+    struct epoll_event ev;
 #else
     fd_set ri, wi, ei;
     fd_set ro, wo, eo;
@@ -5888,7 +5954,6 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	goto leave;
     }
     for (i=0; i < npairs; i++) {
-	struct epoll_event ev;
 	ev.events = EPOLLONESHOT;
 	ev.data.ptr = p[i];
 	if (Debug > 6)
@@ -5930,15 +5995,23 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 #endif
 #ifdef USE_EPOLL
 	for (i=0; i < nev; i++) {
-	    if (!doReadWritePair((Pair*)evs[i].data.ptr,
-				 ((Pair*)evs[i].data.ptr)->pair,
-				 (evs[i].events & EPOLLIN) != 0,
-				 (evs[i].events & EPOLLOUT) != 0,
-				 (evs[i].events & EPOLLPRI) != 0,
-				 (evs[i].events & EPOLLHUP) != 0,
-				 (evs[i].events & EPOLLERR) != 0
-				 ))
-		goto leave;
+	    int common = *(int*)evs[i].data.ptr;
+	    switch(common & type_mask) {
+	    case type_pair:
+		if (!doReadWritePair((Pair*)evs[i].data.ptr,
+				     ((Pair*)evs[i].data.ptr)->pair,
+				     (evs[i].events & EPOLLIN) != 0,
+				     (evs[i].events & EPOLLOUT) != 0,
+				     (evs[i].events & EPOLLPRI) != 0,
+				     (evs[i].events & EPOLLHUP) != 0,
+				     (evs[i].events & EPOLLERR) != 0
+			))
+		    goto leave;
+		break;
+	    default:
+		message(LOG_ERR, "Irregular event events=%x type=%d",
+			evs[i].events, common);
+	    }
 	}
 #else
 	for (i=0; i < npairs; i++) {
@@ -5983,15 +6056,14 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			   (p[1] ? p[1]->sd : INVALID_SOCKET));
 }
 
-void doAcceptConnect(Stone *stone, int ismain) {
+void doAcceptConnect(Stone *stone, int stage) {
     Pair *p1, *p2;
     int ret;
-    if (Debug > 8) message(LOG_DEBUG, "doAcceptConnect");
-    p1 = doaccept(stone, ismain);
+    if (Debug > 8) message(LOG_DEBUG, "stone %d: doAcceptConnect stage=%d",
+			   stone->sd, stage);
+    p1 = doaccept(stone, stage);
     if (p1 == NULL) return;
     p2 = p1->pair;
-    p1->next = p2;	/* link pair each other */
-    p2->prev = p1;
     if (p2->proto & proto_ohttp_d) {
 	int i;
 	char *p = stone->p;
@@ -6013,21 +6085,11 @@ void doAcceptConnect(Stone *stone, int ismain) {
 	    return;
 	}
     }
-    p1->proto |= (proto_thread | proto_dirty);
-    p2->proto |= (proto_thread | proto_dirty);
-    waitMutex(PairMutex);
-    p2->next = pairs.next;	/* insert pair */
-    if (pairs.next != NULL) pairs.next->prev = p2;
-    p1->prev = &pairs;
-    pairs.next = p1;
-    freeMutex(PairMutex);
-    if (Debug > 4) {
-	message(LOG_DEBUG, "%d TCP %d: pair %d inserted",
-		p1->stone->sd, p1->sd, p2->sd);
-	message_pair(LOG_DEBUG, p1);
-    }
-    if (ret > 0) doReadWrite(p1);
-    else {
+    if (stage < 2 && ret > 0) {	/* if stage 2 or upper, send pair to main */
+	p1->proto |= (proto_thread | proto_dirty);
+	p2->proto |= (proto_thread | proto_dirty);
+	doReadWrite(p1);
+    } else {
 #ifdef USE_EPOLL
 	struct epoll_event ev;
 	ev.events = EPOLLONESHOT;
@@ -6042,17 +6104,17 @@ void doAcceptConnect(Stone *stone, int ismain) {
 			"epoll_ctl %d ADD err=%d",
 			stone->sd, p1->sd, ePollFd, errno);
 	    }
-	}
-	if (!(p2->proto & (proto_noconnect | proto_close))) {
-	    ev.data.ptr = p2;
-	    if (Debug > 6)
-		message(LOG_DEBUG, "%d TCP %d: doAcceptConnect2 "
-			"epoll_ctl %d ADD %x",
-			stone->sd, p2->sd, ePollFd, ev.data.ptr);
-	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
-		message(LOG_ERR, "%d TCP %d: doAcceptConnect2 "
-			"epoll_ctl %d ADD err=%d",
-			stone->sd, p2->sd, ePollFd, errno);
+	    if (!(p2->proto & (proto_noconnect | proto_close))) {
+		ev.data.ptr = p2;
+		if (Debug > 6)
+		    message(LOG_DEBUG, "%d TCP %d: doAcceptConnect2 "
+			    "epoll_ctl %d ADD %x",
+			    stone->sd, p2->sd, ePollFd, ev.data.ptr);
+		if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
+		    message(LOG_ERR, "%d TCP %d: doAcceptConnect2 "
+			    "epoll_ctl %d ADD err=%d",
+			    stone->sd, p2->sd, ePollFd, errno);
+		}
 	    }
 	}
 	/* must be added to ePollFd before unset proto_thread */
@@ -6061,6 +6123,12 @@ void doAcceptConnect(Stone *stone, int ismain) {
 	p2->proto &= ~proto_thread;
 	p1->proto |= proto_dirty;
 	p2->proto |= proto_dirty;
+    }
+    if (!(p1->proto & proto_close)) {
+	insertPairs(p1);
+    } else {
+	freePair(p2);
+	freePair(p1);
     }
 }
 
@@ -6091,7 +6159,7 @@ void doStone(Stone *stone) {
 	if (stone->proto & proto_udp) {
 	    doUDP(stone, 0);
 	} else {
-	    doAcceptConnect(stone, 0);
+	    doAcceptConnect(stone, 1);
 	}
     }
     if (Debug > 7)
@@ -6195,7 +6263,7 @@ void asyncStone(Stone *stone) {
     if (stone->proto & proto_udp) {
 	doUDP(stone, 1);
     } else {
-	doAcceptConnect(stone, 1);
+	doAcceptConnect(stone, 0);	/* stage 0: main loop */
     }
 #ifdef USE_EPOLL
     doStone(stone);
