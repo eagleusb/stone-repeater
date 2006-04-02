@@ -1669,7 +1669,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
     if (ret < 0) {
 #ifdef WINDOWS
         errno = WSAGetLastError();
-#ifndef EINPROGRESS
+#if !defined(EINPROGRESS) && defined(WSAEWOULDBLOCK)
 #define EINPROGRESS     WSAEWOULDBLOCK
 #endif
 #endif
@@ -4197,12 +4197,21 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 	if (len < 0) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
+#if !defined(ECONNABORTED) && defined(WSAECONNABORTED)
+#define	ECONNABORTED	WSAECONNABORTED
+#endif
 #endif
 	    if (errno == EINTR) {
 		if (Debug > 4)
 		    message(LOG_DEBUG, "%d TCP %d: write interrupted",
 			    pair->stone->sd, sd);
 		return 0;
+	    }
+	    if (errno == ECONNABORTED) {
+		if (Debug > 3)
+		    message(LOG_DEBUG, "%d TCP %d: write aborted",
+			    pair->stone->sd, sd);
+		return -1;
 	    }
 	    message(priority(pair), "%d TCP %d: write error err=%d, closing",
 		    pair->stone->sd, sd, errno);
@@ -4446,6 +4455,9 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	if (len < 0) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
+#if !defined(ECONNRESET) && defined(WSAECONNRESET)
+#define	ECONNRESET	WSAECONNRESET
+#endif
 #endif
 	    if (errno == EINTR) {
 		if (Debug > 4)
