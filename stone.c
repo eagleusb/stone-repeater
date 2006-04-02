@@ -2351,12 +2351,22 @@ PktBuf *recvUDP(Stone *stone) {
     if (pb->len < 0) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
+#if !defined(EMSGSIZE) && defined(WSAEMSGSIZE)
+#define	EMSGSIZE	WSAEMSGSIZE
 #endif
-	message(LOG_ERR, "%d UDP%s%d: recvfrom failed err=%d",
-		stone->sd, dirstr, sd, errno);
-    end:
-	ungetPktBuf(pb);
-	return NULL;
+#endif
+	if (errno == EMSGSIZE) {
+	    if (Debug > 4)
+		message(LOG_DEBUG, "%d UDP%s%d: recvfrom received larger msg",
+			stone->sd, dirstr, sd);
+	    pb->len = pb->bufmax + 1;
+	} else {
+	    message(LOG_ERR, "%d UDP%s%d: recvfrom failed err=%d",
+		    stone->sd, dirstr, sd, errno);
+	end:
+	    ungetPktBuf(pb);
+	    return NULL;
+	}
     }
     if (pb->type == type_stone) {	/* outward */
 	XHosts *xhost = checkXhost(stone->xhosts, from, fromlen);
@@ -2376,18 +2386,18 @@ PktBuf *recvUDP(Stone *stone) {
 	time(&origin->clock);
     }
     pb->origin = origin;
-    if (pb->len >= pb->bufmax || Debug > 4) {
+    if (pb->len > pb->bufmax || Debug > 4) {
 	char addrport[STRMAX+1];
 	addrport2str(from, fromlen, proto_udp, addrport, STRMAX, 0);
 	addrport[STRMAX] = '\0';
 	if (Debug > 4)
 	    message(LOG_DEBUG, "%d UDP%s%d: %d bytes received from %s",
 		    stone->sd, dirstr, origin->sd, pb->len, addrport);
-	if (pb->len >= pb->bufmax) {
+	if (pb->len > pb->bufmax) {
 	    message(LOG_NOTICE, "%d UDP%s%d: recvfrom failed: larger packet "
 		    "(%d bytes) arrived from %s",
 		    stone->sd, dirstr, origin->sd, pb->len, addrport);
-	    pkt_len_max <<= 1;
+	    while (pkt_len_max < pb->len) pkt_len_max <<= 1;
 	    ungetPktBuf(pb);
 	    return NULL;	/* drop */
 	}
