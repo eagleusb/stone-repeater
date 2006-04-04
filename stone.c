@@ -110,6 +110,24 @@ typedef void (*FuncPtr)(void*);
 #define	NO_GETTIMEOFDAY
 #include <process.h>
 #include <ws2tcpip.h>
+#if !defined(EINPROGRESS) && defined(WSAEWOULDBLOCK)
+#define EINPROGRESS     WSAEWOULDBLOCK
+#endif
+#if !defined(EMSGSIZE) && defined(WSAEMSGSIZE)
+#define	EMSGSIZE	WSAEMSGSIZE
+#endif
+#if !defined(EADDRINUSE) && defined(WSAEADDRINUSE)
+#define	EADDRINUSE	WSAEADDRINUSE
+#endif
+#if !defined(ECONNABORTED) && defined(WSAECONNABORTED)
+#define	ECONNABORTED	WSAECONNABORTED
+#endif
+#if !defined(ECONNRESET) && defined(WSAECONNRESET)
+#define	ECONNRESET	WSAECONNRESET
+#endif
+#if !defined(EISCONN) && defined(WSAEISCONN)
+#define	EISCONN		WSAEISCONN
+#endif
 #include <time.h>
 #ifdef NT_SERVICE
 #include <windows.h>
@@ -254,13 +272,6 @@ int FdSetBug = 0;
 #define LOG_DEBUG	7	/* debug-level messages */
 #else	/* SYSLOG */
 #include <syslog.h>
-#endif
-
-#ifndef EISCONN
-#define EISCONN		56		/* Socket is already connected */
-#endif
-#ifndef EADDRINUSE
-#define EADDRINUSE	48		/* Address already in use */
 #endif
 
 #define BACKLOG_MAX	50
@@ -793,6 +804,27 @@ char *strntime(char *str, int len, time_t *clock, long micro) {
     return str;
 }
 
+#ifdef NO_GETTIMEOFDAY
+int gettimeofday(struct timeval *tv, void *tz) {
+    static u_long start = 0;
+    u_long tick = GetTickCount();
+    time_t now;
+    time(&now);
+    if (start == 0) start = now - tick / 1000;
+    if (tz) return -1;
+    if (tv) {
+	tv->tv_usec = (tick % 1000) * 1000;
+	tv->tv_sec = start + (tick / 1000);
+	if (now < tv->tv_sec - 1 || tv->tv_sec + 1 < now) {
+	    start = 0;
+	    tv->tv_usec = -1;	/* diff is too large */
+	}
+	return 0;
+    }
+    return -1;
+}
+#endif
+
 void message(int pri, char *fmt, ...) {
     char str[LONGSTRMAX+1];
     int pos = 0;
@@ -802,16 +834,10 @@ void message(int pri, char *fmt, ...) {
     if (!Syslog)
 #endif
     {
-#ifdef NO_GETTIMEOFDAY
-	time_t clock;
-	time(&clock);
-	strntime(str+pos, LONGSTRMAX-pos, &clock, -1);
-#else
 	struct timeval tv;
 	if (gettimeofday(&tv, NULL) >= 0) {
 	    strntime(str+pos, LONGSTRMAX-pos, &tv.tv_sec, tv.tv_usec);
 	}
-#endif
 	str[LONGSTRMAX] = '\0';
 	pos = strlen(str);
     }
@@ -1669,9 +1695,6 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
     if (ret < 0) {
 #ifdef WINDOWS
         errno = WSAGetLastError();
-#if !defined(EINPROGRESS) && defined(WSAEWOULDBLOCK)
-#define EINPROGRESS     WSAEWOULDBLOCK
-#endif
 #endif
 	if (errno == EINPROGRESS) {
 #ifndef USE_EPOLL
@@ -2284,6 +2307,15 @@ Origin *getOrigins(struct sockaddr *from, socklen_t fromlen, Stone *stone) {
 		stone->sd, errno);
 	return NULL;
     }
+    if (!(stone->proto & proto_block_d)) {
+#ifdef WINDOWS
+	u_long param;
+	param = 1;
+	ioctlsocket(sd, FIONBIO, &param);
+#else
+	fcntl(sd, F_SETFL, O_NONBLOCK);
+#endif
+    }
     origin = malloc(sizeof(Origin));
     if (!origin) {
     memerr:
@@ -2312,10 +2344,7 @@ Origin *getOrigins(struct sockaddr *from, socklen_t fromlen, Stone *stone) {
     }
 #else
     waitMutex(FdRinMutex);
-    waitMutex(FdEinMutex);
-    FdSet(origin->sd, &ein);
     FdSet(origin->sd, &rin);
-    freeMutex(FdEinMutex);
     freeMutex(FdRinMutex);
 #endif
     waitMutex(OrigMutex);
@@ -2331,6 +2360,7 @@ PktBuf *recvUDP(Stone *stone) {
     socklen_t fromlen = sizeof(ss);
     Origin *origin;
     SOCKET sd;
+    int flags = 0;
     char *dirstr;
     PktBuf *pb = getPktBuf();
     pb->type = (stone->common & type_mask);
@@ -2339,21 +2369,24 @@ PktBuf *recvUDP(Stone *stone) {
 	sd = origin->sd;
 	stone = origin->stone;
 	dirstr = "<";
+#ifdef MSG_DONTWAIT
+	if (!(stone->proto & proto_block_d)) flags = MSG_DONTWAIT;
+#endif
     } else {
 	origin = NULL;
 	sd = stone->sd;
 	dirstr = ">";
-    }
-#ifndef MSG_TRUNC
-#define MSG_TRUNC 0
+#ifdef MSG_DONTWAIT
+	if (!(stone->proto & proto_block_s)) flags = MSG_DONTWAIT;
 #endif
-    pb->len = recvfrom(sd, pb->buf, pb->bufmax, MSG_TRUNC, from, &fromlen);
+    }
+#ifdef MSG_TRUNC
+    flags |= MSG_TRUNC;
+#endif
+    pb->len = recvfrom(sd, pb->buf, pb->bufmax, flags, from, &fromlen);
     if (pb->len < 0) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
-#if !defined(EMSGSIZE) && defined(WSAEMSGSIZE)
-#define	EMSGSIZE	WSAEMSGSIZE
-#endif
 #endif
 	if (errno == EMSGSIZE) {
 	    if (Debug > 4)
@@ -2409,6 +2442,7 @@ int sendUDP(PktBuf *pb) {
     Origin *origin = pb->origin;
     Stone *stone = origin->stone;
     SOCKET sd;
+    int flags = 0;
     struct sockaddr *sa;
     socklen_t salen;
     char *dirstr;
@@ -2417,13 +2451,19 @@ int sendUDP(PktBuf *pb) {
 	sa = &stone->dsts[0]->addr;
 	salen = stone->dsts[0]->len;
 	dirstr = ">";
+#ifdef MSG_DONTWAIT
+	if (!(stone->proto & proto_block_d)) flags = MSG_DONTWAIT;
+#endif
     } else {
 	sd = stone->sd;
 	sa = &origin->from->addr;
 	salen = origin->from->len;
 	dirstr = "<";
+#ifdef MSG_DONTWAIT
+	if (!(stone->proto & proto_block_s)) flags = MSG_DONTWAIT;
+#endif
     }
-    if (sendto(sd, pb->buf, pb->len, 0, sa, salen) != pb->len) {
+    if (sendto(sd, pb->buf, pb->len, flags, sa, salen) != pb->len) {
 	char addrport[STRMAX+1];
 	addrport2str(sa, salen, proto_udp, addrport, STRMAX, 0);
 	addrport[STRMAX] = '\0';
@@ -2460,10 +2500,7 @@ void docloseUDP(Origin *origin) {
     closesocket(sd);
 #else
     waitMutex(FdRinMutex);
-    waitMutex(FdEinMutex);
     FD_CLR(origin->sd, &rin);
-    FD_CLR(origin->sd, &ein);
-    freeMutex(FdEinMutex);
     freeMutex(FdRinMutex);
 #endif
 }
@@ -2506,14 +2543,8 @@ int scanUDP(
 	if (origin->lock < 0) {
 	    int isset;
 	    waitMutex(FdRinMutex);
-	    waitMutex(FdEinMutex);
-	    isset = (FD_ISSET(origin->sd, &rin) ||
-		     FD_ISSET(origin->sd, &ein));
-	    if (isset) {
-		FD_CLR(origin->sd, &rin);
-		FD_CLR(origin->sd, &ein);
-	    }
-	    freeMutex(FdEinMutex);
+	    isset = FD_ISSET(origin->sd, &rin);
+	    if (isset) FD_CLR(origin->sd, &rin);
 	    freeMutex(FdRinMutex);
 	    if (!isset) {
 		closesocket(origin->sd);
@@ -2527,10 +2558,6 @@ int scanUDP(
 		sendUDP(pb);
 		ungetPktBuf(pb);
 	    }
-	    goto next;
-	}
-	if (FD_ISSET(origin->sd, eop) && FD_ISSET(origin->sd, &ein)) {
-	    docloseUDP(origin);
 	    goto next;
 	}
 #endif
@@ -4207,9 +4234,6 @@ int dowrite(Pair *pair) {	/* write from buf from pair->t->start */
 	if (len < 0) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
-#if !defined(ECONNABORTED) && defined(WSAECONNABORTED)
-#define	ECONNABORTED	WSAECONNABORTED
-#endif
 #endif
 	    if (errno == EINTR) {
 		if (Debug > 4)
@@ -4465,9 +4489,6 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	if (len < 0) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
-#if !defined(ECONNRESET) && defined(WSAECONNRESET)
-#define	ECONNRESET	WSAECONNRESET
-#endif
 #endif
 	    if (errno == EINTR) {
 		if (Debug > 4)
@@ -7188,7 +7209,7 @@ Stone *mkstone(
 			stonep->sd, str, errno);
 		exit(1);
 	    }
-	    if (!(stonep->proto & proto_block_d)) {
+	    if (!(stonep->proto & proto_block_s)) {
 #ifdef WINDOWS
 		u_long param;
 		param = 1;
