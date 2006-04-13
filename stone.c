@@ -3947,6 +3947,48 @@ int strnAddr(char *buf, int limit, SOCKET sd, int which, int isport) {
     return len;
 }
 
+#ifdef SO_PEERCRED
+#include <pwd.h>
+int strnUser(char *buf, int limit, SOCKET sd, int which,
+	     struct ucred *crp, int *cretp) {
+    int len;
+    char str[STRMAX+1];
+    if (*cretp < -1) {
+	len = sizeof(*crp);
+	*cretp = getsockopt(sd, SOL_SOCKET, SO_PEERCRED, crp, &len);
+    }
+    if (*cretp < 0) {
+	
+    }
+    switch (which) {
+    case 1:	/* gid */
+	snprintf(str, STRMAX, "%d", (*cretp >= 0 ? crp->gid : -1));
+	break;
+    case 2:	/* user name */
+	*str = '\0';
+	if (*cretp >= 0) {
+	    struct passwd *passwd = getpwuid(crp->uid);
+	    if (passwd) snprintf(str, STRMAX, "%s", passwd->pw_name);
+	}
+	break;
+    case 3:	/* group name */
+	*str = '\0';
+	if (*cretp >= 0) {
+	    struct group *group = getgrgid(crp->gid);
+	    if (group) snprintf(str, STRMAX, "%s", group->gr_name);
+	}
+	break;
+    default:	/* uid */
+	snprintf(str, STRMAX, "%d", (*cretp >= 0 ? crp->uid : -1));
+	break;
+    }
+    len = strlen(str);
+    if (len > limit) len = limit;
+    strncpy(buf, str, len);
+    return len;
+}
+#endif
+
 int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
     int i = 0;
     char *p;
@@ -3956,6 +3998,10 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
     SSL *ssl = pair->ssl;
     SSL_SESSION *sess = NULL;
     int cond;
+#endif
+#ifdef SO_PEERCRED
+    struct ucred cr;
+    int cret = -2;
 #endif
     p = *pp;
     while (i < limit && (c = *p++)) {
@@ -4021,6 +4067,24 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 		continue;
 	    case 'D':	/* dst address:port (transparent proxy) */
 		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 1, 1);
+		continue;
+#endif
+#ifdef SO_PEERCRED
+	    case 'u':
+		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 0,
+				       &cr, &cret);
+		continue;
+	    case 'g':
+		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 1,
+				       &cr, &cret);
+		continue;
+	    case 'U':
+		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 2,
+				       &cr, &cret);
+		continue;
+	    case 'G':
+		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 3,
+				       &cr, &cret);
 		continue;
 #endif
 	    case '\0':
