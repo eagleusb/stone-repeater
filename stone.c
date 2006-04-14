@@ -107,7 +107,6 @@ typedef void (*FuncPtr)(void*);
 
 #ifdef WINDOWS
 #define FD_SETSIZE	4096
-#define	NO_GETTIMEOFDAY
 #include <process.h>
 #include <ws2tcpip.h>
 #if !defined(EINPROGRESS) && defined(WSAEWOULDBLOCK)
@@ -137,7 +136,9 @@ typedef void (*FuncPtr)(void*);
 #define NO_FORK
 #define NO_SETUID
 #define NO_CHROOT
+#define	NO_GETTIMEOFDAY
 #define NO_FAMILY_T
+#define	NO_UNIXDOMAIN
 #define ValidSocket(sd)		((sd) != INVALID_SOCKET)
 #define FD_SET_BUG
 #undef EINTR
@@ -163,6 +164,7 @@ typedef void (*FuncPtr)(void*);
 #include <process.h>
 #include <os2.h>
 #define NO_SYSLOG
+#define	NO_UNIXDOMAIN
 #define ASYNC(func,arg)	{\
     if (Debug > 7) message(LOG_DEBUG,"ASYNC: %d",AsyncCount);\
     waitMutex(AsyncMutex);\
@@ -996,7 +998,7 @@ char *addr2numeric(struct sockaddr *sa, char *str, int len) {
 	addr2ip6(&((struct sockaddr_in6*)sa)->sin6_addr, str, len);
 #endif
     } else {
-	strncpy(str, "???", len);
+	snprintf(str, len, "%s", "???");
     }
     return str;
 }
@@ -1191,6 +1193,7 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
     int i;
     if (!str || len <= 1) return "";
     str[len-1] = '\0';
+    serv[0] = '\0';
     if (AddrFlag) flags |= (NI_NUMERICHOST | NI_NUMERICSERV);
     else if (proto & proto_udp) flags |= NI_DGRAM;
     if (!(flags & NI_NUMERICHOST) && islocalhost(sa)) flags |= NI_NUMERICHOST;
@@ -1200,7 +1203,17 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
 	message(LOG_DEBUG, "getnameinfo: %s family=%d len=%d flags=%d",
 		serv, sa->sa_family, salen, flags);
     }
-    err = getnameinfo(sa, salen, str, len, serv, STRMAX, flags);
+#ifndef NO_UNIXDOMAIN
+    if (sa->sa_family == AF_UNIX) {
+	int i, j;
+	j = salen - (((struct sockaddr_un*)sa)->sun_path - (char*)sa);
+	strncpy(serv, ((struct sockaddr_un*)sa)->sun_path, j);
+	serv[j] = '\0';
+	snprintf(str, len, "%s", "unix");
+	err = 0;
+    } else
+#endif
+	err = getnameinfo(sa, salen, str, len, serv, STRMAX, flags);
 #ifdef WSANO_DATA
     if (err == WSANO_DATA && !(flags & NI_NUMERICSERV)) {
 	/*
@@ -1228,7 +1241,7 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
 		     ntohs(((struct sockaddr_in6*)sa)->sin6_port));
 #endif
 	} else {
-	    strncpy(str, "???:?", len);
+	    snprintf(str, len, "%s:?", "???");
 	}
 #ifdef WINDOWS
 	errno = WSAGetLastError();
