@@ -2842,8 +2842,10 @@ int doSSL_connect(Pair *pair) {
     pair->proto |= proto_dirty;
     ret = SSL_connect(ssl);
     if (ret > 0) {	/* success */
+	Pair *p = pair->pair;
 	/* pair & dst is connected */
 	pair->proto |= (proto_connect | proto_dirty);
+	if (p) p->proto |= proto_dirty;	/* src */
 	if (Debug > 3) {
 	    SSL_CTX *ctx = pair->stone->ssl_client->ctx;
 	    message(LOG_DEBUG, "%d TCP %d: SSL_connect succeeded "
@@ -3601,19 +3603,9 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 #endif
     time_t start, now;
 #ifdef USE_EPOLL
-    int epfd = epoll_create(BACKLOG_MAX);
+    int epfd = INVALID_SOCKET;
     struct epoll_event ev;
     struct epoll_event evs[1];
-    if (epfd < 0) {
-	message(LOG_ERR, "ident: can't create epoll err=%d", errno);
-	return 0;	/* I can't tell the master is healthy or not */
-    }
-    ev.events = (EPOLLOUT | EPOLLONESHOT);
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
-	message(LOG_ERR, "ident: epoll_ctl ADD err=%d", errno);
-	close(epfd);
-	return 0;	/* I can't tell the master is healthy or not */
-    }
 #endif
     time(&start);
     bcopy(sa, peer, salen);
@@ -3628,9 +3620,6 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 #endif
 	if (Debug > 0)
 	    message(LOG_DEBUG, "ident: can't create socket err=%d", errno);
-#ifdef USE_EPOLL
-	close(epfd);
-#endif
 	return 0;
     }
     saPort(csa, 0);
@@ -3650,6 +3639,19 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
     ioctlsocket(sd, FIONBIO, &param);
 #else
     fcntl(sd, F_SETFL, O_NONBLOCK);
+#endif
+#ifdef USE_EPOLL
+    epfd = epoll_create(BACKLOG_MAX);
+    if (epfd < 0) {
+	message(LOG_ERR, "ident: can't create epoll err=%d", errno);
+	epfd = INVALID_SOCKET;
+	goto noconnect;	/* I can't tell the master is healthy or not */
+    }
+    ev.events = (EPOLLOUT | EPOLLONESHOT);
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
+	message(LOG_ERR, "ident: epoll_ctl ADD err=%d", errno);
+	goto noconnect;
+    }
 #endif
     ret = connect(sd, peer, peerlen);
     if (ret < 0) {
@@ -3686,12 +3688,19 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 			addr, errno);
 	noconnect:
 #ifdef USE_EPOLL
-	    close(epfd);
+	    if (ValidSocket(epfd)) close(epfd);
 #endif
 	    closesocket(sd);
 	    return 0;
 	}
     }
+#ifdef USE_EPOLL
+    ev.events = (EPOLLIN | EPOLLONESHOT);
+    if (epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev) < 0) {
+	message(LOG_ERR, "ident: epoll_ctl MOD err=%d", errno);
+	goto noconnect;
+    }
+#endif
     snprintf(buf, LONGSTRMAX, "%d, %d%c%c", sport, cport, '\r', '\n');
     len = strlen(buf);
     ret = send(sd, buf, len, 0);
@@ -3706,15 +3715,12 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
     error:
 	shutdown(sd, 2);
 #ifdef USE_EPOLL
-	close(epfd);
+	if (ValidSocket(epfd)) close(epfd);
 #endif
 	closesocket(sd);
 	return 0;
     } else {
-#ifdef USE_EPOLL
-	ev.events = (EPOLLIN | EPOLLONESHOT);
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
-#else
+#ifndef USE_EPOLL
 	fd_set rout;
 	struct timeval tv;
 #endif
@@ -3747,7 +3753,7 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 	}
 	shutdown(sd, 2);
 #ifdef USE_EPOLL
-	close(epfd);
+	if (ValidSocket(epfd)) close(epfd);
 #endif
 	closesocket(sd);
     }
@@ -8779,7 +8785,7 @@ static void handler(int sig) {
 		abort();
 	    }
 	} else {
-	    message(LOG_ERR, "Signal %d, exiting");
+	    message(LOG_ERR, "Signal %d, exiting", sig);
 	}
 	exit(1);
 	break;
