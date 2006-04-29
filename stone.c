@@ -3182,7 +3182,10 @@ void connected(Pair *pair) {
 	}
     } else
 #endif	/* pair & dst is connected */
+    {
 	pair->proto |= (proto_connect | proto_dirty);
+	p->proto |= proto_dirty;	/* src */
+    }
     /*
       SSL connection may not be established yet,
       but we can prepare for read/write
@@ -4946,6 +4949,18 @@ int proxyCommon(Pair *pair, char *parm, int start) {
 	message(LOG_DEBUG, "proxy %d -> http://%s:%s",
 		(r ? r->sd : INVALID_SOCKET), host, port);
     }
+#ifdef USE_EPOLL
+    if (pair->proto & proto_noconnect) {
+	struct epoll_event ev;
+	ev.events = EPOLLONESHOT;
+	ev.data.ptr = pair;
+	if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, pair->sd, &ev) < 0) {
+	    message(LOG_ERR, "%d TCP %d: proxyCommon "
+		    "epoll_ctl %d ADD err=%d",
+		    pair->stone->sd, pair->sd, ePollFd, errno);
+	}
+    }
+#endif
     pair->proto &= ~(proto_noconnect | state_mask);
     pair->proto |= (proto_dirty | 1);
     return doproxy(pair, host, port);
