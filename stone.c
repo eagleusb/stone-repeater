@@ -1929,6 +1929,10 @@ int mkBackup(int argc, int argi, char *argv[]) {
 	    break;
 	}
     }
+    if (argi+2 >= argc) {
+	message(LOG_ERR, "Irregular backup option");
+	exit(1);
+    }
     if (b) {
 	b->last = 0;
 	b->bn = 0;	/* healthy */
@@ -2078,10 +2082,13 @@ int mkChat(int argc, int i, char *argv[]) {
     Chat *top, *bot;
     top = bot = NULL;
     i++;
-    for ( ; i < argc; i+=2) {
+    for ( ; i+1 < argc; i+=2) {
 	Chat *cur;
 	int err;
-	if (argv[i][0] == '-' && argv[i][1] == '-') break;
+	if (argv[i][0] == '-' && argv[i][1] == '-') {
+	    healthChat = top;
+	    return i;
+	}
 	cur = malloc(sizeof(Chat));
 	if (!cur) {
 	memerr:
@@ -2104,7 +2111,8 @@ int mkChat(int argc, int i, char *argv[]) {
 	if (bot) bot->next = cur;
 	bot = cur;
     }
-    healthChat = top;
+    message(LOG_ERR, "chat script ends unexpectedly");
+    exit(1);
     return i;
 }
 
@@ -8176,7 +8184,10 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	break;
 #endif
     case 'L':
-	argi++;
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires log <file>", opt);
+	    exit(1);
+	}
 	if (DryRun) break;
 	if (!strcmp(argv[argi], "-")) {
 	    LogFp = stdout;
@@ -8194,7 +8205,10 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	setbuf(LogFp, NULL);
 	break;
     case 'a':
-	argi++;
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires accounting <file>", opt);
+	    exit(1);
+	}
 	if (DryRun) break;
 	if (!strcmp(argv[argi], "-")) {
 	    AccFp = stdout;
@@ -8212,42 +8226,85 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	setbuf(AccFp, NULL);
 	break;
     case 'i':
-	PidFile = strdup(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires pid <file>", opt);
+	    exit(1);
+	}
+	PidFile = strdup(argv[argi]);
 	break;
 #ifndef NO_CHROOT
     case 't':
-	RootDir = strdup(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires <dir>", opt);
+	    exit(1);
+	}
+	RootDir = strdup(argv[argi]);
 	break;
 #endif
     case 'n':
 	AddrFlag = 1;
 	break;
     case 'u':
-	OriginMax = atoi(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires # of <max> UDP sessions",
+		    opt);
+	    exit(1);
+	}
+	OriginMax = atoi(argv[argi]);
 	break;
     case 'X':
-	XferBufMax = atoi(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires size of Xfer buffer <n>",
+		    opt);
+	    exit(1);
+	}
+	XferBufMax = atoi(argv[argi]);
 	break;
     case 'T':
-	PairTimeOut = atoi(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires timeout <n>", opt);
+	    exit(1);
+	}
+	PairTimeOut = atoi(argv[argi]);
 	break;
     case 'A':
-	BacklogMax = atoi(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires length of backlog <n>", opt);
+	    exit(1);
+	}
+	BacklogMax = atoi(argv[argi]);
 	break;
 #ifndef NO_SETUID
     case 'o':
-	SetUID = atoi(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires <uid>", opt);
+	    exit(1);
+	}
+	SetUID = atoi(argv[argi]);
 	break;
     case 'g':
-	SetGID = atoi(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires <gid>", opt);
+	    exit(1);
+	}
+	SetGID = atoi(argv[argi]);
 	break;
 #endif
     case 'c':
-	CoreDumpDir = strdup(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires <dir> for core dump", opt);
+	    exit(1);
+	}
+	CoreDumpDir = strdup(argv[argi]);
 	break;
 #ifndef NO_FORK
     case 'f':
-	NForks = atoi(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires # of child processes <n>",
+		    opt);
+	    exit(1);
+	}
+	NForks = atoi(argv[argi]);
 	break;
 #endif
 #ifdef UNIX_DAEMON
@@ -8272,11 +8329,19 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 	break;
 #ifdef ADDRCACHE
     case 'H':
-	AddrCacheSize = atoi(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires addr cache size <n>", opt);
+	    exit(1);
+	}
+	AddrCacheSize = atoi(argv[argi]);
 	break;
 #endif
     case 'I':
-	++argi;
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires local interface <host>",
+		    opt);
+	    exit(1);
+	}
 	if (!argv[argi] || argv[argi][0] == '\0') {
 	    ConnectFrom = NULL;
 	} else {
@@ -8326,10 +8391,20 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 #endif
 #ifdef CPP
     case 'P':
-	CppCommand = strdup(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires preprocessor <command>",
+		    opt);
+	    exit(1);
+	}
+	CppCommand = strdup(argv[argi]);
 	break;
     case 'Q':
-	CppOptions = strdup(argv[++argi]);
+	if (++argi >= argc) {
+	    message(LOG_ERR, "option -%c requires <options> for preprocessor",
+		    opt);
+	    exit(1);
+	}
+	CppOptions = strdup(argv[argi]);
 	break;
 #endif
     default:
