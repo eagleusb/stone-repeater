@@ -301,6 +301,7 @@ int FdSetBug = 0;
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/pkcs12.h>
+#include <openssl/rand.h>
 
 #ifdef CRYPTOAPI
 int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
@@ -1205,7 +1206,7 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
     }
 #ifndef NO_UNIXDOMAIN
     if (sa->sa_family == AF_UNIX) {
-	int i, j;
+	int j;
 	j = salen - (((struct sockaddr_un*)sa)->sun_path - (char*)sa);
 	strncpy(serv, ((struct sockaddr_un*)sa)->sun_path, j);
 	serv[j] = '\0';
@@ -1500,7 +1501,6 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
 
 /* *addrp is permitted to connect to *stonep ? */
 XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
-    int i;
     int match = 1;
     if (!xhosts) return XHostsTrue; /* any hosts can access */
     for (; xhosts != NULL; xhosts = xhosts->next) {
@@ -2512,7 +2512,9 @@ int sendUDP(PktBuf *pb) {
 }
 
 void docloseUDP(Origin *origin) {
+#ifdef USE_EPOLL
     SOCKET sd = origin->sd;
+#endif
     if (Debug > 2) message(LOG_DEBUG, "%d UDP %d: close",
 			   origin->stone->sd, origin->sd);
     origin->lock = -1;	/* request to close */
@@ -2540,9 +2542,6 @@ int scanUDP(
     prev = &origins;
     for (origin=origins.next; origin != NULL;
 	 prev=origin, origin=origin->next) {
-#ifndef USE_EPOLL
-	int rflag, eflag;
-#endif
 	if (InvalidSocket(origin->sd) || origin->lock > 0) {
 	    Origin *old = origin;
 	    waitMutex(OrigMutex);
@@ -3670,8 +3669,10 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 	errno = WSAGetLastError();
 #endif
 	if (errno == EINPROGRESS) {
+#ifndef USE_EPOLL
 	    fd_set wout;
 	    struct timeval tv;
+#endif
 	    do {
 		time(&now);
 		if (now - start >= CONN_TIMEOUT) {
@@ -5295,7 +5296,7 @@ int healthCLOCK(Pair *pair, char *parm, int start) {
     time_t now;
     time(&now);
     snprintf(str, LONGSTRMAX,
-	     "now=%d established=%d readwrite=%d", now,
+	     "now=%ld established=%d readwrite=%d", (long)now,
 	     (int)(now - lastEstablished), (int)(now - lastReadWrite));
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": CLOCK %s: %s", parm, str);
@@ -5574,6 +5575,7 @@ int first_read(Pair *pair) {
     return len;
 }
 
+#ifndef USE_EPOLL
 static void message_select(int pri, char *msg,
 			   fd_set *rout, fd_set *wout, fd_set *eout) {
     int i, r, w, e;
@@ -5586,6 +5588,7 @@ static void message_select(int pri, char *msg,
 		    i, (r ? 'r' : ' '), (w ? 'w' : ' '), (e ? 'e' : ' '));
     }
 }
+#endif
 
 /* main event loop */
 
@@ -6177,11 +6180,12 @@ void asyncAcceptConnect(Pair *pair) {
 void asyncClose(Pair *pair) {
     SOCKET sd = pair->sd;
 #ifdef USE_SSL
-    fd_set ro, wo;
-    struct timeval tv;
     int count = 0;
 #ifdef USE_EPOLL
     int epfd = -1;
+#else
+    fd_set ro, wo;
+    struct timeval tv;
 #endif
 #endif
     ASYNC_BEGIN;
@@ -6282,7 +6286,6 @@ void dispatch(int epfd, struct epoll_event *evs, int nevs) {
 	    if (p->stone.proto & proto_udp) {
 		PktBuf *pb = recvUDP(&p->stone);
 		if (pb) {
-		    Origin *origin = pb->origin;
 		    sendUDP(pb);
 		    ungetPktBuf(pb);
 		}
@@ -6393,7 +6396,6 @@ int scanStones(fd_set *rop, fd_set *eop) {
 		if (stone->proto & proto_udp) {
 		    PktBuf *pb = recvUDP(stone);
 		    if (pb) {
-			Origin *origin = pb->origin;
 			sendUDP(pb);
 			ungetPktBuf(pb);
 		    }
@@ -6812,7 +6814,6 @@ void repeater(void) {
     }
 #endif
     if (ret > 0) {
-	int i;
 	nerrs = 0;
 	spin = SPIN_MAX;
 #ifdef USE_EPOLL
@@ -7975,101 +7976,101 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->shutdown_mode = 0;
 }
 
-int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
-    if (!strcmp(argv[i], "default")) {
+int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
+    if (!strcmp(argv[argi], "default")) {
 	sslopts_default(opts, isserver);
-    } else if (!strcmp(argv[i], "verbose")) {
+    } else if (!strcmp(argv[argi], "verbose")) {
 	opts->verbose++;
-    } else if (!strncmp(argv[i], "shutdown=", 9)) {
-	if (!strcmp(argv[i]+9, "nowait")) {
+    } else if (!strncmp(argv[argi], "shutdown=", 9)) {
+	if (!strcmp(argv[argi]+9, "nowait")) {
 	    opts->shutdown_mode = SSL_RECEIVED_SHUTDOWN;
-	} else if (!strcmp(argv[i]+9, "accurate")) {
+	} else if (!strcmp(argv[argi]+9, "accurate")) {
 	    opts->shutdown_mode = 0;
-	} else if (!strcmp(argv[i]+9, "unclean")) {
+	} else if (!strcmp(argv[argi]+9, "unclean")) {
 	    opts->shutdown_mode = (SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
 	}
-    } else if (!strncmp(argv[i], "verify", 6)
-	       && (argv[i][6] == '\0' || argv[i][6] == ',')) {
-	if (!strcmp(argv[i]+6, ",none")) {
+    } else if (!strncmp(argv[argi], "verify", 6)
+	       && (argv[argi][6] == '\0' || argv[argi][6] == ',')) {
+	if (!strcmp(argv[argi]+6, ",none")) {
 	    opts->mode = SSL_VERIFY_NONE;
 	} else if (isserver) {
 	    opts->mode = (SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT);
-	    if (argv[i][6] == ',') {
-		if (!strcmp(argv[i]+7, "ifany")) {
+	    if (argv[argi][6] == ',') {
+		if (!strcmp(argv[argi]+7, "ifany")) {
 		    opts->mode = (SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE);
-		} else if (!strcmp(argv[i]+7, "once")) {
+		} else if (!strcmp(argv[argi]+7, "once")) {
 		    opts->mode |= SSL_VERIFY_CLIENT_ONCE;
 		}
 	    }
-	} else if (argv[i][6] == '\0') {
+	} else if (argv[argi][6] == '\0') {
 	    opts->mode = SSL_VERIFY_PEER;
 	} else {
 	    goto error;
 	}
-    } else if (!strncmp(argv[i], "crl_check", 9)) {
+    } else if (!strncmp(argv[argi], "crl_check", 9)) {
 	opts->vflags |= X509_V_FLAG_CRL_CHECK;
-    } else if (!strncmp(argv[i], "crl_check_all", 13)) {
+    } else if (!strncmp(argv[argi], "crl_check_all", 13)) {
 	opts->vflags |= (X509_V_FLAG_CRL_CHECK
 			 | X509_V_FLAG_CRL_CHECK_ALL);
-    } else if (!strncmp(argv[i], "re", 2) && isdigit(argv[i][2])
-	       && argv[i][3] == '=') {
-	int depth = atoi(argv[i]+2);
+    } else if (!strncmp(argv[argi], "re", 2) && isdigit(argv[argi][2])
+	       && argv[argi][3] == '=') {
+	int depth = atoi(argv[argi]+2);
 	if (0 <= depth && depth < DEPTH_MAX) {
-	    opts->regexp[depth] = strdup(argv[i]+4);
+	    opts->regexp[depth] = strdup(argv[argi]+4);
 	} else {
 	    goto error;
 	}
-    } else if (!strncmp(argv[i], "depth=", 6)) {
-	opts->depth = atoi(argv[i]+6);
+    } else if (!strncmp(argv[argi], "depth=", 6)) {
+	opts->depth = atoi(argv[argi]+6);
 	if (opts->depth >= DEPTH_MAX) opts->depth = DEPTH_MAX - 1;
 	else if (opts->depth < 0) opts->depth = 0;
-    } else if (!strcmp(argv[i], "bugs")) {
+    } else if (!strcmp(argv[argi], "bugs")) {
 	opts->off |= SSL_OP_ALL;
 #ifndef OPENSSL_NO_TLS1
-    } else if (!strcmp(argv[i], "tls1")) {
+    } else if (!strcmp(argv[argi], "tls1")) {
 	if (isserver) opts->meth = TLSv1_server_method();
 	else opts->meth = TLSv1_client_method();
 #endif
 #ifndef OPENSSL_NO_SSL3
-    } else if (!strcmp(argv[i], "ssl3")) {
+    } else if (!strcmp(argv[argi], "ssl3")) {
 	if (isserver) opts->meth = SSLv3_server_method();
 	else opts->meth = SSLv3_client_method();
 #endif
 #ifndef OPENSSL_NO_SSL2
-    } else if (!strcmp(argv[i], "ssl2")) {
+    } else if (!strcmp(argv[argi], "ssl2")) {
 	if (isserver) opts->meth = SSLv2_server_method();
 	else opts->meth = SSLv2_client_method();
 #endif
-    } else if (!strcmp(argv[i], "no_tls1")) {
+    } else if (!strcmp(argv[argi], "no_tls1")) {
 	opts->off |= SSL_OP_NO_TLSv1;
-    } else if (!strcmp(argv[i], "no_ssl3")) {
+    } else if (!strcmp(argv[argi], "no_ssl3")) {
 	opts->off |= SSL_OP_NO_SSLv3;
-    } else if (!strcmp(argv[i], "no_ssl2")) {
+    } else if (!strcmp(argv[argi], "no_ssl2")) {
 	opts->off |= SSL_OP_NO_SSLv2;
 #ifdef SSL_OP_CIPHER_SERVER_PREFERENCE
-    } else if (!strcmp(argv[i], "serverpref")) {
+    } else if (!strcmp(argv[argi], "serverpref")) {
 	opts->off |= SSL_OP_CIPHER_SERVER_PREFERENCE;
 #endif
-    } else if (!strcmp(argv[i], "uniq")) {
+    } else if (!strcmp(argv[argi], "uniq")) {
 	opts->serial = -1;
-    } else if (!strncmp(argv[i], "sid_ctx=", 8)) {
-	opts->sid_ctx = strdup(argv[i]+8);
-    } else if (!strncmp(argv[i], "key=", 4)) {
-	opts->keyFile = strdup(argv[i]+4);
-    } else if (!strncmp(argv[i], "cert=", 5)) {
-	opts->certFile = strdup(argv[i]+5);
-    } else if (!strncmp(argv[i], "CAfile=", 7)) {
-	opts->caFile = strdup(argv[i]+7);
-    } else if (!strncmp(argv[i], "CApath=", 7)) {
-	opts->caPath = strdup(argv[i]+7);
-    } else if (!strncmp(argv[i], "pfx=", 4)) {
-	opts->pfxFile = strdup(argv[i]+4);
-    } else if (!strncmp(argv[i], "passfile=", 9)) {
-	FILE *fp = fopen(argv[i]+9, "r");
+    } else if (!strncmp(argv[argi], "sid_ctx=", 8)) {
+	opts->sid_ctx = strdup(argv[argi]+8);
+    } else if (!strncmp(argv[argi], "key=", 4)) {
+	opts->keyFile = strdup(argv[argi]+4);
+    } else if (!strncmp(argv[argi], "cert=", 5)) {
+	opts->certFile = strdup(argv[argi]+5);
+    } else if (!strncmp(argv[argi], "CAfile=", 7)) {
+	opts->caFile = strdup(argv[argi]+7);
+    } else if (!strncmp(argv[argi], "CApath=", 7)) {
+	opts->caPath = strdup(argv[argi]+7);
+    } else if (!strncmp(argv[argi], "pfx=", 4)) {
+	opts->pfxFile = strdup(argv[argi]+4);
+    } else if (!strncmp(argv[argi], "passfile=", 9)) {
+	FILE *fp = fopen(argv[argi]+9, "r");
 	char str[STRMAX+1];
 	int i;
 	if (!fp) {
-	    message(LOG_ERR, "Can't open passwd file: %s", argv[i]+9);
+	    message(LOG_ERR, "Can't open passwd file: %s", argv[argi]+9);
 	    help(argv[0], "ssl");
 	    exit(1);
 	}
@@ -8082,22 +8083,22 @@ int sslopts(int argc, int i, char *argv[], SSLOpts *opts, int isserver) {
 	fclose(fp);
 	opts->passwd = strdup(str);
 #ifdef CRYPTOAPI
-    } else if (!strncmp(argv[i], "store=", 6)) {
-	opts->certStore = strdup(argv[i]+6);
+    } else if (!strncmp(argv[argi], "store=", 6)) {
+	opts->certStore = strdup(argv[argi]+6);
 #endif
-    } else if (!strncmp(argv[i], "cipher=", 7)) {
-	opts->cipherList = strdup(argv[i]+7);
-    } else if (!strncmp(argv[i], "lb", 2) && isdigit(argv[i][2])
-	       && argv[i][3] == '=') {
-	opts->lbparm = argv[i][2] - '0';
-	opts->lbmod = atoi(argv[i]+4);
+    } else if (!strncmp(argv[argi], "cipher=", 7)) {
+	opts->cipherList = strdup(argv[argi]+7);
+    } else if (!strncmp(argv[argi], "lb", 2) && isdigit(argv[argi][2])
+	       && argv[argi][3] == '=') {
+	opts->lbparm = argv[argi][2] - '0';
+	opts->lbmod = atoi(argv[argi]+4);
     } else {
     error:
-	message(LOG_ERR, "Invalid SSL Option: %s", argv[i]);
+	message(LOG_ERR, "Invalid SSL Option: %s", argv[argi]);
 	help(argv[0], "ssl");
 	exit(1);
     }
-    return i;
+    return argi;
 }
 
 #ifndef NO_THREAD
