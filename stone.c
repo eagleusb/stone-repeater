@@ -5996,7 +5996,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 			    message(LOG_DEBUG,
 				    "%d TCP %d: SSL_pending, read again",
 				    stsd, rPair->sd);
-			ret = 0;	/* read once */
+			ret = 2;	/* read once */
 			goto read_pending;
 		    }
 #endif
@@ -6050,12 +6050,14 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    message_select(LOG_DEBUG, "selectReadWrite2", &ro, &wo, &eo);
 	for (i=0; i < npairs; i++) {
 	    SOCKET sd;
+	    int ret;
 	    if (!p[i] || (p[i]->proto & proto_close)) continue;
 	    sd = p[i]->sd;
 	    if (InvalidSocket(sd)) continue;
-	    if (!doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
-				 FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0))
-		goto leave;
+	    ret = doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
+				  FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0);
+	    if (!ret) goto leave;
+	    if (ret == 2) break		/* if ret == 2, read once */
 	}
     }
  leave:
