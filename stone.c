@@ -6057,7 +6057,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    ret = doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
 				  FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0);
 	    if (!ret) goto leave;
-	    if (ret == 2) break		/* if ret == 2, read once */
+	    if (ret == 2) break;	/* if ret == 2, read once */
 	}
     }
  leave:
