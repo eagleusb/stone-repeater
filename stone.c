@@ -559,7 +559,7 @@ ExBuf *freeExBot = NULL;
 int nFreeExBot = 0;
 time_t freeExBotClock = 0;
 Conn conns;
-Origin origins;
+Origin *OriginTop = NULL;
 int OriginMax = 100;
 PktBuf *freePktBuf = NULL;
 int nFreePktBuf = 0;
@@ -2307,11 +2307,13 @@ void freeOrigin(Origin *origin) {
 
 Origin *getOrigins(struct sockaddr *from, socklen_t fromlen, Stone *stone) {
     Origin *origin;
+    Origin *origins = (Origin*)stone->p;
     SOCKET sd;
 #ifdef USE_EPOLL
     struct epoll_event ev;
 #endif
-    for (origin=origins.next; origin != NULL; origin=origin->next) {
+    for (origin=origins->next; origin != NULL && origin->from;
+	 origin=origin->next) {
 	if (InvalidSocket(origin->sd)) continue;
 	if (saComp(&origin->from->addr, from)) {
 	    origin->lock = 1;	/* lock origin */
@@ -2327,6 +2329,12 @@ Origin *getOrigins(struct sockaddr *from, socklen_t fromlen, Stone *stone) {
 	message(LOG_ERR, "%d UDP: can't create datagram socket err=%d",
 		stone->sd, errno);
 	return NULL;
+    }
+    if (Debug > 3) {
+	char addrport[STRMAX+1];
+	message(LOG_DEBUG, "%d UDP %d: New origin %s",
+		stone->sd, sd,
+		addrport2str(from, fromlen, proto_udp, addrport, STRMAX, 0));
     }
     if (!(stone->proto & proto_block_d)) {
 #ifdef WINDOWS
@@ -2369,8 +2377,8 @@ Origin *getOrigins(struct sockaddr *from, socklen_t fromlen, Stone *stone) {
     freeMutex(FdRinMutex);
 #endif
     waitMutex(OrigMutex);
-    origin->next = origins.next;	/* insert origin */
-    origins.next = origin;
+    origin->next = origins->next;	/* insert origin */
+    origins->next = origin;
     freeMutex(OrigMutex);
     return origin;
 }
@@ -2529,19 +2537,29 @@ void docloseUDP(Origin *origin) {
 }
 
 int scanUDP(
-#ifdef USE_EPOLL
-    void
-#else
-    fd_set *rop, fd_set *eop
+#ifndef USE_EPOLL
+    fd_set *rop, fd_set *eop,
 #endif
+    Origin *origins
     ) {
     Origin *origin, *prev;
     int n = 0;
+    int all;
     time_t now;
     time(&now);
-    prev = &origins;
-    for (origin=origins.next; origin != NULL;
+    if (origins) {
+	all = 0;
+    } else {
+	origins = OriginTop;
+	all = 1;
+    }
+    prev = origins;
+    for (origin=origins->next; origin != NULL && (all || origin->from != NULL);
 	 prev=origin, origin=origin->next) {
+	if (all && origin->from == NULL) {
+	    origins = origin;
+	    continue;
+	}
 	if (InvalidSocket(origin->sd) || origin->lock > 0) {
 	    Origin *old = origin;
 	    waitMutex(OrigMutex);
@@ -2552,8 +2570,8 @@ int scanUDP(
 		    freeOrigin(old);
 		} else {
 		    old->lock = 0;
-		    old->next = origins.next;	/* insert old on top */
-		    origins.next = old;
+		    old->next = origins->next;	/* insert old on top */
+		    origins->next = old;
 		}
 	    }
 	    freeMutex(OrigMutex);
@@ -4216,8 +4234,14 @@ void message_pairs(int pri) {	/* dump for debug */
 
 void message_origins(int pri) {	/* dump for debug */
     Origin *origin;
-    for (origin=origins.next; origin != NULL; origin=origin->next)
-	message_origin(pri, origin);
+    for (origin=OriginTop; origin != NULL; origin=origin->next) {
+	if (origin->from) {
+	    message_origin(pri, origin);
+	} else if (Debug > 2) {
+	    message(LOG_DEBUG, "%d UDP %d: top",
+		    origin->stone->sd, origin->sd);
+	}
+    }
 }
 
 void message_conns(int pri) {	/* dump for debug */
@@ -5196,7 +5220,8 @@ int nConns(void) {
 int nOrigins(void) {
     int n = 0;
     Origin *origin;
-    for (origin=origins.next; origin != NULL; origin=origin->next) n++;
+    for (origin=OriginTop; origin != NULL; origin=origin->next)
+	if (origin->from) n++;
     return n;
 }
 
@@ -6407,6 +6432,9 @@ int scanStones(fd_set *rop, fd_set *eop) {
 		}
 	    }
 	}
+	if (stone->proto & proto_udp) {
+	    scanUDP(rop, eop, (Origin *)stone->p);
+	}
     }
     return 1;
 }
@@ -6822,8 +6850,7 @@ void repeater(void) {
 	dispatch(ePollFd, evs, ret);
 #else
 	(void)(scanStones(&rout, &eout) > 0 &&
-	       scanPairs(&rout, &wout, &eout) > 0 &&
-	       scanUDP(&rout, &eout) > 0);
+	       scanPairs(&rout, &wout, &eout) > 0);
 #endif
     } else if (ret < 0) {
 #ifdef WINDOWS
@@ -6861,7 +6888,7 @@ void repeater(void) {
     }
 #ifdef USE_EPOLL
     scanPairs();
-    scanUDP();
+    scanUDP(NULL);
 #endif
     scanClose();
     if (oldstones) rmoldstone();
@@ -8748,7 +8775,21 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (dproto & proto_nobackup) proto |= proto_nobackup;
 	}
 	stone = mkstone(host, serv, shost, sserv, j, &argv[k], proto);
-	if (proto & proto_ohttp_d) {
+	if (proto & proto_udp) {
+	    Origin *origin = (Origin*)malloc(sizeof(Origin));
+	    if (origin == NULL) {
+		message(LOG_CRIT, "Out of memory");
+		exit(1);
+	    }
+	    bzero(origin, sizeof(Origin));
+	    origin->stone = stone;
+	    origin->common = type_origin;
+	    origin->sd = INVALID_SOCKET;
+	    origin->from = NULL;
+	    origin->next = OriginTop;
+	    OriginTop = origin;
+	    stone->p = (char*)origin;
+	} else if (proto & proto_ohttp_d) {
 	    stone->p = strdup(p);
 	} else if (((proto & proto_command) == command_ihead) ||
 		   ((proto & proto_command) == command_iheads)) {
@@ -8989,7 +9030,6 @@ void initialize(int argc, char *argv[]) {
     pairs.next = NULL;
     trash.next = NULL;
     conns.next = NULL;
-    origins.next = NULL;
 #ifndef USE_EPOLL
 #ifdef FD_SET_BUG
     checkFdSetBug();
