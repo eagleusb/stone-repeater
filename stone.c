@@ -3573,8 +3573,11 @@ int scanConns(void) {
 }
 
 Pair *acceptPair(Stone *stonep) {
+    struct sockaddr_storage ss;
+    struct sockaddr *from = (struct sockaddr*)&ss;
+    socklen_t fromlen = sizeof(ss);
     Pair *pair;
-    SOCKET nsd = accept(stonep->sd, NULL, NULL);
+    SOCKET nsd = accept(stonep->sd, from, &fromlen);
     if (InvalidSocket(nsd)) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -3605,6 +3608,8 @@ Pair *acceptPair(Stone *stonep) {
 	freePair(pair);
 	return NULL;
     }
+    bcopy(&fromlen, pair->t->buf, sizeof(fromlen));	/* save to ExBuf */
+    bcopy(from, pair->t->buf + sizeof(fromlen), fromlen);
     pair->sd = nsd;
     pair->stone = stonep;
     pair->proto = ((stonep->proto & proto_pair_s & ~proto_command) |
@@ -3828,13 +3833,21 @@ int acceptCheck(Pair *pair1) {
     char fromstr[STRMAX*2+1];
     len = 0;
     ident[0] = '\0';
-    if (getpeername(pair1->sd, from, &fromlen) < 0) {
+    bcopy(pair1->t->buf, &fromlen, sizeof(fromlen));	/* restore */
+    if (0 < fromlen && fromlen <= sizeof(ss1)) {
+	bcopy(pair1->t->buf + sizeof(fromlen), from, fromlen);
+    } else {
+	message(LOG_ERR, "stone %d: acceptCheck Can't happen fromlen=%d",
+		stonep->sd, pair1->sd, fromlen);
+	if (getpeername(pair1->sd, from, &fromlen) < 0) {
 #ifdef WINDOWS
-	errno = WSAGetLastError();
+	    errno = WSAGetLastError();
 #endif
-	message(LOG_ERR, "%d TCP %d: acceptCheck Can't get peer's name err=%d",
-		stonep->sd, pair1->sd, errno);
-	return 0;
+	    message(LOG_ERR,
+		    "%d TCP %d: acceptCheck Can't get peer's name err=%d",
+		    stonep->sd, pair1->sd, errno);
+	    return 0;
+	}
     }
     if (stonep->proto & proto_ident) {
 	if (getsockname(pair1->sd, to, &tolen) < 0) {
@@ -5634,6 +5647,7 @@ void proto2fdset(Pair *pair, int isthread,
     sd = pair->sd;
     if (InvalidSocket(sd)) return;
     if (!isthread && (pair->proto & proto_thread)) return;
+    if (pair->proto & proto_close) return;
     if (pair->proto & proto_conninprog) {
 #ifdef USE_EPOLL
 	ev.events |= (EPOLLOUT | EPOLLPRI);
@@ -5716,7 +5730,7 @@ void proto2fdset(Pair *pair, int isthread,
 	if (pair->ssl_flag & (sf_ab_on_w)) FdSet(sd, woutp);
 #endif
 #endif
-    } else if ((pair->proto & proto_connect) && !(pair->proto & proto_close)) {
+    } else if (pair->proto & proto_connect) {
 	int isset = 0;
 	if (!(pair->proto & proto_eof)
 	    && (pair->proto & proto_select_r)) {
@@ -6888,7 +6902,7 @@ void repeater(void) {
     }
 #ifdef USE_EPOLL
     scanPairs();
-    scanUDP(NULL);
+    if (OriginTop) scanUDP(NULL);
 #endif
     scanClose();
     if (oldstones) rmoldstone();
