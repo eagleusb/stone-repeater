@@ -3951,7 +3951,6 @@ int acceptCheck(Pair *pair1) {
 #endif
 	message(priority(pair1), "%d TCP %d: can't create socket err=%d",
 		stonep->sd, pair1->sd, errno);
-    error:
 	freePair(pair2);
 	return 0;
     }
@@ -5659,10 +5658,11 @@ void proto2fdset(Pair *pair, int isthread,
 	if (pair->ssl_flag & sf_sb_on_r) FdSet(sd, routp);
 	if (pair->ssl_flag & sf_sb_on_w) FdSet(sd, woutp);
 #endif
-    }
+    } else
 #endif
-    if (pair->proto & proto_close) return;
-    if (pair->proto & proto_conninprog) {
+    if (pair->proto & proto_close) {
+	return;
+    } else if (pair->proto & proto_conninprog) {
 #ifdef USE_EPOLL
 	ev.events |= (EPOLLOUT | EPOLLPRI);
 	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
@@ -5883,7 +5883,9 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	wPair = opposite;
 	rsd = sd;
 	if (wPair) wsd = wPair->sd; else wsd = INVALID_SOCKET;
+#ifdef USE_SSL
     read_pending:
+#endif
 	rPair->proto &= ~proto_select_r;
 	rPair->proto |= proto_dirty;
 	rPair->count += REF_UNIT;
