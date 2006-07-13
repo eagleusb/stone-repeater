@@ -5647,17 +5647,8 @@ void proto2fdset(Pair *pair, int isthread,
     sd = pair->sd;
     if (InvalidSocket(sd)) return;
     if (!isthread && (pair->proto & proto_thread)) return;
-    if (pair->proto & proto_close) return;
-    if (pair->proto & proto_conninprog) {
-#ifdef USE_EPOLL
-	ev.events |= (EPOLLOUT | EPOLLPRI);
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
-#else
-	FdSet(sd, woutp);
-	FdSet(sd, eoutp);
-#endif
 #ifdef USE_SSL
-    } else if (pair->ssl_flag & (sf_sb_on_r | sf_sb_on_w)) {
+    if (pair->ssl_flag & (sf_sb_on_r | sf_sb_on_w)) {
 #ifdef USE_EPOLL
 	if (pair->ssl_flag & sf_sb_on_r) ev.events |= EPOLLIN;
 	if (pair->ssl_flag & sf_sb_on_w) ev.events |= EPOLLOUT;
@@ -5668,6 +5659,18 @@ void proto2fdset(Pair *pair, int isthread,
 	if (pair->ssl_flag & sf_sb_on_r) FdSet(sd, routp);
 	if (pair->ssl_flag & sf_sb_on_w) FdSet(sd, woutp);
 #endif
+    }
+#endif
+    if (pair->proto & proto_close) return;
+    if (pair->proto & proto_conninprog) {
+#ifdef USE_EPOLL
+	ev.events |= (EPOLLOUT | EPOLLPRI);
+	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+#else
+	FdSet(sd, woutp);
+	FdSet(sd, eoutp);
+#endif
+#ifdef USE_SSL
     } else if (pair->ssl_flag & sf_wb_on_r) {
 #ifdef USE_EPOLL
 	ev.events |= EPOLLIN;
@@ -6061,6 +6064,9 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     int npairs = 1;
     Pair *p[2];
     SOCKET stsd;
+    int loop;
+    int rx[2];
+    int tx[2];
     int i;
     fd_set ri, wi, ei;
     fd_set ro, wo, eo;
@@ -6075,6 +6081,13 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     FD_ZERO(&ri);
     FD_ZERO(&wi);
     FD_ZERO(&ei);
+    rx[0] = p[0]->rx;
+    tx[0] = p[0]->tx;
+    if (p[1]) {
+	rx[1] = p[1]->rx;
+	tx[1] = p[1]->tx;
+    }
+    loop = 0;
     for (;;) {	/* loop until timeout or EOF/error */
 	tv.tv_sec = 0;
 	tv.tv_usec = TICK_SELECT;
@@ -6097,6 +6110,23 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 				  FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0);
 	    if (!ret) goto leave;
 	    if (ret == 2) break;	/* if ret == 2, read once */
+	}
+	if (++loop > 10) {	/* check if spin occured */
+	    if (rx[0] == p[0]->rx && tx[0] == p[0]->tx	/* no update => spin */
+		&& (!p[1] || (rx[1] == p[1]->rx && tx[1] == p[1]->tx))) {
+		message(LOG_ERR, "%d TCP %d: doReadWrite Can't happen "
+			"spin occured", stsd,
+			(p[0] ? p[0]->sd : INVALID_SOCKET),
+			(p[1] ? p[1]->sd : INVALID_SOCKET));
+		goto leave;
+	    }
+	    rx[0] = p[0]->rx;
+	    tx[0] = p[0]->tx;
+	    if (p[1]) {
+		rx[1] = p[1]->rx;
+		tx[1] = p[1]->tx;
+	    }
+	    loop = 0;
 	}
     }
  leave:
