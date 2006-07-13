@@ -636,14 +636,16 @@ const int proto_base_d =	0x20000000;	/*        destination */
 
 #ifdef USE_SSL
 const int sf_mask    =  0x0000f;
-const int sf_sb_on_r =  0x00010;	/* SSL_shutdown blocked on read */
-const int sf_sb_on_w =  0x00020;	/* SSL_shutdown blocked on write */
-const int sf_wb_on_r =	0x00040;	/* SSL_write blocked on read */
-const int sf_rb_on_w =	0x00080;	/* SSL_read  blocked on write */
-const int sf_cb_on_r =  0x00100;	/* SSL_connect blocked on read */
-const int sf_cb_on_w =  0x00200;	/* SSL_connect blocked on write */
-const int sf_ab_on_r =  0x00400;	/* SSL_accept blocked on read */
-const int sf_ab_on_w =  0x00800;	/* SSL_accept blocked on write */
+const int sf_depth   =	0x000f0;	/* depth of cert chain */
+const int sf_depth_bit = 4;
+const int sf_sb_on_r =  0x00100;	/* SSL_shutdown blocked on read */
+const int sf_sb_on_w =  0x00200;	/* SSL_shutdown blocked on write */
+const int sf_wb_on_r =	0x00400;	/* SSL_write blocked on read */
+const int sf_rb_on_w =	0x00800;	/* SSL_read  blocked on write */
+const int sf_cb_on_r =  0x01000;	/* SSL_connect blocked on read */
+const int sf_cb_on_w =  0x02000;	/* SSL_connect blocked on write */
+const int sf_ab_on_r =  0x04000;	/* SSL_accept blocked on read */
+const int sf_ab_on_w =  0x08000;	/* SSL_accept blocked on write */
 #endif
 
 int BacklogMax = BACKLOG_MAX;
@@ -6545,15 +6547,16 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	message(LOG_ERR, "SSL callback don't have ex_data, verify fails");
 	return 0;	/* always fail */
     }
-    depthmax = (pair->ssl_flag & sf_mask);
-    if (depth >= depthmax) {
-	depthmax = depth + 1;
-	pair->ssl_flag = ((pair->ssl_flag & ~sf_mask) | depthmax);
-    }
     if ((pair->proto & proto_command) == command_source) {
 	ss = pair->stone->ssl_server;
     } else {
 	ss = pair->stone->ssl_client;
+    }
+    depthmax = ((pair->ssl_flag & sf_depth) >> sf_depth_bit);
+    if (depth >= depthmax) {
+	depthmax = depth + 1;
+	pair->ssl_flag = ((pair->ssl_flag & ~sf_depth)
+			  | (depthmax << sf_depth_bit));
     }
     if (depth == 0) {
 	ASN1_INTEGER *n = X509_get_serialNumber(err_cert);
@@ -6634,6 +6637,9 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 		    pair->stone->sd, pair->sd);
 	}
 	if (sess) SSL_SESSION_free(sess);
+    } else {
+	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: re%d=NULL",
+			       pair->stone->sd, pair->sd, depth);
     }
     return 1;	/* if re is null, always succeed */
 }
