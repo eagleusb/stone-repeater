@@ -6091,6 +6091,9 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
     if (p[1]) {
 	rx[1] = p[1]->rx;
 	tx[1] = p[1]->tx;
+    } else {
+	rx[1] = -1;
+	tx[1] = -1;
     }
     loop = 0;
     for (;;) {	/* loop until timeout or EOF/error */
@@ -6119,10 +6122,11 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	if (++loop > 10) {	/* check if spin occured */
 	    if (rx[0] == p[0]->rx && tx[0] == p[0]->tx	/* no update => spin */
 		&& (!p[1] || (rx[1] == p[1]->rx && tx[1] == p[1]->tx))) {
-		message(LOG_ERR, "%d TCP %d: doReadWrite Can't happen "
-			"spin occured", stsd,
+		message(LOG_ERR, "%d TCP %d, %d: doReadWrite Can't happen "
+			"spin occured tx/rx: %d/%d, %d/%d", stsd,
 			(p[0] ? p[0]->sd : INVALID_SOCKET),
-			(p[1] ? p[1]->sd : INVALID_SOCKET));
+			(p[1] ? p[1]->sd : INVALID_SOCKET),
+			tx[0], rx[0], tx[1], rx[1]);
 		goto leave;
 	    }
 	    rx[0] = p[0]->rx;
@@ -6519,7 +6523,8 @@ static void freeMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
 
 static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
     X509 *err_cert;
-    int err, depth;
+    int err, depth, depthmax;
+    regex_t *re;
     long serial = -1;
     SSL *ssl;
     Pair *pair;
@@ -6540,6 +6545,11 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	message(LOG_ERR, "SSL callback don't have ex_data, verify fails");
 	return 0;	/* always fail */
     }
+    depthmax = (pair->ssl_flag & sf_mask);
+    if (depth >= depthmax) {
+	depthmax = depth + 1;
+	pair->ssl_flag = ((pair->ssl_flag & ~sf_mask) | depthmax);
+    }
     if ((pair->proto & proto_command) == command_source) {
 	ss = pair->stone->ssl_server;
     } else {
@@ -6559,8 +6569,9 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
     }
     if (Debug > 3)
 	message(LOG_DEBUG,
-		"%d TCP %d: callback: err=%d, depth=%d, preverify=%d",
-		pair->stone->sd, pair->sd, err, depth, preverify_ok);
+		"%d TCP %d: callback: err=%d, depth=%d/%d, preverify=%d",
+		pair->stone->sd, pair->sd, err, depth, depth - depthmax,
+		preverify_ok);
     p = X509_NAME_oneline(X509_get_subject_name(err_cert), buf, BUFMAX-1);
     if (!p) return 0;
     if (ss->verbose) message(LOG_DEBUG, "%d TCP %d: [depth%d=%s]",
@@ -6576,11 +6587,13 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 		    err, X509_verify_cert_error_string(err));
 	return 0;
     }
-    if (depth < DEPTH_MAX && ss->re[depth]) {
+    re = ss->re[DEPTH_MAX - depthmax + depth];
+    if (!re) re = ss->re[depth];
+    if (depth < DEPTH_MAX && re) {
 	SSL_SESSION *sess = NULL;
 	regmatch_t pmatch[NMATCH_MAX];
 	char **match;
-	err = regexec(ss->re[depth], p, (size_t)NMATCH_MAX, pmatch, 0);
+	err = regexec(re, p, (size_t)NMATCH_MAX, pmatch, 0);
 	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: regexec%d=%d",
 			       pair->stone->sd, pair->sd, depth, err);
 	if (err) return 0;	/* not match */
@@ -6616,7 +6629,8 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 		}
 	    }
 	} else {
-	    message(LOG_ERR, "%d TCP %d: SSL callback can't get session's ex_data",
+	    message(LOG_ERR,
+		    "%d TCP %d: SSL callback can't get session's ex_data",
 		    pair->stone->sd, pair->sd);
 	}
 	if (sess) SSL_SESSION_free(sess);
@@ -6763,7 +6777,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	goto error;
     }
     for (i=0; i < DEPTH_MAX; i++) {
-	if (i <= opts->depth && opts->regexp[i]) {
+	if (opts->regexp[i]) {
 	    ss->re[i] = malloc(sizeof(regex_t));
 	    if (!ss->re) goto memerr;
 	    err = regcomp(ss->re[i], opts->regexp[i], REG_EXTENDED|REG_ICASE);
@@ -8095,6 +8109,14 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 	int depth = atoi(argv[argi]+2);
 	if (0 <= depth && depth < DEPTH_MAX) {
 	    opts->regexp[depth] = strdup(argv[argi]+4);
+	} else {
+	    goto error;
+	}
+    } else if (!strncmp(argv[argi], "re-", 3) && isdigit(argv[argi][3])
+	       && argv[argi][4] == '=') {
+	int depth = atoi(argv[argi]+3);
+	if (0 < depth && depth <= DEPTH_MAX) {
+	    opts->regexp[DEPTH_MAX-depth] = strdup(argv[argi]+5);
 	} else {
 	    goto error;
 	}
