@@ -3951,6 +3951,9 @@ int acceptCheck(Pair *pair1) {
 #endif
 	message(priority(pair1), "%d TCP %d: can't create socket err=%d",
 		stonep->sd, pair1->sd, errno);
+#ifdef USE_SSL
+    error:
+#endif
 	freePair(pair2);
 	return 0;
     }
