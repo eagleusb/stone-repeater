@@ -90,7 +90,7 @@
  * -DWINDOWS	  Windows95/98/NT
  * -DNT_SERVICE	  WindowsNT/2000 native service
  */
-#define VERSION	"2.3b"
+#define VERSION	"2.3c"
 static char *CVS_ID =
 "@(#) $Id$";
 
@@ -192,7 +192,7 @@ typedef void *(*aync_start_routine) (void *);
 	message(LOG_ERR,"pthread_create error err=%d",err);\
 	func(arg);\
     } else if (Debug > 7) {\
-	message(LOG_DEBUG,"pthread ID=%d",thread);\
+	message(LOG_DEBUG,"pthread ID=%lu",thread);\
     }\
 }
 #else	/* ! PTHREAD */
@@ -575,10 +575,10 @@ int MutexConflict = 0;
 const int state_mask =		    0x00ff;
 const int proto_command =	    0x0f00;	/* command (dest. only) */
 						/* only for Stone */
-/*const int proto_ =		    0x1000;	  */
-const int proto_ident =		    0x2000;	  /* need ident */
-const int proto_nobackup =	    0x4000;	  /* no backup */
-const int proto_udp =		    0x8000;	  /* user datagram protocol */
+const int proto_ident =		    0x1000;	  /* need ident */
+const int proto_nobackup =	    0x2000;	  /* no backup */
+const int proto_udp_s =		    0x4000;	  /* UDP source */
+const int proto_udp_d =		    0x8000;	  /*     destination */
 const int proto_v6_s =		   0x10000;	  /* IPv6 source */
 const int proto_v6_d =		   0x20000;	  /*      destination */
 const int proto_ip_only_s =	   0x40000;	  /* IPv6 only source */
@@ -618,16 +618,17 @@ const int proto_base_d =	0x20000000;	/*        destination */
 
 #define proto_ssl	(proto_ssl_s|proto_ssl_d)
 #define proto_v6	(proto_v6_s|proto_v6_d)
+#define proto_udp	(proto_udp_s|proto_udp_d)
 #define proto_ip_only	(proto_ip_only_s|proto_ip_only_d)
 #define proto_unix	(proto_unix_s|proto_unix_d)
 #define proto_block	(proto_block_s|proto_block_d)
 #define proto_ohttp	(proto_ohttp_s|proto_ohttp_d)
 #define proto_base	(proto_base_s|proto_base_d)
-#define proto_stone_s	(proto_udp|proto_command|\
+#define proto_stone_s	(proto_udp_s|proto_command|\
 			 proto_ohttp_s|proto_base_s|\
 			 proto_v6_s|proto_ip_only_s|\
 			 proto_ssl_s|proto_ident)
-#define proto_stone_d	(proto_udp|proto_command|\
+#define proto_stone_d	(proto_udp_d|proto_command|\
 			 proto_ohttp_d|proto_base_d|\
 			 proto_v6_d|proto_ip_only_d|\
 			 proto_ssl_d|proto_nobackup)
@@ -828,6 +829,11 @@ int gettimeofday(struct timeval *tv, void *tz) {
     }
     return -1;
 }
+#endif
+
+#if defined (__STDC__) && __STDC__
+void message(int pri, char *fmt, ...)
+    __attribute__ ((__format__ (__printf__, 2, 3))); 
 #endif
 
 void message(int pri, char *fmt, ...) {
@@ -1475,7 +1481,7 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
 	ap = ((struct sockaddr_in*)a)->sin_port;
 	bp = ((struct sockaddr_in*)b)->sin_port;
 	if (Debug > 10) {
-	    message(LOG_DEBUG, "saComp: %lx:%d, %lx:%d",
+	    message(LOG_DEBUG, "saComp: %x:%d, %x:%d",
 		    ntohl(an->s_addr), ntohs(ap),
 		    ntohl(bn->s_addr), ntohs(bp));
 	}
@@ -3140,7 +3146,7 @@ void freePair(Pair *pair) {
 	if (Debug > 6)
 	    message(LOG_DEBUG, "%d TCP %d: freePair "
 		    "epoll_ctl %d DEL %x",
-		    pair->stone->sd, sd, ePollFd, pair);
+		    pair->stone->sd, sd, ePollFd, (int)pair);
 	epoll_ctl(ePollFd, EPOLL_CTL_DEL, sd, NULL);
 #endif
 	closesocket(sd);
@@ -3501,7 +3507,7 @@ void asyncConn(Conn *conn) {
 	    if (Debug > 6)
 		message(LOG_DEBUG, "%d TCP %d: asyncConn1 "
 			"epoll_ctl %d ADD %x",
-			p1->stone->sd, p1->sd, ePollFd, ev.data.ptr);
+			p1->stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
 	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
 		message(LOG_ERR, "%d TCP %d: asyncConn1 "
 			"epoll_ctl %d ADD err=%d",
@@ -3525,7 +3531,7 @@ void asyncConn(Conn *conn) {
 	    if (Debug > 6)
 		message(LOG_DEBUG, "%d TCP %d: asyncConn2 "
 			"epoll_ctl %d ADD %x",
-			p2->stone->sd, p2->sd, ePollFd, ev.data.ptr);
+			p2->stone->sd, p2->sd, ePollFd, (int)ev.data.ptr);
 	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
 		message(LOG_ERR, "%d TCP %d: asyncConn2 "
 			"epoll_ctl %d ADD err=%d",
@@ -3826,6 +3832,8 @@ int acceptCheck(Pair *pair1) {
     socklen_t tolen = sizeof(ss2);
     Stone *stonep = pair1->stone;
     Pair *pair2 = NULL;
+    int satype;
+    int saproto = 0;
     int len;
 #ifdef ENLARGE
     int prevXferBufMax = XferBufMax;
@@ -3839,7 +3847,7 @@ int acceptCheck(Pair *pair1) {
     if (0 < fromlen && fromlen <= sizeof(ss1)) {
 	bcopy(pair1->t->buf + sizeof(fromlen), from, fromlen);
     } else {
-	message(LOG_ERR, "stone %d: acceptCheck Can't happen fromlen=%d",
+	message(LOG_ERR, "%d TCP %d: acceptCheck Can't happen fromlen=%d",
 		stonep->sd, pair1->sd, fromlen);
 	if (getpeername(pair1->sd, from, &fromlen) < 0) {
 #ifdef WINDOWS
@@ -3936,17 +3944,24 @@ int acceptCheck(Pair *pair1) {
       SSL connection may not be established yet,
       but we can prepare the pair for connecting to the destination
     */
+    if (stonep->proto & proto_udp_d) {
+	satype = SOCK_DGRAM;
+	saproto = IPPROTO_UDP;
+    } else {
+	satype = SOCK_STREAM;
+	saproto = IPPROTO_TCP;
+    }
 #ifdef AF_LOCAL
     if (stonep->proto & proto_unix_d)
-	pair2->sd = socket(AF_LOCAL, SOCK_STREAM, 0);
+	pair2->sd = socket(AF_LOCAL, satype, saproto);
     else
 #endif
 #ifdef AF_INET6
     if (stonep->proto & proto_v6_d)
-	pair2->sd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+	pair2->sd = socket(AF_INET6, satype, saproto);
     else
 #endif
-	pair2->sd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	pair2->sd = socket(AF_INET, satype, saproto);
     if (InvalidSocket(pair2->sd)) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
@@ -5522,6 +5537,7 @@ int first_read(Pair *pair) {
     SOCKET psd;
     Pair *p = pair->pair;
     ExBuf *ex;
+    Stone *stone = pair->stone;
     int len;
     if (p == NULL || (p->proto & (proto_shutdown | proto_close))
 	|| InvalidSocket(sd)) return -1;
@@ -5552,7 +5568,7 @@ int first_read(Pair *pair) {
 	if (len == -2) {	/* read more */
 	    if (Debug > 3) {
 		message(LOG_DEBUG, "%d TCP %d: read more from %d",
-			pair->stone->sd, psd, sd);
+			stone->sd, psd, sd);
 	    }
 	} else if (len < 0) {
 	    int flag = 0;
@@ -5580,7 +5596,7 @@ int first_read(Pair *pair) {
 		if (Debug > 3)
 		    message(LOG_DEBUG, "%d TCP %d: request to read, "
 			    "because response header from %d finished",
-			    pair->stone->sd, psd, sd);
+			    stone->sd, psd, sd);
 		p->proto |= (proto_select_r | proto_dirty);
 	    }
 	}
@@ -5594,7 +5610,8 @@ int first_read(Pair *pair) {
 	    if (ex->buf[i] == '<') {	/* time stamp of APOP banner */
 		q = pair->p = malloc(BUFMAX);
 		if (!q) {
-		    message(LOG_CRIT, "%d TCP %d: out of memory", pair->stone->sd, sd);
+		    message(LOG_CRIT, "%d TCP %d: out of memory",
+			    stone->sd, sd);
 		    break;
 		}
 		for (; i < ex->start + ex->len; i++) {
@@ -5609,7 +5626,7 @@ int first_read(Pair *pair) {
 #endif
     if (len <= 0 && !(pair->proto & (proto_eof | proto_close))) {
 	if (Debug > 8) {
-	    message(LOG_DEBUG, "%d TCP %d: read more", pair->stone->sd, sd);
+	    message(LOG_DEBUG, "%d TCP %d: read more", stone->sd, sd);
 	}
 	pair->proto |= (proto_select_r | proto_dirty);	/* read more */
 	if (len < 0) pair->proto |= (proto_first_r | proto_dirty);
@@ -5709,7 +5726,8 @@ void proto2fdset(Pair *pair, int isthread,
 		if (Debug > 7)
 		    message(LOG_DEBUG, "%d TCP %d: proto2fdset2 "
 			    "epoll_ctl %d MOD %x events=%x",
-			    p->stone->sd, psd, epfd, pev.data.ptr, pev.events);
+			    p->stone->sd, psd, epfd,
+			    (int)pev.data.ptr, pev.events);
 #else
 		FD_CLR(psd, routp);
 		FD_CLR(psd, woutp);
@@ -5770,7 +5788,7 @@ void proto2fdset(Pair *pair, int isthread,
     if (Debug > 7)
 	message(LOG_DEBUG, "%d TCP %d: proto2fdset "
 		"epoll_ctl %d MOD %x events=%x",
-		pair->stone->sd, sd, epfd, ev.data.ptr, ev.events);
+		pair->stone->sd, sd, epfd, (int)ev.data.ptr, ev.events);
 #endif
     pair->proto &= ~proto_dirty;
 }
@@ -6216,7 +6234,7 @@ void doAcceptConnect(Pair *p1) {
 	if (Debug > 6)
 	    message(LOG_DEBUG, "%d TCP %d: doAcceptConnect1 "
 		    "epoll_ctl %d ADD %x",
-		    stone->sd, p1->sd, ePollFd, ev.data.ptr);
+		    stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
 	if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
 	    message(LOG_ERR, "%d TCP %d: doAcceptConnect1 "
 		    "epoll_ctl %d ADD err=%d",
@@ -6227,7 +6245,7 @@ void doAcceptConnect(Pair *p1) {
 	    if (Debug > 6)
 		message(LOG_DEBUG, "%d TCP %d: doAcceptConnect2 "
 			"epoll_ctl %d ADD %x",
-			stone->sd, p2->sd, ePollFd, ev.data.ptr);
+			stone->sd, p2->sd, ePollFd, (int)ev.data.ptr);
 	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
 		message(LOG_ERR, "%d TCP %d: doAcceptConnect2 "
 			"epoll_ctl %d ADD err=%d",
@@ -6356,7 +6374,7 @@ void dispatch(int epfd, struct epoll_event *evs, int nevs) {
 	    Origin origin;
 	} *p;
 	if (Debug > 8) message(LOG_DEBUG, "epoll %d: evs[%d].data=%x",
-			       epfd, i, ev.data.ptr);
+			       epfd, i, (int)ev.data.ptr);
 	common = *(int*)ev.data.ptr;
 	other = (ev.events & ~(EPOLLIN | EPOLLPRI | EPOLLOUT));
 	p = ev.data.ptr;
@@ -6365,7 +6383,7 @@ void dispatch(int epfd, struct epoll_event *evs, int nevs) {
 	    if (Debug > 10 || (other && Debug > 2))
 		message(LOG_DEBUG, "stone %d: epoll %d events=%x type=%d",
 			p->stone.sd, epfd, ev.events, common);
-	    if (p->stone.proto & proto_udp) {
+	    if (p->stone.proto & proto_udp_s) {
 		PktBuf *pb = recvUDP(&p->stone);
 		if (pb) {
 		    sendUDP(pb);
@@ -6451,7 +6469,7 @@ int scanPairs(
 		if (Debug > 6)
 		    message(LOG_DEBUG, "%d TCP %d: scanPairs "
 			    "epoll_ctl %d DEL %x",
-			    pair->stone->sd, sd, ePollFd, pair);
+			    pair->stone->sd, sd, ePollFd, (int)pair);
 		epoll_ctl(ePollFd, EPOLL_CTL_DEL, pair->sd, NULL);
 #endif
 		ASYNC(asyncClose, pair);
@@ -6475,7 +6493,7 @@ int scanStones(fd_set *rop, fd_set *eop) {
 	    message(LOG_ERR, "stone %d: exception", stone->sd);
 	} else {
 	    if (FD_ISSET(stone->sd, rop) && FD_ISSET(stone->sd, &rin)) {
-		if (stone->proto & proto_udp) {
+		if (stone->proto & proto_udp_s) {
 		    PktBuf *pb = recvUDP(stone);
 		    if (pb) {
 			sendUDP(pb);
@@ -6487,7 +6505,7 @@ int scanStones(fd_set *rop, fd_set *eop) {
 		}
 	    }
 	}
-	if (stone->proto & proto_udp) {
+	if (stone->proto & proto_udp_s) {
 	    scanUDP(rop, eop, (Origin *)stone->p);
 	}
     }
@@ -6504,8 +6522,8 @@ static int newMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
     if (match) {
 	int i;
 	for (i=0; i <= NMATCH_MAX; i++) match[i] = NULL;
-	if (Debug > 4) message(LOG_DEBUG, "newMatch %d: %lx",
-			       NewMatchCount++, match);
+	if (Debug > 4) message(LOG_DEBUG, "newMatch %d: %x",
+			       NewMatchCount++, (int)match);
 	return CRYPTO_set_ex_data(ad, idx, match);
     }
     return 0;
@@ -6518,8 +6536,8 @@ static void freeMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
     for (i=0; i <= NMATCH_MAX; i++) {
 	if (match[i]) free(match[i]);
     }
-    if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %lx",
-			   --NewMatchCount, match);
+    if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %x",
+			   --NewMatchCount, (int)match);
     free(match);
 }
 
@@ -7285,7 +7303,7 @@ Stone *mkstone(
     stonep->common = type_stone;
     stonep->p = NULL;
     stonep->timeout = PairTimeOut;
-    if (proto & proto_udp) {
+    if (proto & proto_udp_s) {
 	satype = SOCK_DGRAM;
 	saproto = IPPROTO_UDP;
     } else {
@@ -7397,7 +7415,7 @@ Stone *mkstone(
 		       (char*)&i, sizeof(i));
 	}
 #endif
-	if (!(proto & proto_udp) && ReuseAddr) {
+	if (!(proto & proto_udp_s) && ReuseAddr) {
 	    int i = 1;
 	    setsockopt(stonep->sd, SOL_SOCKET, SO_REUSEADDR,
 		       (char*)&i, sizeof(i));
@@ -7427,7 +7445,7 @@ Stone *mkstone(
 		salen = sizeof(ss);
 		getsockname(stonep->sd, sa, &salen);
 	    }
-	    if (!(proto & proto_udp)) {	/* TCP */
+	    if (!(proto & proto_udp_s)) {	/* TCP */
 		if (listen(stonep->sd, BacklogMax) < 0) {
 #ifdef WINDOWS
 		    errno = WSAGetLastError();
@@ -8796,12 +8814,10 @@ void doargs(int argc, int i, char *argv[]) {
 	j = 0;
 	k = i;
 	for (; i < argc; i++, j++) if (!strcmp(argv[i], "--")) break;
-	if ((dproto & proto_udp) || (sproto & proto_udp)) {
-	    proto |= proto_udp;
+	if ((sproto & proto_udp)) {
+	    proto |= proto_udp_s;
 	    if (sproto & proto_v6) proto |= proto_v6_s;
 	    if (sproto & proto_ip_only) proto |= proto_ip_only_s;
-	    if (dproto & proto_v6) proto |= proto_v6_d;
-	    if (dproto & proto_ip_only) proto |= proto_ip_only_d;
 	} else {
 	    if (sproto & proto_ohttp) proto |= proto_ohttp_s;
 	    if (sproto & proto_ssl) proto |= proto_ssl_s;
@@ -8811,6 +8827,12 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (sproto & proto_block) proto |= proto_block_s;
 	    if (sproto & proto_base) proto |= proto_base_s;
 	    if (sproto & proto_ident) proto |= proto_ident;
+	}
+	if ((dproto & proto_udp)) {
+	    proto |= proto_udp_d;
+	    if (dproto & proto_v6) proto |= proto_v6_d;
+	    if (dproto & proto_ip_only) proto |= proto_ip_only_d;
+	} else {
 	    if ((dproto & proto_command) == command_proxy) {
 		proto &= ~proto_command;
 		proto |= command_proxy;
@@ -8851,8 +8873,12 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (dproto & proto_base) proto |= proto_base_d;
 	    if (dproto & proto_nobackup) proto |= proto_nobackup;
 	}
+	if (!(proto & proto_udp_s) ^ !(proto & proto_udp_d)) {
+	    message(LOG_ERR, "UDP TCP transform is not implemented yet");
+	    exit(1);
+	}
 	stone = mkstone(host, serv, shost, sserv, j, &argv[k], proto);
-	if (proto & proto_udp) {
+	if (proto & proto_udp_s) {
 	    Origin *origin = (Origin*)malloc(sizeof(Origin));
 	    if (origin == NULL) {
 		message(LOG_CRIT, "Out of memory");
@@ -9287,7 +9313,7 @@ void initialize(int argc, char *argv[]) {
 	    ev.data.ptr = stone;
 	    if (Debug > 6)
 		message(LOG_DEBUG, "stone %d: epoll_ctl %d ADD %x",
-			stone->sd, ePollFd, ev.data.ptr);
+			stone->sd, ePollFd, (int)ev.data.ptr);
 	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, stone->sd, &ev) < 0) {
 		message(LOG_CRIT, "stone %d: epoll_ctl %d ADD err=%d",
 			stone->sd, ePollFd, errno);
