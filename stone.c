@@ -453,6 +453,7 @@ typedef struct _Stone {
     SockAddr *from;
     int proto;
     Backup **backups;
+    struct _Pair *pairs;
     char *p;
     int timeout;
     struct _Stone *next;
@@ -549,7 +550,7 @@ int MinInterval = 0;
 time_t lastScanBackups = 0;
 time_t lastEstablished = 0;
 time_t lastReadWrite = 0;
-Pair pairs;
+Pair *PairTop = NULL;
 Pair trash;
 Pair *freePairs = NULL;
 int nFreePairs = 0;
@@ -1481,9 +1482,9 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
 	ap = ((struct sockaddr_in*)a)->sin_port;
 	bp = ((struct sockaddr_in*)b)->sin_port;
 	if (Debug > 10) {
-	    message(LOG_DEBUG, "saComp: %x:%d, %x:%d",
-		    ntohl(an->s_addr), ntohs(ap),
-		    ntohl(bn->s_addr), ntohs(bp));
+	    message(LOG_DEBUG, "saComp: %lx:%d, %lx:%d",
+		    (long unsigned)ntohl(an->s_addr), ntohs(ap),
+		    (long unsigned)ntohl(bn->s_addr), ntohs(bp));
 	}
 	return (an->s_addr == bn->s_addr) && (ap == bp);
     }
@@ -1579,7 +1580,7 @@ void waitMutex(HANDLE h) {
 	ret = WaitForSingleObject(h, 5000);	/* 5 sec */
 	if (ret == WAIT_FAILED) {
 	    message(LOG_ERR, "Fail to wait mutex err=%d, existing",
-		    GetLastError());
+		    (int)GetLastError());
 	    exit(1);
 	} else if (ret == WAIT_TIMEOUT) {
 	    message(LOG_ERR, "timeout to wait mutex, existing");
@@ -1591,7 +1592,8 @@ void waitMutex(HANDLE h) {
 void freeMutex(HANDLE h) {
     if (h) {
 	if (!ReleaseMutex(h)) {
-	    message(LOG_ERR, "Fail to release mutex err=%d", GetLastError());
+	    message(LOG_ERR, "Fail to release mutex err=%d",
+		    (int)GetLastError());
 	}
     }
 }
@@ -3166,17 +3168,18 @@ void freePair(Pair *pair) {
 
 void insertPairs(Pair *p1) {
     Pair *p2 = p1->pair;
+    Stone *stone = p1->stone;
     p1->next = p2;	/* link pair each other */
     p2->prev = p1;
     waitMutex(PairMutex);
-    p2->next = pairs.next;	/* insert pair */
-    if (pairs.next != NULL) pairs.next->prev = p2;
-    p1->prev = &pairs;
-    pairs.next = p1;
+    p2->next = stone->pairs->next;	/* insert pair */
+    if (stone->pairs->next != NULL) stone->pairs->next->prev = p2;
+    p1->prev = stone->pairs;
+    stone->pairs->next = p1;
     freeMutex(PairMutex);
     if (Debug > 4) {
 	message(LOG_DEBUG, "%d TCP %d: pair %d inserted",
-		p1->stone->sd, p1->sd, p2->sd);
+		stone->sd, p1->sd, p2->sd);
 	message_pair(LOG_DEBUG, p1);
     }
 }
@@ -4183,10 +4186,17 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
     return i;
 }
 
-int scanClose(void) {	/* scan close request */
+int scanClose(Pair *pairs) {	/* scan close request */
     Pair *p1, *p2, *p;
     int n = 0;
     int m = 0;
+    int all;
+    if (pairs) {
+	all = 0;
+    } else {
+	pairs = PairTop;
+	all = 1;
+    }
     p1 = trash.next;
     while (p1 != NULL) {
 	SOCKET sd;
@@ -4218,8 +4228,17 @@ int scanClose(void) {	/* scan close request */
     }
     if (Debug > 8 && (n > 0 || m > 0))
 	message(LOG_DEBUG, "trash: queued=%d, removed=%d", n, m);
-    p1 = pairs.next;
+    p1 = pairs->next;
     while (p1 != NULL) {
+	if (p1->clock == -1) {	/* top */
+	    if (all) {
+		pairs = p1;
+		p1 = pairs->next;
+		continue;
+	    } else {
+		break;
+	    }
+	}
 	p2 = p1;
 	p1 = p1->next;
 	if (!(p2->proto & proto_close)) continue;	/* skip */
@@ -4260,8 +4279,13 @@ void message_buf(Pair *pair, int len, char *str) {	/* dump for debug */
 
 void message_pairs(int pri) {	/* dump for debug */
     Pair *pair;
-    for (pair=pairs.next; pair != NULL; pair=pair->next)
-	message_pair(pri, pair);
+    for (pair=PairTop; pair != NULL; pair=pair->next) {
+	if (pair->clock != -1) {	/* not top */
+	    message_pair(pri, pair);
+	} else if (Debug > 2) {
+	    message(LOG_DEBUG, "%d TCP %d: top", pair->stone->sd, pair->sd);
+	}
+    }
 }
 
 void message_origins(int pri) {	/* dump for debug */
@@ -4803,7 +4827,7 @@ int addrcache(char *name, char *serv, struct sockaddr *sa, socklen_t *salenp) {
 	*salenp = t->len;
 	freeMutex(HashMutex);
 	if (Debug > 5) message(LOG_DEBUG, "addrcache hit: %s:%s %d",
-			       name, serv, now - t->clock);
+			       name, serv, (int)(now - t->clock));
 	return 1;
     }
     freeMutex(HashMutex);
@@ -5158,7 +5182,7 @@ Pair *identd(int cport, struct sockaddr *ssa, socklen_t ssalen) {
     struct sockaddr *sa = (struct sockaddr*)&ss;
     socklen_t salen;
     Pair *pair;
-    for (pair=pairs.next; pair != NULL; pair=pair->next) {
+    for (pair=PairTop; pair != NULL; pair=pair->next) {
 	SOCKET sd;
 	if ((pair->proto & proto_command) == command_source) continue;
 	sd = pair->sd;
@@ -5238,7 +5262,8 @@ int nStones(void) {
 int nPairs(Pair *top) {
     int n = 0;
     Pair *pair;
-    for (pair=top; pair != NULL; pair=pair->next) n++;
+    for (pair=top; pair != NULL; pair=pair->next)
+	if (pair->clock != -1) n++;	/* not top */
     return n;
 }
 
@@ -5269,7 +5294,7 @@ int limitCommon(Pair *pair, int var, int limit, char *str) {
 }
 
 int limitPair(Pair *pair, char *parm, int start) {
-    return limitCommon(pair, nPairs(pairs.next), atoi(parm), "pair");
+    return limitCommon(pair, nPairs(PairTop), atoi(parm), "pair");
 }
 
 int limitConn(Pair *pair, char *parm, int start) {
@@ -5313,7 +5338,7 @@ int healthHELO(Pair *pair, char *parm, int start) {
     char str[LONGSTRMAX+1];
     snprintf(str, LONGSTRMAX,
 	     "stone=%d pair=%d trash=%d conn=%d origin=%d",
-	     nStones(), nPairs(pairs.next), nPairs(trash.next),
+	     nStones(), nPairs(PairTop), nPairs(trash.next),
 	     nConns(), nOrigins());
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
@@ -6435,17 +6460,29 @@ void dispatch(int epfd, struct epoll_event *evs, int nevs) {
 #endif
 
 int scanPairs(
-#ifdef USE_EPOLL
-    void
-#else
-    fd_set *rop, fd_set *wop, fd_set *eop
+#ifndef USE_EPOLL
+    fd_set *rop, fd_set *wop, fd_set *eop,
 #endif
+    Pair *pairs
     ) {
     Pair *pair;
     int ret = 1;
+    int all;
     if (Debug > 8) message(LOG_DEBUG, "scanPairs");
-    for (pair=pairs.next; pair != NULL; pair=pair->next) {
+    if (pairs) {
+	all = 0;
+    } else {
+	pairs = PairTop;
+	all = 1;
+    }
+    for (pair=pairs->next;
+	 pair != NULL && (all || pair->clock != -1);	/* until top */
+	 pair=pair->next) {
 	SOCKET sd = pair->sd;
+	if (all && pair->clock == -1) {	/* skip top */
+	    pairs = pair;
+	    continue;
+	}
 	if (!(pair->proto & (proto_close | proto_thread))
 	    && ValidSocket(sd)) {
 	    time_t clock;
@@ -6481,7 +6518,7 @@ int scanPairs(
 }
 
 #ifndef USE_EPOLL
-int scanStones(fd_set *rop, fd_set *eop) {
+int scanStones(fd_set *rop, fd_set *wop, fd_set *eop) {
     Stone *stone;
     for (stone=stones; stone != NULL; stone=stone->next) {
 	int isset;
@@ -6507,6 +6544,9 @@ int scanStones(fd_set *rop, fd_set *eop) {
 	}
 	if (stone->proto & proto_udp_s) {
 	    scanUDP(rop, eop, (Origin *)stone->p);
+	}
+	if (!(stone->proto & proto_udp_s) || !(stone->proto & proto_udp_d)) {
+	    scanPairs(rop, wop, eop, stone->pairs);
 	}
     }
     return 1;
@@ -6883,8 +6923,9 @@ void repeater(void) {
 #ifdef USE_EPOLL
     int timeout;
     struct epoll_event evs[EVSMAX];
-    for (pair=pairs.next; pair != NULL; pair=pair->next)
-	if (!(pair->proto & proto_thread) && (pair->proto & proto_dirty))
+    for (pair=PairTop; pair != NULL; pair=pair->next)
+	if (pair->clock != -1 &&	/* not top */
+	    !(pair->proto & proto_thread) && (pair->proto & proto_dirty))
 	    proto2fdset(pair, 0, ePollFd);
     if (conns.next || trash.next || spin > 0 || AsyncCount > 0) {
 	if (AsyncCount == 0 && spin > 0) spin--;
@@ -6904,8 +6945,9 @@ void repeater(void) {
     rout = rin;
     wout = win;
     eout = ein;
-    for (pair=pairs.next; pair != NULL; pair=pair->next)
-	if (!(pair->proto & proto_thread))
+    for (pair=PairTop; pair != NULL; pair=pair->next)
+	if (pair->clock != -1 &&	/* not top */
+	    !(pair->proto & proto_thread))
 	    proto2fdset(pair, 0, &rout, &wout, &eout);
     if (conns.next || trash.next || spin > 0 || AsyncCount > 0) {
 	if (AsyncCount == 0 && spin > 0) spin--;
@@ -6936,8 +6978,7 @@ void repeater(void) {
 #ifdef USE_EPOLL
 	dispatch(ePollFd, evs, ret);
 #else
-	(void)(scanStones(&rout, &eout) > 0 &&
-	       scanPairs(&rout, &wout, &eout) > 0);
+	(void)(scanStones(&rout, &wout, &eout) > 0);
 #endif
     } else if (ret < 0) {
 #ifdef WINDOWS
@@ -6974,10 +7015,10 @@ void repeater(void) {
 	scanBackups();
     }
 #ifdef USE_EPOLL
-    scanPairs();
+    if (PairTop) scanPairs(NULL);
     if (OriginTop) scanUDP(NULL);
 #endif
-    scanClose();
+    if (PairTop) scanClose(NULL);
     if (oldstones) rmoldstone();
     if (OldConfigArgc) rmoldconfig();
 #ifdef USE_SSL
@@ -7815,9 +7856,9 @@ static int gettoken(FILE *fp, char *buf) {
 }
 
 FILE *openconfig(void) {
+#ifdef CPP
     int pfd[2];
     char host[MAXHOSTNAMELEN];
-#ifdef CPP
     if (CppCommand != NULL && *CppCommand != '\0') {
 	if (gethostname(host, MAXHOSTNAMELEN-1) < 0) {
 	    message(LOG_ERR, "gethostname err=%d", errno);
@@ -8563,13 +8604,14 @@ void installService(int argc, char *argv[]) {
     int state;
     char *p;
     if (!GetModuleFileName(0, exeName, sizeof(exeName))) {
-	message(LOG_ERR, "Can't determine exe name err=%d", GetLastError());
+	message(LOG_ERR, "Can't determine exe name err=%d",
+		(int)GetLastError());
 	exit(1);
     }
     scManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!scManager) {
 	message(LOG_ERR, "Can't open service control manager err=%d",
-		GetLastError());
+		(int)GetLastError());
 	exit(1);
     }
     len = strlen(exeName);
@@ -8611,7 +8653,7 @@ void installService(int argc, char *argv[]) {
 			NULL, NULL);
     if (!scService) {
 	message(LOG_ERR, "Can't install service: %s err=%d",
-		NTServiceName, GetLastError());
+		NTServiceName, (int)GetLastError());
 	CloseServiceHandle(scManager);
 	exit(1);
     }
@@ -8626,14 +8668,14 @@ void removeService(void) {
     scManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!scManager) {
 	message(LOG_ERR, "Can't open service control manager err=%d",
-		GetLastError());
+		(int)GetLastError());
 	exit(1);
     }
     scService = OpenService(scManager, NTServiceName,
 			    SERVICE_ALL_ACCESS);
     if (!scService) {
 	message(LOG_ERR, "Can't open service: %s err=%d",
-		NTServiceName, GetLastError());
+		NTServiceName, (int)GetLastError());
 	CloseServiceHandle(scManager);
 	exit(1);
     }
@@ -8650,7 +8692,7 @@ void removeService(void) {
     }
     if (!DeleteService(scService)) {
 	message(LOG_ERR, "failed to remove service: %s err=%d",
-		NTServiceName, GetLastError());
+		NTServiceName, (int)GetLastError());
 	CloseServiceHandle(scService);
 	CloseServiceHandle(scManager);
 	exit(1);
@@ -8881,6 +8923,7 @@ void doargs(int argc, int i, char *argv[]) {
 	if (proto & proto_udp_s) {
 	    Origin *origin = (Origin*)malloc(sizeof(Origin));
 	    if (origin == NULL) {
+	    memerr:
 		message(LOG_CRIT, "Out of memory");
 		exit(1);
 	    }
@@ -8897,6 +8940,15 @@ void doargs(int argc, int i, char *argv[]) {
 	} else if (((proto & proto_command) == command_ihead) ||
 		   ((proto & proto_command) == command_iheads)) {
 	    stone->p = strdup(p);
+	}
+	if (!(proto & proto_udp_s) || !(proto & proto_udp_d)) {
+	    stone->pairs = newPair();
+	    if (!stone->pairs) goto memerr;
+	    stone->pairs->clock = -1;	/* top */
+	    stone->pairs->stone = stone;
+	    stone->pairs->next = PairTop;
+	    if (PairTop) PairTop->prev = stone->pairs;
+	    PairTop = stone->pairs;
 	}
 	stone->next = stones;
 	stones = stone;
@@ -8997,11 +9049,27 @@ static void handler(int sig) {
     case SIGUSR1:
 	Debug++;
 	message(LOG_INFO, "SIGUSR1. increase Debug level to %d", Debug);
+#ifndef NO_FORK
+	if (NForks) {	/* mother process */
+	    for (i=0; i < NForks; i++) kill(Pid[i], sig);
+	} else {
+#endif
+	    message_pairs(LOG_INFO);
+	    message_origins(LOG_INFO);
+	    message_conns(LOG_INFO);
+#ifndef NO_FORK
+	}
+#endif
 	signal(SIGUSR1, handler);
 	break;
     case SIGUSR2:
 	if (Debug > 0) Debug--;
 	message(LOG_INFO, "SIGUSR2. decrease Debug level to %d", Debug);
+#ifndef NO_FORK
+	if (NForks) {	/* mother process */
+	    for (i=0; i < NForks; i++) kill(Pid[i], sig);
+	}
+#endif
 	signal(SIGUSR2, handler);
 	break;
     case SIGPIPE:
@@ -9130,7 +9198,6 @@ void initialize(int argc, char *argv[]) {
     if (Debug > 0) {
 	message(LOG_DEBUG, "Debug level: %d", Debug);
     }
-    pairs.next = NULL;
     trash.next = NULL;
     conns.next = NULL;
 #ifndef USE_EPOLL
@@ -9226,7 +9293,7 @@ void initialize(int argc, char *argv[]) {
 	!(HashMutex=CreateMutex(NULL, FALSE, NULL)) ||
 #endif
 	!(PkBufMutex=CreateMutex(NULL, FALSE, NULL)) ) {
-	message(LOG_ERR, "Can't create Mutex err=%d", GetLastError());
+	message(LOG_ERR, "Can't create Mutex err=%d", (int)GetLastError());
     }
 #endif
 #ifdef OS2
