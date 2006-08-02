@@ -3955,9 +3955,10 @@ int acceptCheck(Pair *pair1) {
 	saproto = IPPROTO_TCP;
     }
 #ifdef AF_LOCAL
-    if (stonep->proto & proto_unix_d)
+    if (stonep->proto & proto_unix_d) {
+	saproto = 0;
 	pair2->sd = socket(AF_LOCAL, satype, saproto);
-    else
+    } else
 #endif
 #ifdef AF_INET6
     if (stonep->proto & proto_v6_d)
