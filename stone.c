@@ -6157,7 +6157,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	for (i=0; i < npairs; i++) {
 	    SOCKET sd;
 	    int ret;
-	    if (!p[i] || (p[i]->proto & proto_close)) continue;
+	    if (!p[i]) continue;
 	    sd = p[i]->sd;
 	    if (InvalidSocket(sd)) continue;
 	    ret = doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
@@ -6204,7 +6204,7 @@ void asyncReadWrite(Pair *pair) {	/* pair must be source side */
 int doPair(Pair *pair) {
     SOCKET psd;
     Pair *p = pair->pair;
-    if (!p || (pair->proto & (proto_close | proto_thread))) return 0;
+    if (!p || (pair->proto & proto_thread)) return 0;
     psd = p->sd;
     if (InvalidSocket(psd)) return 0;
     pair->count += REF_UNIT;
@@ -6484,8 +6484,7 @@ int scanPairs(
 	    pairs = pair;
 	    continue;
 	}
-	if (!(pair->proto & (proto_close | proto_thread))
-	    && ValidSocket(sd)) {
+	if (!(pair->proto & proto_thread) && ValidSocket(sd)) {
 	    time_t clock;
 	    int idle = 1;	/* assume no events happen on sd */
 #ifndef USE_EPOLL
