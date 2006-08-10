@@ -5827,13 +5827,20 @@ void proto2fdset(Pair *pair, int isthread,
     pair->proto &= ~proto_dirty;
 }
 
+enum {
+    RW_LEAVE = 0,
+    RW_CONTINUE,
+    RW_EINTR,
+    RW_ONECE,
+};
+
 int doReadWritePair(Pair *pair, Pair *opposite,
 		    int ready_r, int ready_w, int ready_e,
 		    int hangup, int error) {
     Pair *rPair, *wPair;
     SOCKET stsd, sd, rsd, wsd;
     int len;
-    int ret = 1;	/* assume to continue */
+    int ret = RW_CONTINUE;	/* assume to continue */
     sd = pair->sd;
     if (InvalidSocket(sd)) return ret;
     stsd = pair->stone->sd;
@@ -5853,14 +5860,14 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	    message(LOG_ERR, "%d TCP %d: getsockopt err=%d", stsd, sd, errno);
 	    pair->proto |= (proto_close | proto_dirty);
 	    opposite->proto |= (proto_close | proto_dirty);
-	    return 0;	/* leave */
+	    return RW_LEAVE;	/* leave */
 	}
 	if (optval) {
 	    message(LOG_ERR, "%d TCP %d: connect getsockopt err=%d",
 		    stsd, sd, optval);
 	    pair->proto |= (proto_close | proto_dirty);
 	    opposite->proto |= (proto_close | proto_dirty);
-	    return 0;	/* leave */
+	    return RW_LEAVE;	/* leave */
 	} else {	/* succeed in connecting */
 	    if (Debug > 4)
 		message(LOG_DEBUG, "%d TCP %d: connecting completed",
@@ -6012,10 +6019,11 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		    rPair->proto |= (proto_select_r | proto_dirty);
 #endif
 		} else {
-		    return 0;	/* leave */
+		    return RW_LEAVE;	/* leave */
 		}
 	    } else {	/* EINTR */
 		rPair->proto |= (proto_select_r | proto_dirty);
+		ret = RW_EINTR;
 	    }
 	}
     } else if (((pair->proto & proto_select_w) && ready_w) /* write */
@@ -6097,23 +6105,24 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 			    message(LOG_DEBUG,
 				    "%d TCP %d: SSL_pending, read again",
 				    stsd, rPair->sd);
-			ret = 2;	/* read once */
+			ret = RW_ONECE;	/* read once */
 			goto read_pending;
 		    }
 #endif
 		    rPair->proto |= (proto_select_r | proto_dirty);
 		} else {
-		    return 0;	/* leave */
+		    return RW_LEAVE;	/* leave */
 		}
 	    } else {	/* EINTR */
 		wPair->proto |= (proto_select_w | proto_dirty);
+		ret = RW_EINTR;
 	    }
 	}
     } else if (error) {
 	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: error", stsd, sd);
 	pair->proto |= (proto_close | proto_dirty);
 	opposite->proto |= (proto_close | proto_dirty);
-	return 0;	/* leave */
+	return RW_LEAVE;	/* leave */
     }
     return ret;
 }
@@ -6170,8 +6179,9 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    if (InvalidSocket(sd)) continue;
 	    ret = doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
 				  FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0);
-	    if (!ret) goto leave;
-	    if (ret == 2) break;	/* if ret == 2, read once */
+	    if (ret == RW_LEAVE) goto leave;
+	    if (ret == RW_ONECE) break;		/* read once */
+	    if (ret == RW_EINTR) loop = 0;	/* EINTR */
 	}
 	if (++loop > 10) {	/* check if spin occured */
 	    if (rx[0] == p[0]->rx && tx[0] == p[0]->tx	/* no update => spin */
