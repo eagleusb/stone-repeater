@@ -2834,6 +2834,14 @@ int doSSL_accept(Pair *pair) {
 			    pair->stone->sd, sd, pair->ssl_flag);
 		return 0;
 	    }
+	    if (errno == 0) {
+		if (Debug > 0)
+		    message(LOG_DEBUG, "%d TCP %d: SSL_accept "
+			    "shutdowned by peer sf=%x errno=%d",
+			    pair->stone->sd, sd,
+			    pair->ssl_flag, errno);
+		return ret;
+	    }
 	    message(priority(pair), "%d TCP %d: SSL_accept "
 		    "I/O error sf=%x errno=%d", pair->stone->sd, sd,
 		    pair->ssl_flag, errno);
@@ -3118,8 +3126,8 @@ void freePair(Pair *pair) {
 	    message(LOG_DEBUG, "%d TCP %d: SSL close notify was not received",
 		    pair->stone->sd, sd);
 	}
-	if (!(state & SSL_SENT_SHUTDOWN)) {
-	    message(LOG_ERR, "%d TCP %d: SSL close notify was not sent",
+	if (!(state & SSL_SENT_SHUTDOWN) && Debug > 2) {
+	    message(LOG_DEBUG, "%d TCP %d: SSL close notify was not sent",
 		    pair->stone->sd, sd);
 	    SSL_set_shutdown(ssl, (state | SSL_SENT_SHUTDOWN));
 	}
