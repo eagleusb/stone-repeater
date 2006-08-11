@@ -5831,7 +5831,7 @@ enum {
     RW_LEAVE = 0,
     RW_CONTINUE,
     RW_EINTR,
-    RW_ONECE,
+    RW_ONCE,
 };
 
 int doReadWritePair(Pair *pair, Pair *opposite,
@@ -6105,7 +6105,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 			    message(LOG_DEBUG,
 				    "%d TCP %d: SSL_pending, read again",
 				    stsd, rPair->sd);
-			ret = RW_ONECE;	/* read once */
+			ret = RW_ONCE;	/* read once */
 			goto read_pending;
 		    }
 #endif
@@ -6180,7 +6180,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    ret = doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
 				  FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0);
 	    if (ret == RW_LEAVE) goto leave;
-	    if (ret == RW_ONECE) break;		/* read once */
+	    if (ret == RW_ONCE) break;		/* read once */
 	    if (ret == RW_EINTR) loop = 0;	/* EINTR */
 	}
 	if (++loop > 10) {	/* check if spin occured */
