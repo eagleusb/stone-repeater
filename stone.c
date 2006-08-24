@@ -200,7 +200,7 @@ typedef void *(*aync_start_routine) (void *);
     waitMutex(AsyncMutex);\
     AsyncCount++;\
     freeMutex(AsyncMutex);\
-    func(arg)\
+    func(arg);\
 }
 #define NO_THREAD
 #endif	/* ! PTHREAD */
