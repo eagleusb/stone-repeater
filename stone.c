@@ -3332,6 +3332,7 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		unsigned char *s;
 		if (0 <= lbparm && lbparm <= 9) s = match[lbparm];
 		else s = match[1];
+		if (!s) s = match[0];
 		if (lbmod) {
 		    offset = 0;
 		    while (*s) {
@@ -6702,7 +6703,7 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 			match[i][len] = '\0';
 			if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: \\%d=%s",
 					       pair->stone->sd, pair->sd,
-					       i+1, match[i]);
+					       i, match[i]);
 		    }
 		    j++;
 		}
