@@ -77,6 +77,8 @@
  * -DNO_SNPRINTF  without snprintf(3)
  * -DNO_SYSLOG	  without syslog(2)
  * -DNO_RINDEX	  without rindex(3)
+ * -DNO_STRDUP	  without strdup(3)
+ * -DNO_LOCALTIME_R  without localtime_r(3)
  * -DNO_THREAD	  without thread
  * -DNO_PID_T	  without pid_t
  * -DNO_SOCKLEN_T without socklen_t
@@ -108,6 +110,7 @@ typedef void (*FuncPtr)(void*);
 #ifdef WINDOWS
 #define FD_SETSIZE	4096
 #include <process.h>
+#include <winsock2.h>
 #include <ws2tcpip.h>
 #if !defined(EINPROGRESS) && defined(WSAEWOULDBLOCK)
 #define EINPROGRESS     WSAEWOULDBLOCK
@@ -147,12 +150,12 @@ typedef void (*FuncPtr)(void*);
 #define bzero(b,n)	memset(b,0,n)
 #define	usleep(usec)	Sleep(usec)
 #define ASYNC(func,arg)	{\
-    if (Debug > 7) message(LOG_DEBUG,"ASYNC: %d",AsyncCount);\
+    if (Debug > 7) message(LOG_DEBUG, "ASYNC: %d", AsyncCount);\
     waitMutex(AsyncMutex);\
     AsyncCount++;\
     freeMutex(AsyncMutex);\
-    if (_beginthread((FuncPtr)func,0,arg) < 0) {\
-	message(LOG_ERR,"_beginthread error err=%d",errno);\
+    if (_beginthread((FuncPtr)func, 0, arg) < 0) {\
+	message(LOG_ERR, "_beginthread error err=%d", errno);\
 	func(arg);\
     }\
 }
@@ -767,7 +770,7 @@ int snprintf(char *str, size_t len, char *fmt, ...) {
 #endif
 
 #ifdef NO_BCOPY
-void bcopy(void *b1, void *b2, int len) {
+void bcopy(const void *b1, void *b2, int len) {
     if (b1 < b2 && (char*)b2 < (char*)b1 + len) {	/* overlapping */
 	char *p, *q;
 	q = (char*)b2 + len - 1;
@@ -788,25 +791,35 @@ char *rindex(char *p, int ch) {
 }
 #endif
 
+#ifdef NO_STRDUP
+char *strdup(const char *s) {
+    int len = strlen(s);
+    char *ret = malloc(len+1);
+    if (ret) {
+	bcopy(s, ret, len+1);
+    }
+    return ret;
+}
+#endif
+
+static char Month[][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+			  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
 char *strntime(char *str, int len, time_t *clock, long micro) {
-    char *p, *q;
-    int i;
-    p = ctime(clock);
-    if (p) {
-	q = p + strlen(p);
-	while (*p++ != ' ')	;
-	while (*--q != ' ')	;
-	i = 0;
-	len--;
-	while (p <= q && i < len) str[i++] = *p++;
-	if (micro >= 0) {
-	    i--;
-	    snprintf(str+i, len-i, ".%06ld ", micro);
-	} else {
-	    str[i] = '\0';
-	}
+#ifdef NO_LOCALTIME_R
+    struct tm *t = localtime(clock);
+#else
+    struct tm tm;
+    struct tm *t = localtime_r(clock, &tm);
+#endif
+    if (micro >= 0) {
+	snprintf(str, len, "%s %2d %02d:%02d:%02d.%06ld ",
+		 Month[t->tm_mon], t->tm_mday,
+		 t->tm_hour, t->tm_min, t->tm_sec, micro);
     } else {
-	snprintf(str, len, "%lu ", *clock);
+	snprintf(str, len, "%s %2d %02d:%02d:%02d ",
+		 Month[t->tm_mon], t->tm_mday,
+		 t->tm_hour, t->tm_min, t->tm_sec);
     }
     return str;
 }
@@ -950,9 +963,9 @@ void packet_dump(char *head, char *buf, int len, XHosts *xhost) {
 	if (k > j/10 || nb < 16) {
 	    j = l = 0;
 	    for (j=0; j < nb && i+j < len; j++) {
-		if (mode == 1 && (' ' <= buf[i+j] && buf[i+j] <= '~'))
+		if (mode == 1 && (' ' <= buf[i+j] && buf[i+j] <= '~')) {
 		    sprintf(&line[l], " '%c", buf[i+j]);
-		else {
+		} else {
 		    sprintf(&line[l], " %02x", (unsigned char)buf[i+j]);
 		    if (buf[i+j] == '\n') k = 0; else k++;
 		}
@@ -3195,7 +3208,12 @@ void insertPairs(Pair *p1) {
 void message_time_log(Pair *pair) {
     TimeLog *log = pair->log;
     if (log && log->clock) {
+#ifdef NO_LOCALTIME_R
 	struct tm *t = localtime(&log->clock);
+#else
+	struct tm tm;
+	struct tm *t = localtime_r(&log->clock, &tm);
+#endif
 	time_t now;
 	time(&now);
 	message(log->pri, "%02d:%02d:%02d %d %s",
@@ -4061,15 +4079,31 @@ int strnUser(char *buf, int limit, SOCKET sd, int which,
     case 2:	/* user name */
 	*str = '\0';
 	if (*cretp >= 0) {
+#ifdef THREAD_UNSAFE
 	    struct passwd *passwd = getpwuid(crp->uid);
 	    if (passwd) snprintf(str, STRMAX, "%s", passwd->pw_name);
+#else
+	    struct passwd pwbuf;
+	    char sbuf[STRMAX+1];
+	    struct passwd *passwd;
+	    int ret = getpwuid_r(crp->uid, &pwbuf, sbuf, STRMAX, &passwd);
+	    if (ret == 0) snprintf(str, STRMAX, "%s", passwd->pw_name);
+#endif
 	}
 	break;
     case 3:	/* group name */
 	*str = '\0';
 	if (*cretp >= 0) {
+#ifdef THREAD_UNSAFE
 	    struct group *group = getgrgid(crp->gid);
 	    if (group) snprintf(str, STRMAX, "%s", group->gr_name);
+#else
+	    struct group gbuf;
+	    char sbuf[STRMAX+1];
+	    struct group *group;
+	    int ret = getgrgid_r(crp->gid, &gbuf, sbuf, STRMAX, &group);
+	    if (ret == 0) snprintf(str, STRMAX, "%s", group->gr_name);
+#endif
 	}
 	break;
     default:	/* uid */
@@ -6169,7 +6203,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	for (i=0; i < npairs; i++) proto2fdset(p[i], 1, &ro, &wo, &eo);
 	if (Debug > 10)
 	    message_select(LOG_DEBUG, "selectReadWrite1", &ro, &wo, &eo);
-	if (select(FD_SETSIZE, &ro, &wo, &eo, &tv) <= 0) goto leave;
+	if (select(FD_SETSIZE, &ro, &wo, &eo, &tv) <= 0) goto exit_loop;
 	if (Debug > 10)
 	    message_select(LOG_DEBUG, "selectReadWrite2", &ro, &wo, &eo);
 	for (i=0; i < npairs; i++) {
@@ -6180,7 +6214,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    if (InvalidSocket(sd)) continue;
 	    ret = doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
 				  FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0);
-	    if (ret == RW_LEAVE) goto leave;
+	    if (ret == RW_LEAVE) goto exit_loop;
 	    if (ret == RW_ONCE) break;		/* read once */
 	    if (ret == RW_EINTR) loop = 0;	/* EINTR */
 	}
@@ -6192,7 +6226,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			(p[0] ? p[0]->sd : INVALID_SOCKET),
 			(p[1] ? p[1]->sd : INVALID_SOCKET),
 			tx[0], rx[0], tx[1], rx[1]);
-		goto leave;
+		goto exit_loop;
 	    }
 	    rx[0] = p[0]->rx;
 	    tx[0] = p[0]->tx;
@@ -6203,7 +6237,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    loop = 0;
 	}
     }
- leave:
+ exit_loop:
     for (i=0; i < npairs; i++) {
 	p[i]->proto &= ~proto_thread;
 	p[i]->proto |= proto_dirty;
