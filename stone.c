@@ -78,7 +78,6 @@
  * -DNO_SYSLOG	  without syslog(2)
  * -DNO_RINDEX	  without rindex(3)
  * -DNO_STRDUP	  without strdup(3)
- * -DNO_LOCALTIME_R  without localtime_r(3)
  * -DNO_THREAD	  without thread
  * -DNO_PID_T	  without pid_t
  * -DNO_SOCKLEN_T without socklen_t
@@ -802,11 +801,32 @@ char *strdup(const char *s) {
 }
 #endif
 
+#ifdef WINDOWS
+struct tm *localtime_r(const time_t *clock, struct tm *t) {
+    FILETIME utc, local;
+    SYSTEMTIME system;
+    LONGLONG ll;
+    ll = Int32x32To64(*clock, 10000000) + 116444736000000000ULL;
+    utc.dwLowDateTime = (DWORD)ll;
+    utc.dwHighDateTime = ll >> 32;
+    if (!FileTimeToLocalFileTime(&utc, &local)) return NULL;
+    if (!FileTimeToSystemTime(&local, &system)) return NULL;
+    t->tm_sec = system.wSecond;
+    t->tm_min = system.wMinute;
+    t->tm_hour = system.wHour;
+    t->tm_mday = system.wDay;
+    t->tm_mon = system.wMonth-1;
+    t->tm_year = system.wYear-1900;
+    t->tm_wday = system.wDayOfWeek;
+    return t;
+}
+#endif
+
 static char Month[][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
 			  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
 char *strntime(char *str, int len, time_t *clock, long micro) {
-#ifdef NO_LOCALTIME_R
+#ifdef THREAD_UNSAFE
     struct tm *t = localtime(clock);
 #else
     struct tm tm;
@@ -3208,7 +3228,7 @@ void insertPairs(Pair *p1) {
 void message_time_log(Pair *pair) {
     TimeLog *log = pair->log;
     if (log && log->clock) {
-#ifdef NO_LOCALTIME_R
+#ifdef THREAD_UNSAFE
 	struct tm *t = localtime(&log->clock);
 #else
 	struct tm tm;
