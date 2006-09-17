@@ -333,7 +333,7 @@ typedef struct {
     long serial;
     SSL_METHOD *meth;
     int (*callback)(int, X509_STORE_CTX *);
-    char *sid_ctx;
+    unsigned char *sid_ctx;
     char *keyFile;
     char *certFile;
     char *caFile;
@@ -1152,7 +1152,9 @@ int islocalhost(struct sockaddr *sa) {
 
 #ifdef NO_ADDRINFO
 #define NTRY_MAX	10
+#ifndef NI_NUMERICHOST
 #define NI_NUMERICHOST	1
+#endif
 
 char *addr2str(struct sockaddr *sa, socklen_t salen,
 	       char *str, int len, int flags) {
@@ -2229,7 +2231,7 @@ int lbsopts(int argc, int i, char *argv[]) {
 char *stone2str(Stone *stonep, char *str, int strlen) {
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
-    int salen = sizeof(ss);
+    socklen_t salen = sizeof(ss);
     int proto;
     char src[STRMAX+1];
     if (getsockname(stonep->sd, sa, &salen) < 0) {
@@ -3354,9 +3356,9 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     if (ssl) {
 	SSL_SESSION *sess = SSL_get1_session(ssl);
 	if (sess) {
-	    char **match;
+	    unsigned char **match;
 	    if (Debug > 2) {
-		unsigned char str[SSL_MAX_SSL_SESSION_ID_LENGTH * 2 + 1];
+		char str[SSL_MAX_SSL_SESSION_ID_LENGTH * 2 + 1];
 		int i;
 		for (i=0; i < sess->session_id_length; i++)
 		    sprintf(&str[i*2], "%02x", sess->session_id[i]);
@@ -4086,8 +4088,8 @@ int strnUser(char *buf, int limit, SOCKET sd, int which,
     int len;
     char str[STRMAX+1];
     if (*cretp < -1) {
-	len = sizeof(*crp);
-	*cretp = getsockopt(sd, SOL_SOCKET, SO_PEERCRED, crp, &len);
+	socklen_t optlen = sizeof(*crp);
+	*cretp = getsockopt(sd, SOL_SOCKET, SO_PEERCRED, crp, &optlen);
     }
     if (*cretp < 0) {
 	
@@ -4773,10 +4775,10 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	time(&pair->clock);
 	p->clock = pair->clock;
 	if (p->proto & proto_base) {
-	    ex->len = baseEncode(&ex->buf[ex->start], ex->len,
+	    ex->len = baseEncode((unsigned char*)&ex->buf[ex->start], ex->len,
 				 ex->bufmax - ex->start);
 	} else if (pair->proto & proto_base) {
-	    ex->len = baseDecode(&ex->buf[ex->start], ex->len,
+	    ex->len = baseDecode((unsigned char*)&ex->buf[ex->start], ex->len,
 				 ex->buf+ex->bufmax-1);
 	    len = *(ex->buf+ex->bufmax-1);
 	    if (Debug > 4 && len > 0) {	/* len < 4 */
@@ -4832,8 +4834,8 @@ int commOutput(Pair *pair, char *fmt, ...) {
     vsnprintf(str, ex->bufmax-1 - (ex->start + ex->len), fmt, ap);
     va_end(ap);
     if (p->proto & proto_base)
-	ex->len += baseEncode(str, strlen(str),
-			       ex->bufmax-1 - (ex->start + ex->len));
+	ex->len += baseEncode((unsigned char*)str, strlen(str),
+			      ex->bufmax-1 - (ex->start + ex->len));
     else ex->len += strlen(str);
     p->proto |= (proto_select_w | proto_dirty);	/* need to write */
     return ex->len;
@@ -6820,7 +6822,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     if (isserver) {
 	if (opts->sid_ctx) {
 	    int ret;
-	    int len = strlen(opts->sid_ctx);
+	    int len = strlen((char*)opts->sid_ctx);
 	    ret = SSL_CTX_set_session_id_context(ss->ctx, opts->sid_ctx, len);
 	    if (!ret) {
 		len = SSL_MAX_SSL_SESSION_ID_LENGTH;
@@ -7240,7 +7242,7 @@ XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
 	    short mode = 0;
 	    struct sockaddr_storage ss;
 	    struct sockaddr *sa = (struct sockaddr*)&ss;
-	    int salen = sizeof(ss);
+	    socklen_t salen = sizeof(ss);
 	    strcpy(xhost, hosts[i]);
 	    p = strchr(xhost, '/');
 	    if (p) {
@@ -7403,7 +7405,7 @@ Stone *mkstone(
     Stone *stonep;
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
-    int salen = sizeof(ss);
+    socklen_t salen = sizeof(ss);
     int satype;
     int saproto = 0;
     sa_family_t family;
@@ -8292,7 +8294,7 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
     } else if (!strcmp(argv[argi], "uniq")) {
 	opts->serial = -1;
     } else if (!strncmp(argv[argi], "sid_ctx=", 8)) {
-	opts->sid_ctx = strdup(argv[argi]+8);
+	opts->sid_ctx = (unsigned char*)strdup(argv[argi]+8);
     } else if (!strncmp(argv[argi], "key=", 4)) {
 	opts->keyFile = strdup(argv[argi]+4);
     } else if (!strncmp(argv[argi], "cert=", 5)) {
@@ -8784,7 +8786,7 @@ void addEventSource(char *name) {
     if (RegCreateKey(HKEY_LOCAL_MACHINE, key, &hk)) return;
     if (!GetModuleFileName(0, exeName, sizeof(exeName))) return;
     if (RegSetValueEx(hk, "EventMessageFile", 0, REG_EXPAND_SZ,
-		      exeName, strlen(exeName)+1)) return;
+		      (BYTE*)exeName, strlen(exeName)+1)) return;
     data = (EVENTLOG_ERROR_TYPE | EVENTLOG_WARNING_TYPE |
 	    EVENTLOG_INFORMATION_TYPE);
     if (RegSetValueEx(hk, "TypesSupported", 0, REG_DWORD,
