@@ -449,7 +449,8 @@ typedef struct _LBSet {
 typedef struct _Stone {
     int common;
     SOCKET sd;			/* socket descriptor to listen */
-    short port;
+    int port;
+    SockAddr *listen;
     short ndsts;		/* # of destinations */
     SockAddr **dsts;		/* destinations */
     SockAddr *from;
@@ -2229,21 +2230,10 @@ int lbsopts(int argc, int i, char *argv[]) {
 }
 
 char *stone2str(Stone *stonep, char *str, int strlen) {
-    struct sockaddr_storage ss;
-    struct sockaddr *sa = (struct sockaddr*)&ss;
-    socklen_t salen = sizeof(ss);
     int proto;
     char src[STRMAX+1];
-    if (getsockname(stonep->sd, sa, &salen) < 0) {
-#ifdef WINDOWS
-	errno = WSAGetLastError();
-#endif
-	message(LOG_ERR, "stone %d: Can't get socket's name err=%d",
-		stonep->sd, errno);
-	str[0] = '\0';
-	return NULL;
-    }
-    addrport2str(sa, salen, (stonep->proto & proto_stone_s), src, STRMAX, 0);
+    addrport2str(&stonep->listen->addr, stonep->listen->len,
+		 (stonep->proto & proto_stone_s), src, STRMAX, 0);
     src[STRMAX] = '\0';
     proto = stonep->proto;
     if ((proto & proto_command) == command_proxy) {
@@ -3877,11 +3867,9 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 }
 
 int acceptCheck(Pair *pair1) {
-    struct sockaddr_storage ss1, ss2;
-    struct sockaddr *from = (struct sockaddr*)&ss1;
-    socklen_t fromlen = sizeof(ss1);
-    struct sockaddr *to = (struct sockaddr*)&ss2;
-    socklen_t tolen = sizeof(ss2);
+    struct sockaddr_storage ss;
+    struct sockaddr *from = (struct sockaddr*)&ss;
+    socklen_t fromlen = sizeof(ss);
     Stone *stonep = pair1->stone;
     Pair *pair2 = NULL;
     int satype;
@@ -3896,7 +3884,7 @@ int acceptCheck(Pair *pair1) {
     len = 0;
     ident[0] = '\0';
     bcopy(pair1->t->buf, &fromlen, sizeof(fromlen));	/* restore */
-    if (0 < fromlen && fromlen <= sizeof(ss1)) {
+    if (0 < fromlen && fromlen <= sizeof(ss)) {
 	bcopy(pair1->t->buf + sizeof(fromlen), from, fromlen);
     } else {
 	message(LOG_ERR, "%d TCP %d: acceptCheck Can't happen fromlen=%d",
@@ -3912,17 +3900,8 @@ int acceptCheck(Pair *pair1) {
 	}
     }
     if (stonep->proto & proto_ident) {
-	if (getsockname(pair1->sd, to, &tolen) < 0) {
-#ifdef WINDOWS
-	    errno = WSAGetLastError();
-#endif
-	    message(LOG_ERR, "stone %d: acceptCheck "
-		    "Can't get socket's name sd=%d err=%d",
-		    stonep->sd, pair1->sd, errno);
-	    shutdown(pair1->sd, 2);
-	    return 0;
-	}
-	if (getident(ident, from, fromlen, stonep->port, to, tolen)) {
+	if (getident(ident, from, fromlen, stonep->port,
+		     &stonep->listen->addr, stonep->listen->len)) {
 	    strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
 	    fromstr[STRMAX] = '\0';
 	    len = strlen(fromstr);
@@ -4083,61 +4062,79 @@ int strnAddr(char *buf, int limit, SOCKET sd, int which, int isport) {
 
 #ifdef SO_PEERCRED
 #include <pwd.h>
-int strnUser(char *buf, int limit, SOCKET sd, int which,
-	     struct ucred *crp, int *cretp) {
+#endif
+
+typedef union {
+    char str[STRMAX+1];
+#ifdef SO_PEERCRED
+    struct ucred cr;
+#endif
+} peeruid;
+
+int strnUser(char *buf, int limit, Pair *pair, int which,
+	     peeruid *peer, int *retp) {
+    Stone *stone = pair->stone;
     int len;
     char str[STRMAX+1];
-    if (*cretp < -1) {
-	socklen_t optlen = sizeof(*crp);
-	*cretp = getsockopt(sd, SOL_SOCKET, SO_PEERCRED, crp, &optlen);
-    }
-    if (*cretp < 0) {
-	
-    }
-    switch (which) {
-    case 1:	/* gid */
-	snprintf(str, STRMAX, "%d", (*cretp >= 0 ? crp->gid : -1));
-	break;
-    case 2:	/* user name */
-	*str = '\0';
-	if (*cretp >= 0) {
-#ifdef THREAD_UNSAFE
-	    struct passwd *passwd = getpwuid(crp->uid);
-	    if (passwd) snprintf(str, STRMAX, "%s", passwd->pw_name);
-#else
-	    struct passwd pwbuf;
-	    char sbuf[STRMAX+1];
-	    struct passwd *passwd;
-	    int ret = getpwuid_r(crp->uid, &pwbuf, sbuf, STRMAX, &passwd);
-	    if (ret == 0) snprintf(str, STRMAX, "%s", passwd->pw_name);
-#endif
+    str[0] = '\0';
+#if defined(AF_LOCAL) && defined(SO_PEERCRED)
+    if (stone->listen->addr.sa_family == AF_LOCAL) {
+	struct ucred *crp = &peer->cr;
+	if (*retp < -1) {
+	    socklen_t optlen = sizeof(*crp);
+	    *retp = getsockopt(pair->sd, SOL_SOCKET, SO_PEERCRED,
+			       crp, &optlen);
 	}
-	break;
-    case 3:	/* group name */
-	*str = '\0';
-	if (*cretp >= 0) {
-#ifdef THREAD_UNSAFE
-	    struct group *group = getgrgid(crp->gid);
-	    if (group) snprintf(str, STRMAX, "%s", group->gr_name);
-#else
-	    struct group gbuf;
-	    char sbuf[STRMAX+1];
-	    struct group *group;
-	    int ret = getgrgid_r(crp->gid, &gbuf, sbuf, STRMAX, &group);
-	    if (ret == 0) snprintf(str, STRMAX, "%s", group->gr_name);
-#endif
+	if (*retp < 0) {
+	    message(LOG_ERR, "%d TCP %d: Can't get PEERCRED err=%d",
+		    stone->sd, pair->sd, errno);
+	    return 0;
 	}
-	break;
-    default:	/* uid */
-	snprintf(str, STRMAX, "%d", (*cretp >= 0 ? crp->uid : -1));
-	break;
+	switch (which) {
+	case 1:	/* gid */
+	    snprintf(str, STRMAX, "%d", (*retp >= 0 ? crp->gid : -1));
+	    break;
+	case 2:	/* user name */
+	    *str = '\0';
+	    if (*retp >= 0) {
+#ifdef THREAD_UNSAFE
+		struct passwd *passwd = getpwuid(crp->uid);
+		if (passwd) snprintf(str, STRMAX, "%s", passwd->pw_name);
+#else
+		struct passwd pwbuf;
+		char sbuf[STRMAX+1];
+		struct passwd *passwd;
+		int ret = getpwuid_r(crp->uid, &pwbuf, sbuf, STRMAX, &passwd);
+		if (ret == 0) snprintf(str, STRMAX, "%s", passwd->pw_name);
+#endif
+	    }
+	    break;
+	case 3:	/* group name */
+	    *str = '\0';
+	    if (*retp >= 0) {
+#ifdef THREAD_UNSAFE
+		struct group *group = getgrgid(crp->gid);
+		if (group) snprintf(str, STRMAX, "%s", group->gr_name);
+#else
+		struct group gbuf;
+		char sbuf[STRMAX+1];
+		struct group *group;
+		int ret = getgrgid_r(crp->gid, &gbuf, sbuf, STRMAX, &group);
+		if (ret == 0) snprintf(str, STRMAX, "%s", group->gr_name);
+#endif
+	    }
+	    break;
+	default:	/* uid */
+	    snprintf(str, STRMAX, "%d", (*retp >= 0 ? crp->uid : -1));
+	    break;
+	}
     }
+#endif
     len = strlen(str);
     if (len > limit) len = limit;
     strncpy(buf, str, len);
     return len;
 }
-#endif
 
 int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
     int i = 0;
@@ -4149,10 +4146,8 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
     SSL_SESSION *sess = NULL;
     int cond;
 #endif
-#ifdef SO_PEERCRED
-    struct ucred cr;
-    int cret = -2;
-#endif
+    peeruid peer;
+    int uret = -2;
     p = *pp;
     while (i < limit && (c = *p++)) {
 	if (c == '\\') {
@@ -4219,24 +4214,18 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 1, 1);
 		continue;
 #endif
-#ifdef SO_PEERCRED
 	    case 'u':
-		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 0,
-				       &cr, &cret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 0, &peer, &uret);
 		continue;
 	    case 'g':
-		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 1,
-				       &cr, &cret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 1, &peer, &uret);
 		continue;
 	    case 'U':
-		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 2,
-				       &cr, &cret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 2, &peer, &uret);
 		continue;
 	    case 'G':
-		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 3,
-				       &cr, &cret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 3, &peer, &uret);
 		continue;
-#endif
 	    case '\0':
 		c = '\\';
 		p--;
@@ -4965,7 +4954,7 @@ int doproxy(Pair *pair, char *host, char *serv) {
 	    XPorts *ports;
 	    XHosts *xhost;
 	    int isok = 0;
-	    short port = getport(sa);
+	    int port = getport(sa);
 	    for (ports=pxh->ports; ports; ports=ports->next) {
 		if (ports->from <= port && port <= ports->end) {
 		    isok = 1;
@@ -7559,7 +7548,9 @@ Stone *mkstone(
 	    }
 	    if (stonep->port == 0) {
 		salen = sizeof(ss);
-		getsockname(stonep->sd, sa, &salen);
+		if (getsockname(stonep->sd, sa, &salen) >= 0) {
+		    stonep->port = getport(sa);
+		}
 	    }
 	    if (!(proto & proto_udp_s)) {	/* TCP */
 		if (listen(stonep->sd, BacklogMax) < 0) {
@@ -7573,6 +7564,7 @@ Stone *mkstone(
 	    }
 	}	/* !DryRun */
     }
+    stonep->listen = saDup(sa, salen);
 #ifdef USE_SSL
     if (proto & proto_ssl_s) {	/* server side SSL */
 	stonep->ssl_server = mkStoneSSL(&ServerOpts, 1);
