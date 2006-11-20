@@ -5007,9 +5007,21 @@ int doproxy(Pair *pair, char *host, char *serv) {
 	) {
 	SOCKET nsd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
 	if (ValidSocket(nsd)) {
+	    Pair *p = pair->pair;
+#ifdef USE_EPOLL
+	    struct epoll_event ev;
+	    ev.events = EPOLLONESHOT;
+	    ev.data.ptr = pair;
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, nsd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: reopen "
+			"epoll_ctl %d ADD err=%d",
+			pair->stone->sd, nsd, ePollFd, errno);
+	    }
+#endif
 	    pair->sd = nsd;
-	    message(LOG_INFO, "stone %d: close %d, reopen %d as family=%d",
-		    pair->stone->sd, sd, nsd, sa->sa_family);
+	    message(LOG_INFO, "%d TCP %d: close %d, reopen %d as family=%d",
+		    pair->stone->sd, (p ? p->sd : INVALID_SOCKET),
+		    sd, nsd, sa->sa_family);
 	    closesocket(sd);
 	}
     }
