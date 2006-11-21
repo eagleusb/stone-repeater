@@ -5019,13 +5019,14 @@ int doproxy(Pair *pair, char *host, char *serv) {
 	    }
 #endif
 	    pair->sd = nsd;
-	    message(LOG_INFO, "%d TCP %d: close %d, reopen %d as family=%d",
+	    message(LOG_INFO, "%d TCP %d: close %d %08x, "
+		    "reopen %d as family=%d",
 		    pair->stone->sd, (p ? p->sd : INVALID_SOCKET),
-		    sd, nsd, sa->sa_family);
+		    sd, pair->proto, nsd, sa->sa_family);
 	    closesocket(sd);
 	}
     }
-    pair->proto &= ~proto_command;
+    pair->proto &= ~(proto_connect | proto_command);
     if (reqconn(pair, sa, salen) < 0) return -1;
     if ((pair->proto & state_mask) == 1) {
 	if (Debug > 7) message(LOG_DEBUG, "%d TCP %d: command_proxy again",
