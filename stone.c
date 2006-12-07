@@ -3364,12 +3364,21 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		else s = match[1];
 		if (!s) s = match[0];
 		if (lbmod) {
+		    int offset2 = 0;
 		    offset = 0;
 		    while (*s) {
+			if (offset2 >= 0) {
+			    if ('0' <= *s && *s <= '9') {
+				offset2 = offset2 * 10 + (*s - '0');
+			    } else {
+				offset2 = -1;
+			    }
+			}
 			offset <<= 6;
 			offset += (*s & 0x3f);
 			s++;
 		    }
+		    if (offset2 > 0) offset = offset2;
 		    offset %= lbmod;
 		    if (Debug > 2)
 			message(LOG_DEBUG, "%d TCP %d: pair %d lb%d=%d",
