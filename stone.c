@@ -474,6 +474,10 @@ typedef struct _TimeLog {
     char str[0];		/* Log message */
 } TimeLog;
 
+const int data_parm_mask =	0x00ff;
+const int data_apop =		0x0100;
+const int data_identuser =	0x0200;
+
 typedef struct _ExBuf {	/* extensible buffer */
     struct _ExBuf *next;
     int start;		/* index of buf */
@@ -498,7 +502,7 @@ typedef struct _Pair {
     SOCKET sd;		/* socket descriptor */
     int proto;
     int count;		/* reference counter */
-    char *p;
+    ExBuf *d;
     TimeLog *log;
     int tx;		/* sent bytes */
     int rx;		/* received bytes */
@@ -2687,15 +2691,9 @@ void message_pair(int pri, Pair *pair) {
     p = pair->pair;
     if (p) psd = p->sd;
     else psd = INVALID_SOCKET;
-    if (p && p->p) {
-	message(pri, "%d TCP%3d:%3d %08x %d %s %s tx:%d rx:%d lp:%d",
-		pair->stone->sd, sd, psd, pair->proto, pair->count, str, p->p,
-		pair->tx, pair->rx, pair->loop);
-    } else {
-	message(pri, "%d TCP%3d:%3d %08x %d %s tx:%d rx:%d lp:%d",
-		pair->stone->sd, sd, psd, pair->proto, pair->count, str,
-		pair->tx, pair->rx, pair->loop);
-    }
+    message(pri, "%d TCP%3d:%3d %08x %d %s tx:%d rx:%d lp:%d",
+	    pair->stone->sd, sd, psd, pair->proto, pair->count, str,
+	    pair->tx, pair->rx, pair->loop);
 }
 
 void ungetExBuf(ExBuf *ex) {
@@ -2769,6 +2767,33 @@ ExBuf *getExBuf(void) {
     ret->start = 0;
     ret->len = 0;
     return ret;
+}
+
+ExBuf *getExData(Pair *pair, int type, int rmflag) {
+    ExBuf *ex = pair->d;
+    ExBuf *prev = NULL;
+    while (ex) {
+	int t = *(int*)ex->buf;
+	if (t == type) {
+	    if (rmflag) {
+		if (prev) prev->next = ex->next;
+		else pair->d = ex->next;
+	    }
+	    return ex;
+	}
+	prev = ex;
+	ex = ex->next;
+    }
+    return NULL;
+}
+
+ExBuf *newExData(Pair *pair, int type) {
+    ExBuf *ex = getExBuf();
+    if (!ex) return NULL;
+    *(int*)ex->buf = type;
+    ex->next = pair->d;
+    pair->d = ex;
+    return ex;
 }
 
 #ifdef USE_SSL
@@ -3100,7 +3125,7 @@ Pair *newPair(void) {
 	pair->timeout = PairTimeOut;
 	pair->count = 0;
 	pair->b = pair->t;
-	pair->p = NULL;
+	pair->d = NULL;
 	pair->log = NULL;
 	pair->tx = 0;
 	pair->rx = 0;
@@ -3119,7 +3144,6 @@ Pair *newPair(void) {
 
 void freePair(Pair *pair) {
     SOCKET sd;
-    char *p;
     TimeLog *log;
 #ifdef USE_SSL
     SSL *ssl;
@@ -3130,10 +3154,13 @@ void freePair(Pair *pair) {
     pair->sd = INVALID_SOCKET;
     if (Debug > 8) message(LOG_DEBUG, "%d TCP %d: freePair",
 			   pair->stone->sd, sd);
-    p = pair->p;
-    if (p) {
-	pair->p = NULL;
-	free(p);
+    ex = pair->d;
+    pair->d = NULL;
+    while (ex) {
+	ExBuf *f = ex;
+	ex = f->next;
+	f->next = NULL;
+	ungetExBuf(f);
     }
     log = pair->log;
     if (log) {
@@ -3911,9 +3938,12 @@ int acceptCheck(Pair *pair1) {
     if (stonep->proto & proto_ident) {
 	if (getident(ident, from, fromlen, stonep->port,
 		     &stonep->listen->addr, stonep->listen->len)) {
+	    ExBuf *t = newExData(pair1, data_identuser);
 	    strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
 	    fromstr[STRMAX] = '\0';
 	    len = strlen(fromstr);
+	    strcpy(t->buf + sizeof(int), fromstr);
+	    t->len = sizeof(int) + len;
 	    fromstr[len++] = '@';  /* omit size check, because len <= STRMAX */
 	}
     }
@@ -4083,9 +4113,15 @@ typedef union {
 int strnUser(char *buf, int limit, Pair *pair, int which,
 	     peeruid *peer, int *retp) {
     Stone *stone = pair->stone;
+    ExBuf *ex;
     int len;
     char str[STRMAX+1];
     str[0] = '\0';
+    if (which == 2 && (ex = getExData(pair, data_identuser, 0))) {
+	len = ex->len - sizeof(int);
+	strncpy(str, ex->buf + sizeof(int), len);
+	str[len] = '\0';
+    } else
 #if defined(AF_LOCAL) && defined(SO_PEERCRED)
     if (stone->listen->addr.sa_family == AF_LOCAL) {
 	struct ucred *crp = &peer->cr;
@@ -5163,15 +5199,23 @@ Comm proxyComm[] = {
 #ifdef USE_POP
 int popUSER(Pair *pair, char *parm, int start) {
     int ulen, tlen;
+    char *data;
+    ExBuf *ex = getExData(pair, data_apop, 0);
+    if (!ex) {
+	message(LOG_ERR, "%d TCP %d: popUSER Can't happen no ExData",
+		pair->stone->sd, pair->sd);
+	return -1;
+    }
+    data = ex->buf + sizeof(int);
     if (Debug) message(LOG_DEBUG, ": USER %s", parm);
     ulen = strlen(parm);
-    tlen = strlen(pair->p);
+    tlen = strlen(data);
     if (ulen + 1 + tlen + 1 >= BUFMAX-1) {
 	commOutput(pair, "+Err Too long user name\r\n");
 	return -1;
     }
-    bcopy(pair->p, pair->p + ulen + 1, tlen + 1);
-    strcpy(pair->p, parm);
+    bcopy(data, data + ulen + 1, tlen + 1);
+    strcpy(data, parm);
     commOutput(pair, "+OK Password required for %s\r\n", parm);
     pair->proto &= ~state_mask;
     pair->proto |= 1;
@@ -5186,29 +5230,34 @@ int popPASS(Pair *pair, char *parm, int start) {
     char *str;
     int ulen, tlen, plen, i;
     int state = (pair->proto & state_mask);
-    ExBuf *ex = pair->b;	/* bottom */
-    char *p = pair->p;
-    pair->p = NULL;
+    ExBuf *ex;
+    ExBuf *t;
+    char *data;
+    int max;
     if (Debug > 5) message(LOG_DEBUG, ": PASS %s", parm);
     if (state < 1) {
 	commOutput(pair, "-ERR USER first\r\n");
 	return -2;	/* read more */
     }
-    ulen = strlen(p);
-    str = p + ulen + 1;
+    t = getExData(pair, data_apop, 1);
+    data = t->buf + sizeof(int);
+    max = t->bufmax - sizeof(int);
+    ulen = strlen(data);
+    str = data + ulen + 1;
     tlen = strlen(str);
     plen = strlen(parm);
-    if (ulen + 1 + tlen + plen + 1 >= BUFMAX-1) {
+    if (ulen + 1 + tlen + plen + 1 >= max-1) {
 	commOutput(pair, "+Err Too long password\r\n");
 	return -1;
     }
     strcat(str, parm);
-    sprintf(ex->buf, "APOP %s ", p);
+    ex = pair->b;	/* bottom */
+    sprintf(ex->buf, "APOP %s ", data);
     ulen = strlen(ex->buf);
     MD5Init(&context);
     MD5Update(&context, str, tlen + plen);
     MD5Final(digest, &context);
-    free(p);
+    ungetExBuf(t);
     for (i=0; i < DIGEST_LEN; i++) {
 	sprintf(ex->buf + ulen + i*2, "%02x", digest[i]);
     }
@@ -5654,7 +5703,7 @@ int first_read(Pair *pair) {
 	    break;
 #ifdef USE_POP
 	case command_pop:
-	    if (p->p) len = docomm(p, popComm);
+	    if (getExData(pair, data_apop, 0)) len = docomm(p, popComm);
 	    break;
 #endif
 	case command_health:
@@ -5705,17 +5754,14 @@ int first_read(Pair *pair) {
     }
 #ifdef USE_POP
     if ((pair->proto & proto_command) == command_pop	/* apop */
-	&& pair->p == NULL) {
+	&& !getExData(pair, data_apop, 0)) {
 	int i;
 	char *q;
 	for (i=ex->start; i < ex->start + ex->len; i++) {
 	    if (ex->buf[i] == '<') {	/* time stamp of APOP banner */
-		q = pair->p = malloc(BUFMAX);
-		if (!q) {
-		    message(LOG_CRIT, "%d TCP %d: out of memory",
-			    stone->sd, sd);
-		    break;
-		}
+		ExBuf *t = newExData(pair, data_apop);
+		if (!t) break;
+		q = t->buf + sizeof(int);
 		for (; i < ex->start + ex->len; i++) {
 		    *q++ = ex->buf[i];
 		    if (ex->buf[i] == '>') break;
