@@ -477,6 +477,7 @@ typedef struct _TimeLog {
 const int data_parm_mask =	0x00ff;
 const int data_apop =		0x0100;
 const int data_identuser =	0x0200;
+const int data_ucred =		0x0300;
 
 typedef struct _ExBuf {	/* extensible buffer */
     struct _ExBuf *next;
@@ -3942,8 +3943,10 @@ int acceptCheck(Pair *pair1) {
 	    strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
 	    fromstr[STRMAX] = '\0';
 	    len = strlen(fromstr);
-	    strcpy(t->buf + sizeof(int), fromstr);
-	    t->len = sizeof(int) + len;
+	    if (t) {
+		strcpy(t->buf + sizeof(int), fromstr);
+		t->len = sizeof(int) + len;
+	    }
 	    fromstr[len++] = '@';  /* omit size check, because len <= STRMAX */
 	}
     }
@@ -4103,15 +4106,7 @@ int strnAddr(char *buf, int limit, SOCKET sd, int which, int isport) {
 #include <pwd.h>
 #endif
 
-typedef union {
-    char str[STRMAX+1];
-#ifdef SO_PEERCRED
-    struct ucred cr;
-#endif
-} peeruid;
-
-int strnUser(char *buf, int limit, Pair *pair, int which,
-	     peeruid *peer, int *retp) {
+int strnUser(char *buf, int limit, Pair *pair, int which) {
     Stone *stone = pair->stone;
     ExBuf *ex;
     int len;
@@ -4124,53 +4119,60 @@ int strnUser(char *buf, int limit, Pair *pair, int which,
     } else
 #if defined(AF_LOCAL) && defined(SO_PEERCRED)
     if (stone->listen->addr.sa_family == AF_LOCAL) {
-	struct ucred *crp = &peer->cr;
-	if (*retp < -1) {
-	    socklen_t optlen = sizeof(*crp);
-	    *retp = getsockopt(pair->sd, SOL_SOCKET, SO_PEERCRED,
-			       crp, &optlen);
-	}
-	if (*retp < 0) {
-	    message(LOG_ERR, "%d TCP %d: Can't get PEERCRED err=%d",
-		    stone->sd, pair->sd, errno);
-	    return 0;
+	struct ucred *cred = NULL;
+	ex = getExData(pair, data_ucred, 0);
+	if (ex) {
+	    cred = (struct ucred*)(ex->buf + sizeof(int));
+	} else {
+	    socklen_t optlen = sizeof(*cred);
+	    ex = newExData(pair, data_ucred);
+	    if (ex) {
+		cred = (struct ucred*)(ex->buf + sizeof(int));
+		if (getsockopt(pair->sd, SOL_SOCKET, SO_PEERCRED,
+			       cred, &optlen) < 0) {
+		    message(LOG_ERR, "%d TCP %d: Can't get PEERCRED err=%d",
+			    stone->sd, pair->sd, errno);
+		    ungetExBuf(ex);
+		    cred = NULL;
+		}
+	    }
 	}
 	switch (which) {
 	case 1:	/* gid */
-	    snprintf(str, STRMAX, "%d", (*retp >= 0 ? crp->gid : -1));
+	    snprintf(str, STRMAX, "%d", (cred ? cred->gid : -1));
 	    break;
 	case 2:	/* user name */
 	    *str = '\0';
-	    if (*retp >= 0) {
+	    if (cred) {
 #ifdef THREAD_UNSAFE
-		struct passwd *passwd = getpwuid(crp->uid);
+		struct passwd *passwd = getpwuid(cred->uid);
 		if (passwd) snprintf(str, STRMAX, "%s", passwd->pw_name);
 #else
 		struct passwd pwbuf;
 		char sbuf[STRMAX+1];
 		struct passwd *passwd;
-		int ret = getpwuid_r(crp->uid, &pwbuf, sbuf, STRMAX, &passwd);
+		int ret = getpwuid_r(cred->uid, &pwbuf, sbuf, STRMAX, &passwd);
 		if (ret == 0) snprintf(str, STRMAX, "%s", passwd->pw_name);
 #endif
 	    }
 	    break;
 	case 3:	/* group name */
 	    *str = '\0';
-	    if (*retp >= 0) {
+	    if (cred) {
 #ifdef THREAD_UNSAFE
-		struct group *group = getgrgid(crp->gid);
+		struct group *group = getgrgid(cred->gid);
 		if (group) snprintf(str, STRMAX, "%s", group->gr_name);
 #else
 		struct group gbuf;
 		char sbuf[STRMAX+1];
 		struct group *group;
-		int ret = getgrgid_r(crp->gid, &gbuf, sbuf, STRMAX, &group);
+		int ret = getgrgid_r(cred->gid, &gbuf, sbuf, STRMAX, &group);
 		if (ret == 0) snprintf(str, STRMAX, "%s", group->gr_name);
 #endif
 	    }
 	    break;
 	default:	/* uid */
-	    snprintf(str, STRMAX, "%d", (*retp >= 0 ? crp->uid : -1));
+	    snprintf(str, STRMAX, "%d", (cred ? cred->uid : -1));
 	    break;
 	}
     }
@@ -4191,8 +4193,6 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
     SSL_SESSION *sess = NULL;
     int cond;
 #endif
-    peeruid peer;
-    int uret = -2;
     p = *pp;
     while (i < limit && (c = *p++)) {
 	if (c == '\\') {
@@ -4260,16 +4260,16 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 		continue;
 #endif
 	    case 'u':
-		if (buf) i += strnUser(buf+i, limit-i, pair, 0, &peer, &uret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 0);
 		continue;
 	    case 'g':
-		if (buf) i += strnUser(buf+i, limit-i, pair, 1, &peer, &uret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 1);
 		continue;
 	    case 'U':
-		if (buf) i += strnUser(buf+i, limit-i, pair, 2, &peer, &uret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 2);
 		continue;
 	    case 'G':
-		if (buf) i += strnUser(buf+i, limit-i, pair, 3, &peer, &uret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 3);
 		continue;
 	    case '\0':
 		c = '\\';
