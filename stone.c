@@ -5704,7 +5704,7 @@ int first_read(Pair *pair) {
 	    break;
 #ifdef USE_POP
 	case command_pop:
-	    if (getExData(pair, data_apop, 0)) len = docomm(p, popComm);
+	    if (getExData(p, data_apop, 0)) len = docomm(p, popComm);
 	    break;
 #endif
 	case command_health:
@@ -5768,6 +5768,9 @@ int first_read(Pair *pair) {
 		    if (ex->buf[i] == '>') break;
 		}
 		*q = '\0';
+		if (Debug > 6)
+		    message(LOG_DEBUG, "%d TCP %d: APOP challenge: %s",
+			    stone->sd, sd, t->buf + sizeof(int));
 		break;
 	    }
 	}
