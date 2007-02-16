@@ -299,6 +299,7 @@ int FdSetBug = 0;
 #ifdef USE_SSL
 #include <openssl/crypto.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -308,7 +309,6 @@ int FdSetBug = 0;
 #ifdef CRYPTOAPI
 int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
 int CryptoAPI_verify_certificate(X509 *x509);
-const int cryptoapi_storeca = 0x01;
 #endif
 
 #define NMATCH_MAX	9	/* \1 ... \9 */
@@ -323,10 +323,11 @@ typedef struct {
     regex_t *re[DEPTH_MAX];
     unsigned char lbmod;
     unsigned char lbparm;
-#ifdef CRYPTOAPI
-    unsigned char store;
-#endif
+    unsigned char sslparm;
 } StoneSSL;
+
+const int sslparm_ignore  = 0x01;
+const int sslparm_storeca = 0x02;
 
 typedef struct {
     int verbose;
@@ -345,9 +346,10 @@ typedef struct {
     char *caPath;
     char *pfxFile;
     char *passwd;
+    int certIgnore;
 #ifdef CRYPTOAPI
-    char *certStore;
     int certStoreCA;
+    char *certStore;
 #endif
     char *cipherList;
     char *regexp[DEPTH_MAX];
@@ -469,6 +471,7 @@ typedef struct _Stone {
 #ifdef USE_SSL
     StoneSSL *ssl_server;
     StoneSSL *ssl_client;
+    char *ssl_host;	/* hostname of the ssl server (client side only) */
 #endif
     int nhosts;			/* # of hosts */
     XHosts *xhosts;		/* hosts permitted to connect */
@@ -6639,6 +6642,68 @@ static void freeMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
     free(match);
 }
 
+static int hostcmp(char *pat, char *host) {
+    char a, b;
+    while (*pat) {
+	if (*pat == '*') {
+	    pat++;
+	    while (*host) {
+		if (*host == *pat) break;
+		host++;
+	    }
+	}
+	a = toupper(*pat);
+	b = toupper(*host);
+	if (a != b) return a - b;
+	pat++;
+	host++;
+    }
+    return *host;
+}
+
+static int hostcheck(Pair *pair, X509 *cert, char *host) {
+    X509_EXTENSION *ext;
+    GENERAL_NAMES *ialt;
+    char name[LONGSTRMAX+1];
+    int i = X509_get_ext_by_NID(cert, NID_subject_alt_name, -1);
+    if (i >= 0
+	&& (ext=X509_get_ext(cert, i))
+	&& (ialt=X509V3_EXT_d2i(ext))) {
+	int done = 0;
+	for (i=0; !done && i < sk_GENERAL_NAME_num(ialt); i++) {
+	    GENERAL_NAME *gen = sk_GENERAL_NAME_value(ialt, i);
+	    if (gen->type == GEN_DNS && gen->d.ia5) {
+		int len = gen->d.ia5->length;
+		if (len > LONGSTRMAX) len = LONGSTRMAX;
+		strncpy(name, (char*)gen->d.ia5->data, len);
+		name[len] = '\0';
+		if (hostcmp(name, host) == 0) {
+		    if (Debug > 4)
+			message(LOG_DEBUG, "match %s dNSName=%s",
+				host, name);
+		    done = 1;	/* match */
+		} else if (Debug > 5) message(LOG_DEBUG, "dNSName: %s", name);
+	    }
+	    GENERAL_NAME_free(gen);
+	}
+	sk_GENERAL_NAME_free(ialt);
+	if (done) return 1;
+    }
+    if (X509_NAME_get_text_by_NID(X509_get_subject_name(cert), NID_commonName,
+				  name, sizeof(name)) >= 0) {
+	if (hostcmp(name, host) == 0) {
+	    if (Debug > 4) message(LOG_DEBUG, "match %s CN=%s", host, name);
+	    return 1;	/* match */
+	}
+	message(LOG_ERR, "%d TCP %d: connect to %s, but CN=%s",
+		pair->stone->sd, pair->sd, host, name);
+	return 0;
+    }
+    message(LOG_ERR, "%d TCP %d: no dNSName nor CN",
+	    pair->stone->sd, pair->sd);
+    return 0;
+}
+
 static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
     X509 *err_cert;
     int err, depth, depthmax;
@@ -6685,6 +6750,8 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 		    serial, ss->serial);
 	    return 0;	/* fail */
 	}
+	if (pair->stone->ssl_host
+	    && !hostcheck(pair, err_cert, pair->stone->ssl_host)) return 0;
     }
     if (Debug > 3)
 	message(LOG_DEBUG,
@@ -6700,8 +6767,9 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	X509_STORE_CTX_set_error(ctx, X509_V_ERR_CERT_CHAIN_TOO_LONG);
     }
     if (!preverify_ok
+	&& !(ss->sslparm & sslparm_ignore)
 #ifdef CRYPTOAPI
-	&& !((ss->store & cryptoapi_storeca)
+	&& !((ss->sslparm & sslparm_storeca)
 	     && CryptoAPI_verify_certificate(err_cert) > 0)
 #endif
 	) {
@@ -6887,9 +6955,10 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	    goto error;
 	}
     }
+    ss->sslparm = 0;
+    if (opts->certIgnore) ss->sslparm |= sslparm_ignore;
 #ifdef CRYPTOAPI
-    ss->store = 0;
-    if (opts->certStoreCA) ss->store |= cryptoapi_storeca;
+    if (opts->certStoreCA) ss->sslparm |= sslparm_storeca;
     if (opts->certStore) {
 	if (!SSL_CTX_use_CryptoAPI_certificate(ss->ctx, opts->certStore)) {
 	    message(LOG_ERR, "Can't load certificate \"%s\" "
@@ -7579,7 +7648,9 @@ Stone *mkstone(
     } else {
 	stonep->ssl_server = NULL;
     }
+    stonep->ssl_host = NULL;
     if (proto & proto_ssl_d) {	/* client side SSL */
+	stonep->ssl_host = dhost;
 	stonep->ssl_client = mkStoneSSL(&ClientOpts, 0);
     } else {
 	stonep->ssl_client = NULL;
@@ -8192,9 +8263,10 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->caFile = opts->caPath = NULL;
     opts->pfxFile = NULL;
     opts->passwd = NULL;
+    opts->certIgnore = 0;
 #ifdef CRYPTOAPI
-    opts->certStore = NULL;
     opts->certStoreCA = 0;
+    opts->certStore = NULL;
 #endif
     opts->cipherList = getenv("SSL_CIPHER");
     for (i=0; i < DEPTH_MAX; i++) opts->regexp[i] = NULL;
@@ -8317,11 +8389,13 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 	str[i] = '\0';
 	fclose(fp);
 	opts->passwd = strdup(str);
+    } else if (!strncmp(argv[argi], "ignore", 6)) {
+	opts->certIgnore = 1;
 #ifdef CRYPTOAPI
-    } else if (!strncmp(argv[argi], "store=", 6)) {
-	opts->certStore = strdup(argv[argi]+6);
     } else if (!strncmp(argv[argi], "storeCA", 7)) {
 	opts->certStoreCA = 1;
+    } else if (!strncmp(argv[argi], "store=", 6)) {
+	opts->certStore = strdup(argv[argi]+6);
 #endif
     } else if (!strncmp(argv[argi], "cipher=", 7)) {
 	opts->cipherList = strdup(argv[argi]+7);
