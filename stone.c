@@ -307,6 +307,8 @@ int FdSetBug = 0;
 
 #ifdef CRYPTOAPI
 int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
+int CryptoAPI_verify_certificate(X509 *x509);
+const int cryptoapi_storeca = 0x01;
 #endif
 
 #define NMATCH_MAX	9	/* \1 ... \9 */
@@ -321,6 +323,9 @@ typedef struct {
     regex_t *re[DEPTH_MAX];
     unsigned char lbmod;
     unsigned char lbparm;
+#ifdef CRYPTOAPI
+    unsigned char store;
+#endif
 } StoneSSL;
 
 typedef struct {
@@ -342,6 +347,7 @@ typedef struct {
     char *passwd;
 #ifdef CRYPTOAPI
     char *certStore;
+    int certStoreCA;
 #endif
     char *cipherList;
     char *regexp[DEPTH_MAX];
@@ -4107,7 +4113,9 @@ int strnAddr(char *buf, int limit, SOCKET sd, int which, int isport) {
 #endif
 
 int strnUser(char *buf, int limit, Pair *pair, int which) {
+#if defined(AF_LOCAL) && defined(SO_PEERCRED)
     Stone *stone = pair->stone;
+#endif
     ExBuf *ex;
     int len;
     char str[STRMAX+1];
@@ -6691,7 +6699,12 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	preverify_ok = 0;
 	X509_STORE_CTX_set_error(ctx, X509_V_ERR_CERT_CHAIN_TOO_LONG);
     }
-    if (!preverify_ok) {
+    if (!preverify_ok
+#ifdef CRYPTOAPI
+	&& !((ss->store & cryptoapi_storeca)
+	     && CryptoAPI_verify_certificate(err_cert) > 0)
+#endif
+	) {
 	if (ss->verbose)
 	    message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s",
 		    pair->stone->sd, pair->sd,
@@ -6875,6 +6888,8 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	}
     }
 #ifdef CRYPTOAPI
+    ss->store = 0;
+    if (opts->certStoreCA) ss->store |= cryptoapi_storeca;
     if (opts->certStore) {
 	if (!SSL_CTX_use_CryptoAPI_certificate(ss->ctx, opts->certStore)) {
 	    message(LOG_ERR, "Can't load certificate \"%s\" "
@@ -7797,6 +7812,7 @@ void help(char *com, char *sub) {
 "       pfx=<file>       ; PKCS#12 file\n"
 #ifdef CRYPTOAPI
 "       store=<prop>     ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
+"       storeCA          ; use CA cert in Windows cert store\n"
 #endif
 "       cipher=<ciphers> ; list of ciphers\n"
 "       lb<n>=<m>        ; load balancing based on CN\n"
@@ -8178,6 +8194,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->passwd = NULL;
 #ifdef CRYPTOAPI
     opts->certStore = NULL;
+    opts->certStoreCA = 0;
 #endif
     opts->cipherList = getenv("SSL_CIPHER");
     for (i=0; i < DEPTH_MAX; i++) opts->regexp[i] = NULL;
@@ -8303,6 +8320,8 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 #ifdef CRYPTOAPI
     } else if (!strncmp(argv[argi], "store=", 6)) {
 	opts->certStore = strdup(argv[argi]+6);
+    } else if (!strncmp(argv[argi], "storeCA", 7)) {
+	opts->certStoreCA = 1;
 #endif
     } else if (!strncmp(argv[argi], "cipher=", 7)) {
 	opts->cipherList = strdup(argv[argi]+7);
