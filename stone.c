@@ -6766,18 +6766,36 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	preverify_ok = 0;
 	X509_STORE_CTX_set_error(ctx, X509_V_ERR_CERT_CHAIN_TOO_LONG);
     }
-    if (!preverify_ok
-	&& !(ss->sslparm & sslparm_ignore)
+    if (!preverify_ok) {
 #ifdef CRYPTOAPI
-	&& !((ss->sslparm & sslparm_storeca)
-	     && CryptoAPI_verify_certificate(err_cert) > 0)
+	if (ss->sslparm & sslparm_storeca) {
+	    int ret = CryptoAPI_verify_certificate(err_cert);
+	    if (ret < 0) {
+		if (ss->verbose)
+		    message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s, "
+			    "CryptoAPI verify %ld",
+			    pair->stone->sd, pair->sd,
+			    err, X509_verify_cert_error_string(err),
+			    ERR_get_error());
+		return 0;
+	    } else if (ret == 0) {
+		if (ss->verbose)
+		    message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s, "
+			    "CryptoAPI certificate is not trusted",
+			    pair->stone->sd, pair->sd,
+			    err, X509_verify_cert_error_string(err));
+		return 0;
+	    }
+	} else {
 #endif
-	) {
-	if (ss->verbose)
-	    message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s",
-		    pair->stone->sd, pair->sd,
-		    err, X509_verify_cert_error_string(err));
-	return 0;
+	    if (ss->verbose)
+		message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s",
+			pair->stone->sd, pair->sd,
+			err, X509_verify_cert_error_string(err));
+	    if (!(ss->sslparm & sslparm_ignore)) return 0;
+#ifdef CRYPTOAPI
+	}
+#endif
     }
     re = ss->re[DEPTH_MAX - depthmax + depth];
     if (!re) re = ss->re[depth];
