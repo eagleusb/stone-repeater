@@ -6920,6 +6920,7 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	    return 0;	/* fail */
 	}
 	if (pair->stone->ssl_host
+	    && !ss->re[depth]
 	    && !hostcheck(pair, err_cert, pair->stone->ssl_host)) return 0;
     }
     if (Debug > 3)
