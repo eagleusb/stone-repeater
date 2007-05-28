@@ -487,6 +487,7 @@ const int data_parm_mask =	0x00ff;
 const int data_apop =		0x0100;
 const int data_identuser =	0x0200;
 const int data_ucred =		0x0300;
+const int data_peeraddr = 	0x0400;
 
 typedef struct _ExBuf {	/* extensible buffer */
     struct _ExBuf *next;
@@ -2904,6 +2905,7 @@ int recvPairUDP(Pair *pair) {
     SOCKET sd = pair->sd;
     Pair *p;
     ExBuf *ex;
+    ExBuf *t;
     int bufmax, start;
     int len;
     int flags = 0;
@@ -2940,8 +2942,13 @@ int recvPairUDP(Pair *pair) {
     if (Debug > 8)
 	message(LOG_DEBUG, "%d UDP %d: recvfrom len=%d",
 		stone->sd, sd, len);
-    if (!saComp(&stone->dsts[0]->addr, from)) {	/* from unknown */
+    t = getExData(pair, data_peeraddr, 0);
+    if (t) {
+	SockAddr *peer = (SockAddr*)(t->buf + sizeof(int));
+	if (!saComp(&peer->addr, from))	goto unknown;
+    } else {	/* from unknown */
 	char addrport[STRMAX+1];
+    unknown:
 	addrport2str(from, fromlen, proto_udp, addrport, STRMAX, 0);
 	addrport[STRMAX] = '\0';
 	message(LOG_ERR, "%d UDP %d: received from unknown %s",
@@ -3005,8 +3012,8 @@ int sendPairUDP(Pair *pair) {
     }
     if (buf) {	/* now, large buf is ready, copy the rest */
 	int flags = 0;
-	struct sockaddr *sa;
-	socklen_t salen;
+	ExBuf *t;
+	SockAddr *dst;
 	for (; len < buflen; ex = ex->next) {
 	    if (ex->len > 0) bcopy(&ex->buf[ex->start], &buf[len], ex->len);
 	    len += ex->len;
@@ -3015,12 +3022,24 @@ int sendPairUDP(Pair *pair) {
 #ifdef MSG_DONTWAIT
 	if (!(stone->proto & proto_block_d)) flags = MSG_DONTWAIT;
 #endif
-	sa = &stone->dsts[0]->addr;
-	salen = stone->dsts[0]->len;
+	t = getExData(pair, data_peeraddr, 0);
+	if (t) {
+	    dst = (SockAddr*)(t->buf + sizeof(int));
+	} else  {
+	    int lenmax;
+	    int dstlen;
+	    t = newExData(pair, data_peeraddr);
+	    dst = (SockAddr*)(t->buf + sizeof(int));
+	    lenmax = t->bufmax - sizeof(int) - SockAddrBaseSize;
+	    dst->len = stone->dsts[0]->len;
+	    bcopy(&stone->dsts[0]->addr, &dst->addr, dst->len);
+	    dstlen = modPairDest(pair, &dst->addr, lenmax);
+	    if (dstlen > 0) dst->len = dstlen;	/* dest is modified */
+	}
 	if (sendto(pair->sd, buf+sizeof(short), buflen-sizeof(short),
-		   flags, sa, salen) != buflen-sizeof(short)) {
+		   flags, &dst->addr, dst->len) != buflen-sizeof(short)) {
 	    char addrport[STRMAX+1];
-	    addrport2str(sa, salen, proto_udp, addrport, STRMAX, 0);
+	    addrport2str(&dst->addr, dst->len, proto_udp, addrport, STRMAX, 0);
 	    addrport[STRMAX] = '\0';
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
