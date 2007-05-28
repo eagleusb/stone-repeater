@@ -1333,6 +1333,15 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
 }
 #endif
 
+char *addrport2strOnce(struct sockaddr *sa, socklen_t salen,
+		       int proto, char *str, int len, int flags) {
+    if (! *str) {
+	addrport2str(sa, salen, proto, str, len, flags);
+	str[len] = '\0';
+    }
+    return str;
+}
+
 int isdigitstr(char *str) {
     while (*str && !isspace(*str)) {
 	if (!isdigit(*str)) return 0;
@@ -1769,8 +1778,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #endif
 	return 1;	/* I can't tell the master is healthy or not */
     }
-    addrport2str(sa, salen, (proto & proto_pair_d), addrport, STRMAX, 0);
-    addrport[STRMAX] = '\0';
+    addrport[0] = '\0';
     if (!(proto & proto_block_d)) {
 #ifdef WINDOWS
 	param = 1;
@@ -1809,11 +1817,15 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 		);
 	    getsockopt(sd, SOL_SOCKET, SO_ERROR, (char*)&optval, &optlen);
 	    if (optval) {
+		addrport2strOnce(sa, salen, (proto & proto_pair_d),
+				 addrport, STRMAX, 0);
 		message(LOG_ERR, "health check: connect %s getsockopt err=%d",
 			addrport, optval);
 		goto fail;
 	    }
 	} else {
+	    addrport2strOnce(sa, salen, (proto & proto_pair_d),
+			     addrport, STRMAX, 0);
 	    message(LOG_ERR, "health check: connect %s err=%d",
 		    addrport, errno);
 	    goto fail;
@@ -1830,6 +1842,8 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
+	    addrport2strOnce(sa, salen, (proto & proto_pair_d),
+			     addrport, STRMAX, 0);
 	    message(LOG_ERR, "health check: send %s err=%d",
 		    addrport, errno);
 	    goto fail;
@@ -1864,6 +1878,8 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
 		errno = WSAGetLastError();
 #endif
+		addrport2strOnce(sa, salen, (proto & proto_pair_d),
+				 addrport, STRMAX, 0);
 		message(LOG_ERR, "health check: recv from %s err=%d",
 			addrport, errno);
 		goto fail;
@@ -1871,9 +1887,12 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 	    len += ret;
 	    buf[len] = '\0';
 	    err = regexec(&chat->expect, buf, 0, NULL, 0);
-	    if (Debug > 8)
+	    if (Debug > 8) {
+		addrport2strOnce(sa, salen, (proto & proto_pair_d),
+				 addrport, STRMAX, 0);
 		message(LOG_DEBUG, "health check: %s regexec=%d",
 			addrport, err);
+	    }
 	    if (len > BUFMAX/2) {
 		bcopy(buf+(len-BUFMAX/2), buf, BUFMAX/2);
 		len = BUFMAX/2;
@@ -1896,8 +1915,11 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
     closesocket(sd);
     return 1;	/* healthy ! */
  timeout:
-    if (Debug > 8)
+    if (Debug > 8) {
+	addrport2strOnce(sa, salen, (proto & proto_pair_d),
+			 addrport, STRMAX, 0);
 	message(LOG_DEBUG, "health check: %s timeout", addrport);
+    }
  fail:
     shutdown(sd, 2);
 #ifdef USE_EPOLL
@@ -1913,19 +1935,26 @@ void asyncHealthCheck(Backup *b) {
     ASYNC_BEGIN;
     time(&now);
     b->last = now + 60 * 60;	/* suppress further check */
-    addrport2str(&b->check->addr, b->check->len,
-		 (b->proto & proto_pair_d), addrport, STRMAX, 0);
-    addrport[STRMAX] = '\0';
-    if (Debug > 8)
+    addrport[0] = '\0';
+    if (Debug > 8) {
+	addrport2strOnce(&b->check->addr, b->check->len,
+			 (b->proto & proto_pair_d), addrport, STRMAX, 0);
 	message(LOG_DEBUG, "asyncHealthCheck %s", addrport);
+    }
     if (healthCheck(&b->check->addr, b->check->len,
 		    b->proto, b->interval, b->chat)) {	/* healthy ? */
-	if (Debug > 3 || (b->bn && Debug > 1))
+	if (Debug > 3 || (b->bn && Debug > 1)) {
+	    addrport2strOnce(&b->check->addr, b->check->len,
+			     (b->proto & proto_pair_d), addrport, STRMAX, 0);
 	    message(LOG_DEBUG, "health check %s success", addrport);
+	}
 	if (b->bn) b->bn = 0;
     } else {	/* unhealthy */
-	if (Debug > 3 || (b->bn == 0 && Debug > 0))
+	if (Debug > 3 || (b->bn == 0 && Debug > 0)) {
+	    addrport2strOnce(&b->check->addr, b->check->len,
+			     (b->proto & proto_pair_d), addrport, STRMAX, 0);
 	    message(LOG_DEBUG, "health check %s fail", addrport);
+	}
 	if (b->bn == 0) b->bn++;
     }
     b->last = now;
@@ -2380,6 +2409,106 @@ ExBuf *newExData(Pair *pair, int type) {
     ex->next = pair->d;
     pair->d = ex;
     return ex;
+}
+
+/* modify dest if needed */
+int modPairDest(Pair *p1, struct sockaddr *dst, socklen_t dstlenmax) {
+    Pair *p2;
+    socklen_t dstlen = 0;
+    int offset = -1;	/* offset in load balancing group */
+#ifdef USE_SSL
+    SSL *ssl;
+#endif
+    p2 = p1->pair;
+    if (p2 == NULL) return -1;
+#ifdef USE_SSL
+    ssl = p2->ssl;
+    if (ssl) {
+	SSL_SESSION *sess = SSL_get1_session(ssl);
+	if (sess) {
+	    unsigned char **match;
+	    if (Debug > 2) {
+		char str[SSL_MAX_SSL_SESSION_ID_LENGTH * 2 + 1];
+		int i;
+		for (i=0; i < sess->session_id_length; i++)
+		    sprintf(&str[i*2], "%02x", sess->session_id[i]);
+		message(LOG_DEBUG, "%d TCP %d: SSL session ID=%s",
+			p2->stone->sd, p2->sd, str);
+	    }
+	    match = SSL_SESSION_get_ex_data(sess, MatchIndex);
+	    if (match && p2->stone->ssl_server) {
+		int lbparm = p2->stone->ssl_server->lbparm;
+		int lbmod = p2->stone->ssl_server->lbmod;
+		unsigned char *s;
+		if (0 <= lbparm && lbparm <= 9) s = match[lbparm];
+		else s = match[1];
+		if (!s) s = match[0];
+		if (lbmod) {
+		    int offset2 = 0;
+		    offset = 0;
+		    while (*s) {
+			if (offset2 >= 0) {
+			    if ('0' <= *s && *s <= '9') {
+				offset2 = offset2 * 10 + (*s - '0');
+			    } else {
+				offset2 = -1;
+			    }
+			}
+			offset <<= 6;
+			offset += (*s & 0x3f);
+			s++;
+		    }
+		    if (offset2 > 0) offset = offset2;
+		    offset %= lbmod;
+		    if (Debug > 2)
+			message(LOG_DEBUG, "%d TCP %d: pair %d lb%d=%d",
+				p1->stone->sd, p1->sd, p2->sd, lbparm, offset);
+		}
+	    }
+	    SSL_SESSION_free(sess);
+	}
+    }
+#endif
+    if (offset < 0 && p1->stone->ndsts > 1) {	/* load balancing */
+	int n = p1->stone->ndsts;
+	offset = (p1->stone->proto & state_mask) % n;
+	if (p1->stone->backups) {
+	    int i;
+	    for (i=0; i < n; i++) {
+		Backup *b = p1->stone->backups[(offset+i) % n];
+		if (!b || b->bn == 0) {	/* no backup or healthy, use it */
+		    offset = (offset+i) % n;
+		    break;
+		}
+		if (Debug > 8)
+		    message(LOG_DEBUG,
+			    "%d TCP %d: ofs=%d is unhealthy, skipped",
+			    p1->stone->sd, p1->sd, (offset+i) % n);
+	    }
+	}
+	/* round robin */
+	p1->stone->proto = ((p1->stone->proto & ~state_mask)
+			    | ((offset+1) & state_mask));
+    }
+    if (offset >= 0) {
+	dstlen = p1->stone->dsts[offset]->len;
+	if (dstlen < dstlenmax)
+	    bcopy(&p1->stone->dsts[offset]->addr, dst, dstlen);
+    }
+    if (p1->stone->backups) {
+	Backup *backup;
+	if (offset >= 0) backup = p1->stone->backups[offset];
+	else backup = p1->stone->backups[0];
+	if (backup) {
+	    backup->used = 2;
+	    if (backup->bn) {	/* unhealthy */
+		dstlen = backup->backup->len;
+		if (dstlen < dstlenmax)
+		    bcopy(&backup->backup->addr, dst, dstlen);
+	    }
+	}
+    }
+    return dstlen;
 }
 
 /* relay UDP */
@@ -3526,13 +3655,9 @@ void message_conn(int pri, Conn *conn) {
 int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     struct sockaddr_storage ss;
     struct sockaddr *dst = (struct sockaddr*)&ss;	/* destination */
-    socklen_t dstlen = sizeof(ss);
+    socklen_t dstlen;
     int ret;
     Pair *p2;
-#ifdef USE_SSL
-    SSL *ssl;
-#endif
-    int offset = -1;	/* offset in load balancing group */
     time_t clock;
     char addrport[STRMAX+1];
 #ifdef WINDOWS
@@ -3547,90 +3672,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     time(&clock);
     if (Debug > 8) message(LOG_DEBUG, "%d TCP %d: doconnect",
 			   p1->stone->sd, p1->sd);
-#ifdef USE_SSL
-    ssl = p2->ssl;
-    if (ssl) {
-	SSL_SESSION *sess = SSL_get1_session(ssl);
-	if (sess) {
-	    unsigned char **match;
-	    if (Debug > 2) {
-		char str[SSL_MAX_SSL_SESSION_ID_LENGTH * 2 + 1];
-		int i;
-		for (i=0; i < sess->session_id_length; i++)
-		    sprintf(&str[i*2], "%02x", sess->session_id[i]);
-		message(LOG_DEBUG, "%d TCP %d: SSL session ID=%s",
-			p2->stone->sd, p2->sd, str);
-	    }
-	    match = SSL_SESSION_get_ex_data(sess, MatchIndex);
-	    if (match && p2->stone->ssl_server) {
-		int lbparm = p2->stone->ssl_server->lbparm;
-		int lbmod = p2->stone->ssl_server->lbmod;
-		unsigned char *s;
-		if (0 <= lbparm && lbparm <= 9) s = match[lbparm];
-		else s = match[1];
-		if (!s) s = match[0];
-		if (lbmod) {
-		    int offset2 = 0;
-		    offset = 0;
-		    while (*s) {
-			if (offset2 >= 0) {
-			    if ('0' <= *s && *s <= '9') {
-				offset2 = offset2 * 10 + (*s - '0');
-			    } else {
-				offset2 = -1;
-			    }
-			}
-			offset <<= 6;
-			offset += (*s & 0x3f);
-			s++;
-		    }
-		    if (offset2 > 0) offset = offset2;
-		    offset %= lbmod;
-		    if (Debug > 2)
-			message(LOG_DEBUG, "%d TCP %d: pair %d lb%d=%d",
-				p1->stone->sd, p1->sd, p2->sd, lbparm, offset);
-		}
-	    }
-	    SSL_SESSION_free(sess);
-	}
-    }
-#endif
-    if (offset < 0 && p1->stone->ndsts > 1) {	/* load balancing */
-	int n = p1->stone->ndsts;
-	offset = (p1->stone->proto & state_mask) % n;
-	if (p1->stone->backups) {
-	    int i;
-	    for (i=0; i < n; i++) {
-		Backup *b = p1->stone->backups[(offset+i) % n];
-		if (!b || b->bn == 0) {	/* no backup or healthy, use it */
-		    offset = (offset+i) % n;
-		    break;
-		}
-		if (Debug > 8)
-		    message(LOG_DEBUG, "%d TCP %d: ofs=%d is unhealthy, skipped",
-			    p1->stone->sd, p1->sd, (offset+i) % n);
-	    }
-	}
-	/* round robin */
-	p1->stone->proto = ((p1->stone->proto & ~state_mask)
-			    | ((offset+1) & state_mask));
-    }
-    if (offset >= 0) {
-	dstlen = p1->stone->dsts[offset]->len;
-	bcopy(&p1->stone->dsts[offset]->addr, dst, dstlen);
-    }
-    if (p1->stone->backups) {
-	Backup *backup;
-	if (offset >= 0) backup = p1->stone->backups[offset];
-	else backup = p1->stone->backups[0];
-	if (backup) {
-	    backup->used = 2;
-	    if (backup->bn) {	/* unhealthy */
-		dstlen = backup->backup->len;
-		bcopy(&backup->backup->addr, dst, dstlen);
-	    }
-	}
-    }
+    ret = modPairDest(p1, dst, sizeof(ss));
+    if (ret > 0) dstlen = ret;	/* dest is modified */
     /*
       now destination is determined, engage
     */
@@ -3642,11 +3685,13 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 	fcntl(p1->sd, F_SETFL, O_NONBLOCK);
 #endif
     }
-    addrport2str(dst, dstlen, (p1->proto & proto_pair_d), addrport, STRMAX, 0);
-    addrport[STRMAX] = '\0';
-    if (Debug > 2)
+    addrport[0] = '\0';
+    if (Debug > 2) {
+	addrport2strOnce(dst, dstlen, (p1->proto & proto_pair_d),
+			 addrport, STRMAX, 0);
 	message(LOG_DEBUG, "%d TCP %d: connecting to TCP %d %s",
 		p1->stone->sd, p2->sd, p1->sd, addrport);
+    }
     ret = connect(p1->sd, dst, dstlen);
     if (ret < 0) {
 #ifdef WINDOWS
@@ -3663,6 +3708,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		message(LOG_DEBUG, "%d TCP %d: connect interrupted",
 			p1->stone->sd, p1->sd);
 	    if (clock - p1->clock < CONN_TIMEOUT) return 0;
+	    addrport2strOnce(dst, dstlen, (p1->proto & proto_pair_d),
+			     addrport, STRMAX, 0);
 	    message(priority(p2), "%d TCP %d: connect timeout to %s",
 		    p2->stone->sd, p2->sd, addrport);
 	} else if (errno == EISCONN || errno == EADDRINUSE
@@ -3676,6 +3723,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		message_pair(LOG_DEBUG, p1);
 	    }
 	} else {
+	    addrport2strOnce(dst, dstlen, (p1->proto & proto_pair_d),
+			     addrport, STRMAX, 0);
 	    message(priority(p1),
 		    "%d TCP %d: can't connect err=%d: to %s",
 		    p1->stone->sd, p1->sd, errno, addrport);
@@ -4089,14 +4138,14 @@ int acceptCheck(Pair *pair1) {
     Pair *pair2 = NULL;
     int satype;
     int saproto = 0;
-    int len;
 #ifdef ENLARGE
     int prevXferBufMax = XferBufMax;
 #endif
     XHosts *xhost;
     char ident[STRMAX+1];
     char fromstr[STRMAX*2+1];
-    len = 0;
+    int fslen;
+    fslen = 0;
     ident[0] = '\0';
     bcopy(pair1->t->buf, &fromlen, sizeof(fromlen));	/* restore */
     if (0 < fromlen && fromlen <= sizeof(ss)) {
@@ -4120,19 +4169,20 @@ int acceptCheck(Pair *pair1) {
 	    ExBuf *t = newExData(pair1, data_identuser);
 	    strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
 	    fromstr[STRMAX] = '\0';
-	    len = strlen(fromstr);
+	    fslen = strlen(fromstr);
 	    if (t) {
 		strcpy(t->buf + sizeof(int), fromstr);
-		t->len = sizeof(int) + len;
+		t->len = sizeof(int) + fslen;
 	    }
-	    fromstr[len++] = '@';  /* omit size check, because len <= STRMAX */
+	    /* omit size check, because fslen <= STRMAX */
+	    fromstr[fslen++] = '@';
 	}
     }
-    addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
-		 fromstr+len, STRMAX*2-len, 0);
-    fromstr[STRMAX*2] = '\0';
+    fromstr[fslen] = '\0';
     xhost = checkXhost(stonep->xhosts, from, fromlen);
     if (!xhost) {
+	addrport2strOnce(from, fromlen, (stonep->proto & proto_stone_s),
+			 fromstr+fslen, STRMAX*2-fslen, 0);
 	message(LOG_WARNING, "stone %d: access denied: from %s",
 		stonep->sd, fromstr);
 	shutdown(pair1->sd, 2);
@@ -4156,13 +4206,18 @@ int acceptCheck(Pair *pair1) {
 	str[STRMAX] = '\0';
 	strntime(tstr, STRMAX, &clock, -1);
 	tstr[STRMAX] = '\0';
+	addrport2strOnce(from, fromlen, (stonep->proto & proto_stone_s),
+			 fromstr+fslen, STRMAX*2-fslen, 0);
 	fprintf(AccFp, "%s%d[%d] %s[%s]%d\n",
 		tstr, stonep->port, stonep->sd, fromstr, str, port);
 		
     }
-    if ((xhost->mode & XHostsMode_Dump) > 0 || Debug > 1)
+    if ((xhost->mode & XHostsMode_Dump) > 0 || Debug > 1) {
+	addrport2strOnce(from, fromlen, (stonep->proto & proto_stone_s),
+			 fromstr+fslen, STRMAX*2-fslen, 0);
 	message(LOG_DEBUG, "stone %d: accepted TCP %d from %s mode=%d",
 		stonep->sd, pair1->sd, fromstr, xhost->mode);
+    }
     pair2 = newPair();
     if (!pair2) {
 	message(LOG_CRIT, "stone %d: out of memory, closing TCP %d",
@@ -7073,6 +7128,11 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 		opts->sid_ctx[len] = '\0';
 		message(LOG_ERR, "Too long sid_ctx, truncated to '%s'",
 			opts->sid_ctx);
+		ret = SSL_CTX_set_session_id_context(ss->ctx,
+						     opts->sid_ctx, len);
+		if (!ret) {
+		    message(LOG_ERR, "SSL_CTX_set_session_id_context error");
+		}
 	    }
 	}
 	SSL_CTX_set_session_cache_mode(ss->ctx,
