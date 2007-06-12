@@ -489,6 +489,8 @@ const int data_identuser =	0x0200;
 const int data_ucred =		0x0300;
 const int data_peeraddr = 	0x0400;
 
+#define DATA_HEAD_LEN	sizeof(int)
+
 typedef struct _ExBuf {	/* extensible buffer */
     struct _ExBuf *next;
     int start;		/* index of buf */
@@ -610,9 +612,9 @@ const int proto_ssl_s =		 0x1000000;	  /* SSL source */
 const int proto_ssl_d =		 0x2000000;	  /*     destination */
 						/* only for Pair */
 const int proto_dirty =		    0x1000;	  /* ev must be updated */
-/*const int proto_ =		    0x2000;	  */
-const int proto_noconnect =	    0x4000;	  /* no connection needed */
-const int proto_connect =	    0x8000;	  /* connection established */
+const int proto_noconnect =	    0x2000;	  /* no connection needed */
+const int proto_connect =	    0x4000;	  /* connection established */
+const int proto_dgram =		    0x8000;	  /* UDP */
 const int proto_first_r =	   0x10000;	  /* first read packet */
 const int proto_first_w =	   0x20000;	  /* first written packet */
 const int proto_select_r =	   0x40000;	  /* select to read */
@@ -2900,13 +2902,14 @@ int scanUDP(
     return 1;
 }
 
+#define UDP_HEAD_LEN	2	/* sizeof(short): UDP packet length */
+
 int recvPairUDP(Pair *pair) {
     Stone *stone = pair->stone;
     SOCKET sd = pair->sd;
     Pair *p;
     ExBuf *ex;
     ExBuf *t;
-    int bufmax, start;
     int len;
     int flags = 0;
     struct sockaddr_storage ss;
@@ -2922,29 +2925,37 @@ int recvPairUDP(Pair *pair) {
     if (ex->len > 0) {	/* not emply */
 	ex = getExBuf();
 	if (!ex) return -1;	/* out of memory */
-	p->b->next = ex;
-	p->b = ex;
-	p->nbuf++;
 	if (Debug > 4) message(LOG_DEBUG, "%d UDP %d: get ExBuf nbuf=%d",
 			       stone->sd, p->sd, p->nbuf);
     }
-    bufmax = ex->bufmax - ex->start - ex->len;
-    start = ex->start + ex->len;
+    ex->start = 0;
 #ifdef MSG_DONTWAIT
     if (!(stone->proto & proto_block_d)) flags = MSG_DONTWAIT;
 #endif
 #ifdef MSG_TRUNC
     flags |= MSG_TRUNC;
 #endif
-    len = recvfrom(sd, ex->buf + start + sizeof(short),
-		   bufmax - sizeof(short),
+    len = recvfrom(sd, ex->buf + UDP_HEAD_LEN,
+		   ex->bufmax - UDP_HEAD_LEN,
 		   flags, from, &fromlen);
+    if (len < 0) {
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	message(LOG_ERR, "%d UDP %d: recvfrom err=%d",
+		stone->sd, sd, errno);
+	if (ex != p->b) ungetExBuf(ex);
+	return -1;
+    }
+    time(&pair->clock);
+    p->clock = pair->clock;
+    pair->rx += len;
     if (Debug > 8)
 	message(LOG_DEBUG, "%d UDP %d: recvfrom len=%d",
 		stone->sd, sd, len);
     t = getExData(pair, data_peeraddr, 0);
     if (t) {
-	SockAddr *peer = (SockAddr*)(t->buf + sizeof(int));
+	SockAddr *peer = (SockAddr*)(t->buf + DATA_HEAD_LEN);
 	if (!saComp(&peer->addr, from))	goto unknown;
     } else {	/* from unknown */
 	char addrport[STRMAX+1];
@@ -2953,124 +2964,183 @@ int recvPairUDP(Pair *pair) {
 	addrport[STRMAX] = '\0';
 	message(LOG_ERR, "%d UDP %d: received from unknown %s",
 		stone->sd, sd, addrport);
+	if (ex != p->b) ungetExBuf(ex);
 	return -1;
     }
-    ex->buf[start] = ((unsigned)len >> 8);
-    ex->buf[start+1] = ((unsigned)len % 256);
-    ex->len += sizeof(short) + len;
+    if (ex != p->b) {
+	p->b->next = ex;
+	p->b = ex;
+	p->nbuf++;
+    }
+    ex->buf[0] = ((unsigned)len >> 8);
+    ex->buf[1] = ((unsigned)len % 256);
+    ex->len += UDP_HEAD_LEN + len;
     return ex->len;
+}
+
+static int sendPairUDPbuf(Stone *stone, Pair *pair, char *buf, int len) {
+    int flags = 0;
+    ExBuf *t;
+    SockAddr *peer;
+    int issrc = ((pair->proto & proto_command) == command_source);
+    SOCKET sd;
+    Pair *p = pair->pair;
+#ifdef MSG_DONTWAIT
+    if (!(stone->proto & proto_block_d)) flags = MSG_DONTWAIT;
+#endif
+    t = getExData(pair, data_peeraddr, 0);
+    if (t) {
+	peer = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+    } else if (!issrc) {
+	int lenmax;
+	int dstlen;
+	t = newExData(pair, data_peeraddr);
+	peer = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+	lenmax = t->bufmax - DATA_HEAD_LEN - SockAddrBaseSize;
+	peer->len = stone->dsts[0]->len;
+	bcopy(&stone->dsts[0]->addr, &peer->addr, peer->len);
+	dstlen = modPairDest(pair, &peer->addr, lenmax);
+	if (dstlen > 0) peer->len = dstlen;	/* dest is modified */
+    } else {
+	message(LOG_ERR, "%d UDP<TCP%d: can't happen: no peer",
+		stone->sd, (p ? p->sd : -1));
+	return -1;
+    }
+    if (issrc) sd = stone->sd;
+    else sd = pair->sd;
+    if (sendto(sd, buf, len, flags, &peer->addr, peer->len) != len) {
+	char addrport[STRMAX+1];
+	addrport2str(&peer->addr, peer->len, proto_udp, addrport, STRMAX, 0);
+	addrport[STRMAX] = '\0';
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	if (issrc) {
+	    message(LOG_ERR, "%d UDP<TCP%d: sendto failed err=%d: to %s",
+		    stone->sd, (p ? p->sd : -1), errno, addrport);
+	} else {
+	    message(LOG_ERR, "%d TCP%d>UDP%d: sendto failed err=%d: to %s",
+		    stone->sd, (p ? p->sd : -1), pair->sd, errno, addrport);
+	}
+	return -1;	/* error */
+    }
+    time(&pair->clock);
+    if (p) p->clock = pair->clock;
+    pair->tx += len;
+    if ((pair->xhost->mode & XHostsMode_Dump) > 0
+	|| ((pair->proto & proto_first_w) && Debug > 3))
+	message_buf(pair, len, "UDP");
+    return 0;	/* success */
 }
 
 int sendPairUDP(Pair *pair) {
     Stone *stone = pair->stone;
-    ExBuf *ex, *next;
-    char *buf;
-    char *heap = NULL;
-    int buflen = 0;
-    int len = 0;
-    int i, j;
-    int ret = 0;	/* assume read more */
-    for (ex=pair->t; ex; ex=ex->next) {
-	buflen += ex->len;
+    ExBuf *next = pair->t;
+    ExBuf *cur = NULL;
+    ExBuf *ex;
+    unsigned char *buf;
+    int pos, len;
+    int err = 0;
+    char prefix[STRMAX+1];
+    if ((pair->proto & proto_command) == command_source) {
+	Pair *p = pair->pair;
+	snprintf(prefix, STRMAX, "%d UDP<TCP%d:",
+		 stone->sd, (p ? p->sd : -1));
+    } else {
+	Pair *p = pair->pair;
+	snprintf(prefix, STRMAX, "%d TCP%d>UDP%d:",
+		 stone->sd, (p ? p->sd : -1), pair->sd);
     }
-    if (Debug > 8)
-	message(LOG_DEBUG, "%d UDP %d: sendPairUDP buflen=%d",
-		stone->sd, pair->sd, buflen);
-    if (buflen < sizeof(short)) return ret;	/* must read header */
-    i = j = 0;
-    for (ex=pair->t; ex && i < 2; ex=ex->next) {
-	j += ex->len;
-	if (i == 0 && j > 0) len = ((unsigned char)ex->buf[0] << 8);
-	if (j > 1) len |= (unsigned char)ex->buf[1-i];
-	i = j;
-    }
-    if (buflen < sizeof(short) + len) return ret;	/* must read body */
-    buflen = sizeof(short) + len;
-    if (Debug > 7)
-	message(LOG_DEBUG, "%d UDP %d: sending buflen=%d len=%d",
-		stone->sd, pair->sd, buflen, len);
-    ex =pair->t;
-    if (buflen <= ex->bufmax) {
-	buf = ex->buf;
-	if (buflen <= ex->bufmax - ex->start) {	/* no need to move */
-	    buf = &ex->buf[ex->start];
-	    len = ex->len;
-	    ex = ex->next;
-	} else {	/* buf is large enough, but must move */
-	    buf = ex->buf;
-	    len = 0;
-	}
-    } else {	/* buf is short, so allocate heap */
-	heap = malloc(buflen);
-	if (!heap) {
-	    ret = -1;	/* error */
-	    message(LOG_ERR, "%d TCP>UDP %d: Out of memory to send UDP",
-		    pair->stone->sd, pair->sd);
-	}
-	buf = heap;
-	len = 0;
-    }
-    if (buf) {	/* now, large buf is ready, copy the rest */
-	int flags = 0;
-	ExBuf *t;
-	SockAddr *dst;
-	for (; len < buflen; ex = ex->next) {
-	    if (ex->len > 0) bcopy(&ex->buf[ex->start], &buf[len], ex->len);
-	    len += ex->len;
-	}
-	if (ret >= 0) ret = buflen;
-#ifdef MSG_DONTWAIT
-	if (!(stone->proto & proto_block_d)) flags = MSG_DONTWAIT;
-#endif
-	t = getExData(pair, data_peeraddr, 0);
-	if (t) {
-	    dst = (SockAddr*)(t->buf + sizeof(int));
-	} else  {
-	    int lenmax;
-	    int dstlen;
-	    t = newExData(pair, data_peeraddr);
-	    dst = (SockAddr*)(t->buf + sizeof(int));
-	    lenmax = t->bufmax - sizeof(int) - SockAddrBaseSize;
-	    dst->len = stone->dsts[0]->len;
-	    bcopy(&stone->dsts[0]->addr, &dst->addr, dst->len);
-	    dstlen = modPairDest(pair, &dst->addr, lenmax);
-	    if (dstlen > 0) dst->len = dstlen;	/* dest is modified */
-	}
-	if (sendto(pair->sd, buf+sizeof(short), buflen-sizeof(short),
-		   flags, &dst->addr, dst->len) != buflen-sizeof(short)) {
-	    char addrport[STRMAX+1];
-	    addrport2str(&dst->addr, dst->len, proto_udp, addrport, STRMAX, 0);
-	    addrport[STRMAX] = '\0';
-#ifdef WINDOWS
-	    errno = WSAGetLastError();
-#endif
-	    message(LOG_ERR, "%d TCP>UDP %d: sendto failed err=%d: to %s",
-		    stone->sd, pair->sd, errno, addrport);
-	    ret = -1;	/* error */
-	}
-	if ((pair->xhost->mode & XHostsMode_Dump) > 0
-	    || ((pair->proto & proto_first_w) && Debug > 3))
-	    message_buf(pair, len, "UDP");
-    }
-    if (heap) free(heap);
-    for (ex=pair->t; buflen > 0; ex=next) {	/* drop sent data */
-	if (ex->len > buflen) {
-	    ex->len -= buflen;
-	    ex->start += buflen;
-	    break;
-	}
-	buflen -= ex->len;
+    while (next) {
+	ex = next;
 	next = ex->next;
-	if (!next) {
-	    ex->start = 0;
-	    ex->len = 0;
-	    break;
+	int add;
+	if (ex->len <= 0) {	/* dispose empty buf */
+	    if (ex != pair->b) ungetExBuf(ex);
+	    continue;
 	}
-	ungetExBuf(ex);
+	if (!cur) {
+	    cur = ex;
+	    buf = (unsigned char*)&cur->buf[cur->start];
+	    pos = cur->len;
+	    len = (buf[0] << 8);
+	    if (pos == 1) {
+		ExBuf *t;
+		for (t=cur->next; t; t=t->next) {
+		    if (t->len > 0) {
+			len += (unsigned)t->buf[t->start];
+			break;
+		    }
+		}
+		if (!t) break;	/* must read header */
+	    } else {	/* assume UDP_HEAD_LEN == 2 */
+		len += buf[1];
+	    }
+	    if (Debug > 8)
+		message(LOG_DEBUG, "%s sendPairUDP len=%d (curbuf=%d)",
+			prefix, len, cur->len);
+	    len += UDP_HEAD_LEN;
+	    if (len > cur->bufmax) {
+		message(LOG_ERR, "%s sendPairUDP packet too large len=%d",
+			prefix, len);
+		err = -1;
+	    } else if (len > cur->bufmax - cur->start) {
+		if (Debug > 6)
+		    message(LOG_DEBUG, "%s sendPairUDP len=%d "
+			    "is larger than (bufmax-start=%d)=%d, move",
+			    prefix, len,
+			    cur->start, cur->bufmax - cur->start);
+		bcopy(cur->buf+cur->start, cur->buf, cur->len);
+		buf = (unsigned char*)cur->buf;
+		cur->start = 0;
+	    }
+	    if (len < cur->len) {	/* cur contains next packet */
+		cur->start += len;
+		cur->len -= len;
+		goto complete;
+	    } else if (len == cur->len) {
+		cur->len = cur->bufmax;	/* mark not to be used */
+		cur->start = 0;
+		goto complete;
+	    } else {
+		cur->len = cur->bufmax;	/* mark not to be used */
+		cur->start = 0;
+	    }
+	    continue;
+	}
+	add = len - pos;
+	if (ex->len > add) {	/* ex contains next packet */
+	    ex->start += add;
+	    ex->len -= add;
+	} else {	/* use entire buf */
+	    add = ex->len;
+	    ex->len = ex->bufmax;	/* mark not to be used */
+	    ex->start = 0;
+	}
+	if (!err) bcopy(ex->buf+ex->start, buf+pos, add);
+	pos += add;
+	if (ex != pair->b) ungetExBuf(ex);
+	if (pos >= len) {	/* complete the packet */
+	complete:
+	    if (!err) err = sendPairUDPbuf(stone, pair,
+					   (char*)(buf+UDP_HEAD_LEN),
+					   len-UDP_HEAD_LEN);
+	    if (cur != pair->b) ungetExBuf(cur);
+	    cur = NULL;
+	}
     }
-    pair->t = ex;
-    if (!ex) pair->b = NULL;
-    return ret;
+    if (ex == pair->b) {
+	if (ex->len == ex->bufmax) ex->len = 0;
+	pair->t = ex;
+    } else {
+	if (0 < ex->len && ex->len < ex->bufmax) {
+	    pair->t = ex;
+	} else {
+	    pair->t = ex->next;
+	    ungetExBuf(ex);
+	}
+    }
+    return err;
 }
 
 /* relay TCP */
@@ -4190,8 +4260,8 @@ int acceptCheck(Pair *pair1) {
 	    fromstr[STRMAX] = '\0';
 	    fslen = strlen(fromstr);
 	    if (t) {
-		strcpy(t->buf + sizeof(int), fromstr);
-		t->len = sizeof(int) + fslen;
+		strcpy(t->buf + DATA_HEAD_LEN, fromstr);
+		t->len = DATA_HEAD_LEN + fslen;
 	    }
 	    /* omit size check, because fslen <= STRMAX */
 	    fromstr[fslen++] = '@';
@@ -4270,6 +4340,7 @@ int acceptCheck(Pair *pair1) {
       but we can prepare the pair for connecting to the destination
     */
     if (stonep->proto & proto_udp_d) {
+	pair2->proto |= proto_dgram;
 	satype = SOCK_DGRAM;
 	saproto = IPPROTO_UDP;
     } else {
@@ -4367,8 +4438,8 @@ int strnUser(char *buf, int limit, Pair *pair, int which) {
     char str[STRMAX+1];
     str[0] = '\0';
     if (which == 2 && (ex = getExData(pair, data_identuser, 0))) {
-	len = ex->len - sizeof(int);
-	strncpy(str, ex->buf + sizeof(int), len);
+	len = ex->len - DATA_HEAD_LEN;
+	strncpy(str, ex->buf + DATA_HEAD_LEN, len);
 	str[len] = '\0';
     } else
 #if defined(AF_LOCAL) && defined(SO_PEERCRED)
@@ -4376,12 +4447,12 @@ int strnUser(char *buf, int limit, Pair *pair, int which) {
 	struct ucred *cred = NULL;
 	ex = getExData(pair, data_ucred, 0);
 	if (ex) {
-	    cred = (struct ucred*)(ex->buf + sizeof(int));
+	    cred = (struct ucred*)(ex->buf + DATA_HEAD_LEN);
 	} else {
 	    socklen_t optlen = sizeof(*cred);
 	    ex = newExData(pair, data_ucred);
 	    if (ex) {
-		cred = (struct ucred*)(ex->buf + sizeof(int));
+		cred = (struct ucred*)(ex->buf + DATA_HEAD_LEN);
 		if (getsockopt(pair->sd, SOL_SOCKET, SO_PEERCRED,
 			       cred, &optlen) < 0) {
 		    message(LOG_ERR, "%d TCP %d: Can't get PEERCRED err=%d",
@@ -5446,7 +5517,7 @@ int popUSER(Pair *pair, char *parm, int start) {
 		pair->stone->sd, pair->sd);
 	return -1;
     }
-    data = ex->buf + sizeof(int);
+    data = ex->buf + DATA_HEAD_LEN;
     if (Debug) message(LOG_DEBUG, ": USER %s", parm);
     ulen = strlen(parm);
     tlen = strlen(data);
@@ -5480,8 +5551,8 @@ int popPASS(Pair *pair, char *parm, int start) {
 	return -2;	/* read more */
     }
     t = getExData(pair, data_apop, 1);
-    data = t->buf + sizeof(int);
-    max = t->bufmax - sizeof(int);
+    data = t->buf + DATA_HEAD_LEN;
+    max = t->bufmax - DATA_HEAD_LEN;
     ulen = strlen(data);
     str = data + ulen + 1;
     tlen = strlen(str);
@@ -6001,7 +6072,7 @@ int first_read(Pair *pair) {
 	    if (ex->buf[i] == '<') {	/* time stamp of APOP banner */
 		ExBuf *t = newExData(pair, data_apop);
 		if (!t) break;
-		q = t->buf + sizeof(int);
+		q = t->buf + DATA_HEAD_LEN;
 		for (; i < ex->start + ex->len; i++) {
 		    *q++ = ex->buf[i];
 		    if (ex->buf[i] == '>') break;
@@ -6009,7 +6080,7 @@ int first_read(Pair *pair) {
 		*q = '\0';
 		if (Debug > 6)
 		    message(LOG_DEBUG, "%d TCP %d: APOP challenge: %s",
-			    stone->sd, sd, t->buf + sizeof(int));
+			    stone->sd, sd, t->buf + DATA_HEAD_LEN);
 		break;
 	    }
 	}
@@ -6313,8 +6384,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 #endif
 	rPair->proto &= ~proto_select_r;
 	rPair->proto |= proto_dirty;
-	if (stone->proto & proto_udp_d	/* TCP <= UDP */
-	    && (rPair->proto & proto_command) != command_source) {
+	if (rPair->proto & proto_dgram) {	/* TCP <= UDP */
 	    len = recvPairUDP(rPair);
 	} else {
 	    rPair->count += REF_UNIT;
@@ -6372,11 +6442,18 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		    setclose(wPair, flag);
 		}
 	    }
-	} else if (stone->proto & proto_udp_d	/* TCP => UDP */
-		   && (rPair->proto & proto_command) == command_source) {
+	} else if (wPair->proto & proto_dgram) {
 	    rPair->proto |= (proto_select_r | proto_dirty);
 	    if (len > 0) {
-		sendPairUDP(wPair);
+		if (sendPairUDP(wPair) < 0) {
+		    int flag = 0;
+		    if (!(rPair->proto & proto_shutdown))
+			if (doshutdown(rPair, 2) >= 0)
+			    flag = proto_shutdown;
+		    rPair->proto &= ~proto_select_w;
+		    rPair->proto |= proto_dirty;
+		    setclose(rPair, (proto_eof | flag));
+		}
 	    } else {	/* EINTR */
 		ret = RW_EINTR;
 	    }
@@ -6616,7 +6693,7 @@ int doPair(Pair *pair) {
 }
 #endif
 
-void doAcceptConnect(Pair *p1) {
+int doAcceptConnect(Pair *p1) {
     Stone *stone = p1->stone;
     Pair *p2;
     int ret;
@@ -6624,7 +6701,7 @@ void doAcceptConnect(Pair *p1) {
 			   stone->sd, p1->sd);
     if (!acceptCheck(p1)) {
 	freePair(p1);
-	return;
+	return 0;	/* pair is disposed */
     }
     p2 = p1->pair;
     if (p2->proto & proto_ohttp_d) {
@@ -6639,13 +6716,13 @@ void doAcceptConnect(Pair *p1) {
 	ex->len = i;
     }
     ret = -1;
-    if (p1->proto & proto_connect) {
+    if ((p1->proto & proto_connect) || (p1->proto & proto_dgram)) {
 	ret = reqconn(p2, &stone->dsts[0]->addr,	/* 0 is default */
 		      stone->dsts[0]->len);
 	if (ret < 0) {
 	    freePair(p2);
 	    freePair(p1);
-	    return;
+	    return 0;	/* pair is disposed */
 	}
     }
 #ifdef USE_EPOLL
@@ -6687,9 +6764,11 @@ void doAcceptConnect(Pair *p1) {
 	p1->proto |= proto_dirty;
 	p2->proto |= proto_dirty;
 	insertPairs(p1);
+	return 1;	/* pair is inserted */
     } else {
 	freePair(p2);
 	freePair(p1);
+	return 0;	/* pair is disposed */
     }
 }
 
@@ -6697,6 +6776,112 @@ void asyncAcceptConnect(Pair *pair) {
     ASYNC_BEGIN;
     doAcceptConnect(pair);
     ASYNC_END;
+}
+
+Pair *getPairUDP(struct sockaddr *from, socklen_t fromlen, Stone *stone) {
+    Pair *pair;
+    ExBuf *t;
+    SockAddr *peer;
+    for (pair=stone->pairs->next; pair && pair->clock != -1; pair=pair->next) {
+	Pair *p = pair->pair;
+	if ((pair->proto & proto_dgram) && p && (p->proto & proto_connect)) {
+	    ExBuf *t = getExData(pair, data_peeraddr, 0);
+	    SockAddr *dst;
+	    dst = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+	    if (saComp(&dst->addr, from)) {
+		time(&pair->clock);
+		return pair;
+	    }
+	}
+    }
+    /* can't find pair, so create */
+    pair = newPair();
+    if (!pair) return NULL;
+    /* save `from' to ExBuf to check in doAcceptConnect */
+    bcopy(&fromlen, pair->t->buf, DATA_HEAD_LEN);
+    bcopy(from, pair->t->buf + DATA_HEAD_LEN, fromlen);
+    pair->stone = stone;
+    pair->proto = (proto_dgram | command_source);
+    pair->timeout = stone->timeout;
+    t = newExData(pair, data_peeraddr);
+    peer = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+    peer->len = fromlen;
+    bcopy(from, &peer->addr, fromlen);
+    if (doAcceptConnect(pair)) return pair;
+    return NULL;	/* pair is disposed */
+}
+
+void recvStoneUDP(Stone *stone) {
+    if (stone->proto & proto_udp_d) {	/* UDP => UDP */
+	PktBuf *pb = recvUDP(stone);
+	if (pb) {
+	    sendUDP(pb);
+	    ungetPktBuf(pb);
+	}
+    } else {	/* UDP => TCP */
+	struct sockaddr_storage ss;
+	struct sockaddr *from = (struct sockaddr*)&ss;
+	socklen_t fromlen = sizeof(ss);
+	int flags = 0;
+	int len;
+	Pair *rPair;
+	Pair *wPair;
+	ExBuf *ex;
+	char addrport[STRMAX+1];
+	ex = getExBuf();
+	if (!ex) {
+	    message(LOG_CRIT, "%d UDP: out of memory", stone->sd);
+	    return;
+	}
+	ex->start = 0;
+#ifdef MSG_DONTWAIT
+	if (!(stone->proto & proto_block_s)) flags = MSG_DONTWAIT;
+#endif
+#ifdef MSG_TRUNC
+	flags |= MSG_TRUNC;
+#endif
+	len = recvfrom(stone->sd, ex->buf + UDP_HEAD_LEN,
+		       ex->bufmax - UDP_HEAD_LEN,
+		       flags, from, &fromlen);
+	addrport[0] = '\0';
+	if (len < 0) {
+#ifdef WINDOWS
+	    errno = WSAGetLastError();
+#endif
+	    addrport2strOnce(from, fromlen, proto_udp, addrport, STRMAX, 0);
+	    message(LOG_ERR, "%d UDP: recvfrom err=%d %s",
+		    stone->sd, errno, addrport);
+	    ungetExBuf(ex);
+	    return;
+	}
+	ex->buf[0] = ((unsigned)len >> 8);
+	ex->buf[1] = ((unsigned)len % 256);
+	ex->len += UDP_HEAD_LEN + len;
+	if (Debug > 8) {
+	    addrport2strOnce(from, fromlen, proto_udp, addrport, STRMAX, 0);
+	    message(LOG_DEBUG, "%d UDP: recvfrom len=%d %s",
+		    stone->sd, len, addrport);
+	}
+	rPair = getPairUDP(from, fromlen, stone);
+	if (!rPair) {
+	    message(LOG_ERR, "%d UDP: fail to get pair", stone->sd);
+	    ungetExBuf(ex);
+	    return;
+	}
+	rPair->rx += len;
+	wPair = rPair->pair;
+	if (wPair) {
+	    wPair->clock = rPair->clock;
+	    wPair->b->next = ex;
+	    wPair->b = ex;
+	    if (wPair->t->len <= 0) {
+		ExBuf *t = wPair->t;
+		wPair->t = wPair->t->next;	/* drop top */
+		ungetExBuf(t);
+	    }
+	    wPair->proto |= (proto_select_w | proto_dirty);
+	}
+    }
 }
 
 #ifdef USE_EPOLL
@@ -6722,11 +6907,7 @@ void dispatch(int epfd, struct epoll_event *evs, int nevs) {
 		message(LOG_DEBUG, "stone %d: epoll %d events=%x type=%d",
 			p->stone.sd, epfd, ev.events, common);
 	    if (p->stone.proto & proto_udp_s) {
-		PktBuf *pb = recvUDP(&p->stone);
-		if (pb) {
-		    sendUDP(pb);
-		    ungetPktBuf(pb);
-		}
+		recvStoneUDP(&p->stone);
 	    } else {
 		Pair *pair = acceptPair(&p->stone);
 		if (pair) {
@@ -6796,7 +6977,8 @@ int scanPairs(
 	    pairs = pair;
 	    continue;
 	}
-	if (!(pair->proto & proto_thread) && ValidSocket(sd)) {
+	if (!(pair->proto & (proto_thread | proto_dgram))
+	    && ValidSocket(sd)) {
 	    time_t clock;
 	    int idle = 1;	/* assume no events happen on sd */
 #ifndef USE_EPOLL
@@ -6835,21 +7017,16 @@ int scanStones(fd_set *rop, fd_set *wop, fd_set *eop) {
 	} else {
 	    if (FD_ISSET(stone->sd, rop) && FD_ISSET(stone->sd, &rin)) {
 		if (stone->proto & proto_udp_s) {
-		    PktBuf *pb = recvUDP(stone);
-		    if (pb) {
-			sendUDP(pb);
-			ungetPktBuf(pb);
-		    }
+		    recvStoneUDP(stone);
 		} else {
 		    Pair *pair = acceptPair(stone);
 		    if (pair) ASYNC(asyncAcceptConnect, pair);
 		}
 	    }
 	}
-	if (stone->proto & proto_udp_s) {
+	if ((stone->proto & proto_udp_s) && (stone->proto & proto_udp_d)) {
 	    scanUDP(rop, eop, (Origin *)stone->p);
-	}
-	if (!(stone->proto & proto_udp_s) || !(stone->proto & proto_udp_d)) {
+	} else {
 	    scanPairs(rop, wop, eop, stone->pairs);
 	}
     }
@@ -9328,12 +9505,8 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (dproto & proto_base) proto |= proto_base_d;
 	    if (dproto & proto_nobackup) proto |= proto_nobackup;
 	}
-	if ((proto & proto_udp_s) && !(proto & proto_udp_d)) {
-	    message(LOG_ERR, "UDP TCP transform is not implemented yet");
-	    exit(1);
-	}
 	stone = mkstone(host, serv, shost, sserv, j, &argv[k], proto);
-	if (proto & proto_udp_s) {
+	if ((proto & proto_udp_s) && (proto & proto_udp_d)) { /* UDP => UDP */
 	    Origin *origin = (Origin*)malloc(sizeof(Origin));
 	    if (origin == NULL) {
 	    memerr:
