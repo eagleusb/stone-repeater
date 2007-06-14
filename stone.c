@@ -6983,7 +6983,14 @@ int scanPairs(
 	    int idle = 1;	/* assume no events happen on sd */
 #ifndef USE_EPOLL
 	    if (FD_ISSET(sd, rop) || FD_ISSET(sd, wop) || FD_ISSET(sd, eop)) {
-		if (doPair(pair)) idle = 0;
+		Pair *p = pair->pair;
+		if (p && (p->proto & proto_dgram)) {
+		    doReadWritePair(pair, p,
+				    FD_ISSET(sd, rop),
+				    FD_ISSET(sd, wop),
+				    FD_ISSET(sd, eop), 0, 0);
+		    idle = 0;
+		} else if (doPair(pair)) idle = 0;
 	    }
 #endif
 	    if (idle && pair->timeout > 0
@@ -7987,14 +7994,21 @@ Stone *mkstone(
 	struct sockaddr_storage dss;
 	struct sockaddr *dsa = (struct sockaddr*)&dss;
 	socklen_t dsalen = sizeof(dss);
-	int dsatype = satype;
-	int dsaproto = 0;
+	int dsatype;
+	int dsaproto;
 	LBSet *lbset;
 #ifdef AF_INET6
 	if (proto & proto_v6_d) dsa->sa_family = AF_INET6;
 	else
 #endif
 	    dsa->sa_family = AF_INET;
+	if (proto & proto_udp_d) {
+	    dsatype = SOCK_DGRAM;
+	    dsaproto = IPPROTO_UDP;
+	} else {
+	    dsatype = SOCK_STREAM;
+	    dsaproto = IPPROTO_TCP;
+	}
 	if (!host2sa(dhost, dserv, dsa, &dsalen, &dsatype, &dsaproto, 0)) {
 	    exit(1);
 	}
