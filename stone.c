@@ -314,6 +314,10 @@ int CryptoAPI_verify_certificate(X509 *x509);
 #define NMATCH_MAX	9	/* \1 ... \9 */
 #define DEPTH_MAX	10
 
+#ifndef TLSEXT_NAMETYPE_host_name
+#define OPENSSL_NO_TLSEXT
+#endif
+
 typedef struct {
     int verbose;
     int shutdown_mode;
@@ -321,6 +325,7 @@ typedef struct {
     long serial;
     SSL_CTX *ctx;
     regex_t *re[DEPTH_MAX];
+    char *name;
     unsigned char lbmod;
     unsigned char lbparm;
     unsigned char sslparm;
@@ -328,6 +333,7 @@ typedef struct {
 
 const int sslparm_ignore  = 0x01;
 const int sslparm_storeca = 0x02;
+const int sslparm_sni     = 0x04;
 
 typedef struct {
     int verbose;
@@ -337,15 +343,17 @@ typedef struct {
     int vflags;
     long off;
     long serial;
-    SSL_METHOD *meth;
+    const SSL_METHOD *meth;
     int (*callback)(int, X509_STORE_CTX *);
     unsigned char *sid_ctx;
+    int useSNI;
     char *keyFile;
     char *certFile;
     char *caFile;
     char *caPath;
     char *pfxFile;
     char *passwd;
+    char *servername;
     int certIgnore;
 #ifdef CRYPTOAPI
     int certStoreCA;
@@ -468,10 +476,11 @@ typedef struct _Stone {
     char *p;
     int timeout;
     struct _Stone *next;
+    struct _Stone *children;
+    struct _Stone *parent;
 #ifdef USE_SSL
     StoneSSL *ssl_server;
     StoneSSL *ssl_client;
-    char *ssl_host;	/* hostname of the ssl server (client side only) */
 #endif
     int nhosts;			/* # of hosts */
     XHosts *xhosts;		/* hosts permitted to connect */
@@ -1585,7 +1594,7 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
     return 0;
 }
 
-/* *addrp is permitted to connect to *stonep ? */
+/* *addrp is permitted to connect to *stone ? */
 XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
     int match = 1;
     if (!xhosts) return XHostsTrue; /* any hosts can access */
@@ -2290,25 +2299,25 @@ int lbsopts(int argc, int i, char *argv[]) {
     return i;
 }
 
-char *stone2str(Stone *stonep, char *str, int strlen) {
+char *stone2str(Stone *stone, char *str, int strlen) {
     int proto;
     char src[STRMAX+1];
-    addrport2str(&stonep->listen->addr, stonep->listen->len,
-		 (stonep->proto & proto_stone_s), src, STRMAX, 0);
+    addrport2str(&stone->listen->addr, stone->listen->len,
+		 (stone->proto & proto_stone_s), src, STRMAX, 0);
     src[STRMAX] = '\0';
-    proto = stonep->proto;
+    proto = stone->proto;
     if ((proto & proto_command) == command_proxy) {
-	snprintf(str, strlen, "stone %d: proxy <- %s", stonep->sd, src);
+	snprintf(str, strlen, "stone %d: proxy <- %s", stone->sd, src);
     } else if ((proto & proto_command) == command_health) {
-	snprintf(str, strlen, "stone %d: health <- %s", stonep->sd, src);
+	snprintf(str, strlen, "stone %d: health <- %s", stone->sd, src);
     } else if ((proto & proto_command) == command_identd) {
-	snprintf(str, strlen, "stone %d: identd <- %s", stonep->sd, src);
+	snprintf(str, strlen, "stone %d: identd <- %s", stone->sd, src);
     } else {
 	char dst[STRMAX+1];
-	addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-		     (stonep->proto & proto_stone_d), dst, STRMAX, 0);
+	addrport2str(&stone->dsts[0]->addr, stone->dsts[0]->len,
+		     (stone->proto & proto_stone_d), dst, STRMAX, 0);
 	dst[STRMAX] = '\0';
-	snprintf(str, strlen, "stone %d: %s <- %s", stonep->sd, dst, src);
+	snprintf(str, strlen, "stone %d: %s <- %s", stone->sd, dst, src);
     }
     str[strlen] = '\0';
     return str;
@@ -3328,6 +3337,14 @@ int doSSL_connect(Pair *pair) {
 	SSL_set_fd(ssl, sd);
 	pair->ssl = ssl;
     }
+#ifndef OPENSSL_NO_TLSEXT
+    if (pair->stone->ssl_client->sslparm & sslparm_sni) {
+	if (!SSL_set_tlsext_host_name(ssl, pair->stone->ssl_client->name)) {
+	    message(LOG_ERR, "%d TCP %d: Can't set TLS servername: %s",
+		    pair->stone->sd, sd, pair->stone->ssl_client->name);
+	}
+    }
+#endif
     pair->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
     pair->proto |= proto_dirty;
     ret = SSL_connect(ssl);
@@ -3975,24 +3992,24 @@ int scanConns(void) {
     return 1;
 }
 
-Pair *acceptPair(Stone *stonep) {
+Pair *acceptPair(Stone *stone) {
     struct sockaddr_storage ss;
     struct sockaddr *from = (struct sockaddr*)&ss;
     socklen_t fromlen = sizeof(ss);
     Pair *pair;
-    SOCKET nsd = accept(stonep->sd, from, &fromlen);
+    SOCKET nsd = accept(stone->sd, from, &fromlen);
     if (InvalidSocket(nsd)) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
 	if (errno == EINTR) {
 	    if (Debug > 4)
-		message(LOG_DEBUG, "stone %d: accept interrupted", stonep->sd);
+		message(LOG_DEBUG, "stone %d: accept interrupted", stone->sd);
 	    return NULL;
 	} else if (errno == EAGAIN) {
 	    if (Debug > 4)
 		message(LOG_DEBUG, "stone %d: accept no connection",
-			stonep->sd);
+			stone->sd);
 	    return NULL;
 	}
 #ifndef NO_FORK
@@ -4000,13 +4017,13 @@ Pair *acceptPair(Stone *stonep) {
 	    return NULL;
 	}
 #endif
-	message(LOG_ERR, "stone %d: accept error err=%d", stonep->sd, errno);
+	message(LOG_ERR, "stone %d: accept error err=%d", stone->sd, errno);
 	return NULL;
     }
     pair = newPair();
     if (!pair) {
 	message(LOG_CRIT, "stone %d: out of memory, closing TCP %d",
-		stonep->sd, nsd);
+		stone->sd, nsd);
 	closesocket(nsd);
 	freePair(pair);
 	return NULL;
@@ -4014,10 +4031,10 @@ Pair *acceptPair(Stone *stonep) {
     bcopy(&fromlen, pair->t->buf, sizeof(fromlen));	/* save to ExBuf */
     bcopy(from, pair->t->buf + sizeof(fromlen), fromlen);
     pair->sd = nsd;
-    pair->stone = stonep;
-    pair->proto = ((stonep->proto & proto_pair_s & ~proto_command) |
+    pair->stone = stone;
+    pair->proto = ((stone->proto & proto_pair_s & ~proto_command) |
 		   proto_first_r | proto_first_w | command_source);
-    pair->timeout = stonep->timeout;
+    pair->timeout = stone->timeout;
     return pair;
 }
 
@@ -4223,7 +4240,7 @@ int acceptCheck(Pair *pair1) {
     struct sockaddr_storage ss;
     struct sockaddr *from = (struct sockaddr*)&ss;
     socklen_t fromlen = sizeof(ss);
-    Stone *stonep = pair1->stone;
+    Stone *stone = pair1->stone;
     Pair *pair2 = NULL;
     int satype;
     int saproto = 0;
@@ -4241,20 +4258,20 @@ int acceptCheck(Pair *pair1) {
 	bcopy(pair1->t->buf + sizeof(fromlen), from, fromlen);
     } else {
 	message(LOG_ERR, "%d TCP %d: acceptCheck Can't happen fromlen=%d",
-		stonep->sd, pair1->sd, fromlen);
+		stone->sd, pair1->sd, fromlen);
 	if (getpeername(pair1->sd, from, &fromlen) < 0) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
 	    message(LOG_ERR,
 		    "%d TCP %d: acceptCheck Can't get peer's name err=%d",
-		    stonep->sd, pair1->sd, errno);
+		    stone->sd, pair1->sd, errno);
 	    return 0;
 	}
     }
-    if (stonep->proto & proto_ident) {
-	if (getident(ident, from, fromlen, stonep->port,
-		     &stonep->listen->addr, stonep->listen->len)) {
+    if (stone->proto & proto_ident) {
+	if (getident(ident, from, fromlen, stone->port,
+		     &stone->listen->addr, stone->listen->len)) {
 	    ExBuf *t = newExData(pair1, data_identuser);
 	    strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
 	    fromstr[STRMAX] = '\0';
@@ -4268,12 +4285,12 @@ int acceptCheck(Pair *pair1) {
 	}
     }
     fromstr[fslen] = '\0';
-    xhost = checkXhost(stonep->xhosts, from, fromlen);
+    xhost = checkXhost(stone->xhosts, from, fromlen);
     if (!xhost) {
-	addrport2strOnce(from, fromlen, (stonep->proto & proto_stone_s),
+	addrport2strOnce(from, fromlen, (stone->proto & proto_stone_s),
 			 fromstr+fslen, STRMAX*2-fslen, 0);
 	message(LOG_WARNING, "stone %d: access denied: from %s",
-		stonep->sd, fromstr);
+		stone->sd, fromstr);
 	shutdown(pair1->sd, 2);
 	return 0;
     }
@@ -4295,32 +4312,32 @@ int acceptCheck(Pair *pair1) {
 	str[STRMAX] = '\0';
 	strntime(tstr, STRMAX, &clock, -1);
 	tstr[STRMAX] = '\0';
-	addrport2strOnce(from, fromlen, (stonep->proto & proto_stone_s),
+	addrport2strOnce(from, fromlen, (stone->proto & proto_stone_s),
 			 fromstr+fslen, STRMAX*2-fslen, 0);
 	fprintf(AccFp, "%s%d[%d] %s[%s]%d\n",
-		tstr, stonep->port, stonep->sd, fromstr, str, port);
+		tstr, stone->port, stone->sd, fromstr, str, port);
 		
     }
     if ((xhost->mode & XHostsMode_Dump) > 0 || Debug > 1) {
-	addrport2strOnce(from, fromlen, (stonep->proto & proto_stone_s),
+	addrport2strOnce(from, fromlen, (stone->proto & proto_stone_s),
 			 fromstr+fslen, STRMAX*2-fslen, 0);
 	message(LOG_DEBUG, "stone %d: accepted TCP %d from %s mode=%d",
-		stonep->sd, pair1->sd, fromstr, xhost->mode);
+		stone->sd, pair1->sd, fromstr, xhost->mode);
     }
     pair2 = newPair();
     if (!pair2) {
 	message(LOG_CRIT, "stone %d: out of memory, closing TCP %d",
-		stonep->sd, pair1->sd);
+		stone->sd, pair1->sd);
 	if (pair2) freePair(pair2);
 	return 0;
     }
-    pair2->stone = stonep;
+    pair2->stone = stone;
     pair1->xhost = pair2->xhost = xhost;
-    pair2->proto = ((stonep->proto & proto_pair_d) |
+    pair2->proto = ((stone->proto & proto_pair_d) |
 		    proto_first_r | proto_first_w);
-    pair2->timeout = stonep->timeout;
+    pair2->timeout = stone->timeout;
     /* now successfully accepted */
-    if (!(stonep->proto & proto_block_d)) {
+    if (!(stone->proto & proto_block_d)) {
 #ifdef WINDOWS
 	u_long param;
 	param = 1;
@@ -4330,7 +4347,7 @@ int acceptCheck(Pair *pair1) {
 #endif
     }
 #ifdef USE_SSL
-    if (stonep->proto & proto_ssl_s) {
+    if (stone->proto & proto_ssl_s) {
 	if (doSSL_accept(pair1) < 0) goto error;
     } else
 #endif	/* src & pair1 is connected */
@@ -4339,7 +4356,7 @@ int acceptCheck(Pair *pair1) {
       SSL connection may not be established yet,
       but we can prepare the pair for connecting to the destination
     */
-    if (stonep->proto & proto_udp_d) {
+    if (stone->proto & proto_udp_d) {
 	pair2->proto |= proto_dgram;
 	satype = SOCK_DGRAM;
 	saproto = IPPROTO_UDP;
@@ -4348,13 +4365,13 @@ int acceptCheck(Pair *pair1) {
 	saproto = IPPROTO_TCP;
     }
 #ifdef AF_LOCAL
-    if (stonep->proto & proto_unix_d) {
+    if (stone->proto & proto_unix_d) {
 	saproto = 0;
 	pair2->sd = socket(AF_LOCAL, satype, saproto);
     } else
 #endif
 #ifdef AF_INET6
-    if (stonep->proto & proto_v6_d)
+    if (stone->proto & proto_v6_d)
 	pair2->sd = socket(AF_INET6, satype, saproto);
     else
 #endif
@@ -4364,24 +4381,24 @@ int acceptCheck(Pair *pair1) {
 	errno = WSAGetLastError();
 #endif
 	message(priority(pair1), "%d TCP %d: can't create socket err=%d",
-		stonep->sd, pair1->sd, errno);
+		stone->sd, pair1->sd, errno);
 #ifdef USE_SSL
     error:
 #endif
 	freePair(pair2);
 	return 0;
     }
-    if (stonep->from) {
-	if (bind(pair2->sd, &stonep->from->addr, stonep->from->len) < 0) {
+    if (stone->from) {
+	if (bind(pair2->sd, &stone->from->addr, stone->from->len) < 0) {
 	    char str[STRMAX+1];
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
-	    addrport2str(&stonep->from->addr, stonep->from->len, 0,
+	    addrport2str(&stone->from->addr, stone->from->len, 0,
 			 str, STRMAX, 0);
 	    str[STRMAX] = '\0';
 	    message(LOG_ERR, "stone %d: can't bind %s err=%d",
-		    stonep->sd, str, errno);
+		    stone->sd, str, errno);
 	}
     }
     pair2->pair = pair1;
@@ -5840,9 +5857,13 @@ int healthCONFIG(Pair *pair, char *parm, int start) {
 int healthSTONE(Pair *pair, char *parm, int start) {
     Stone *stone;
     char str[STRMAX+1];
-    for (stone=stones; stone != NULL; stone=stone->next)
+    for (stone=stones; stone != NULL; stone=stone->next) {
+	Stone *child;
+	for (child=stone->children; child != NULL; child=child->children)
+	    commOutput(pair, "200-%s\n", stone2str(child, str, STRMAX));
 	commOutput(pair, "200%c%s\n", (stone->next ? '-' : ' '),
 		   stone2str(stone, str, STRMAX));
+    }
     return -2;	/* read more */
 }
 
@@ -7177,9 +7198,9 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 		    serial, ss->serial);
 	    return 0;	/* fail */
 	}
-	if (pair->stone->ssl_host
+	if (ss->name
 	    && !ss->re[depth]
-	    && !hostcheck(pair, err_cert, pair->stone->ssl_host)) return 0;
+	    && !hostcheck(pair, err_cert, ss->name)) return 0;
     }
     if (Debug > 3)
 	message(LOG_DEBUG,
@@ -7285,6 +7306,30 @@ static int passwd_callback(char *buf, int size, int rwflag, void *passwd) {
     return(strlen(buf));
 }
 
+#ifndef OPENSSL_NO_TLSEXT
+static int ssl_servername_callback(SSL *ssl, int *ad, void *arg) {
+    Pair *pair = SSL_get_ex_data(ssl, PairIndex);
+    StoneSSL *ss = pair->stone->ssl_server;
+    Stone *stone;
+    const char *name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+    if (!ss || !ss->name) return SSL_TLSEXT_ERR_NOACK;
+    if (strcmp(name, ss->name) == 0) return SSL_TLSEXT_ERR_OK;
+    for (stone=pair->stone->children; stone; stone=stone->children) {
+	StoneSSL *sn = stone->ssl_server;
+	if (!sn || !sn->name) return SSL_TLSEXT_ERR_NOACK;
+	if (strcmp(name, sn->name) == 0) {
+	    if (sn->verbose)
+		message(LOG_DEBUG, "%d TCP %d: Swiching server context: %s",
+			stone->sd, pair->sd, sn->name);
+	    SSL_set_SSL_CTX(ssl, sn->ctx);
+	    pair->stone = stone;
+	    return SSL_TLSEXT_ERR_OK;
+	}
+    }
+    return SSL_TLSEXT_ERR_ALERT_FATAL;
+}
+#endif
+
 StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     StoneSSL *ss;
     int err;
@@ -7297,6 +7342,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     }
     ss->verbose = opts->verbose;
     ss->shutdown_mode = opts->shutdown_mode;
+    ss->name = opts->servername;
     ss->ctx = SSL_CTX_new(opts->meth);
     if (!ss->ctx) {
 	message(LOG_ERR, "SSL_CTX_new error");
@@ -7320,27 +7366,6 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	if (opts->vflags)
 	    X509_STORE_set_flags(SSL_CTX_get_cert_store(ss->ctx),
 				 opts->vflags);
-    }
-    if (isserver) {
-	if (opts->sid_ctx) {
-	    int ret;
-	    int len = strlen((char*)opts->sid_ctx);
-	    ret = SSL_CTX_set_session_id_context(ss->ctx, opts->sid_ctx, len);
-	    if (!ret) {
-		len = SSL_MAX_SSL_SESSION_ID_LENGTH;
-		opts->sid_ctx[len] = '\0';
-		message(LOG_ERR, "Too long sid_ctx, truncated to '%s'",
-			opts->sid_ctx);
-		ret = SSL_CTX_set_session_id_context(ss->ctx,
-						     opts->sid_ctx, len);
-		if (!ret) {
-		    message(LOG_ERR, "SSL_CTX_set_session_id_context error");
-		}
-	    }
-	}
-	SSL_CTX_set_session_cache_mode(ss->ctx,
-				       (SSL_SESS_CACHE_SERVER
-					   | SSL_SESS_CACHE_NO_AUTO_CLEAR));
     }
     if (opts->pfxFile) {
 	FILE *fp = fopen(opts->pfxFile, "r");
@@ -7407,6 +7432,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	}
     }
     ss->sslparm = 0;
+    if (opts->useSNI) ss->sslparm |= sslparm_sni;
     if (opts->certIgnore) ss->sslparm |= sslparm_ignore;
 #ifdef CRYPTOAPI
     if (opts->certStoreCA) ss->sslparm |= sslparm_storeca;
@@ -7440,6 +7466,32 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	} else {
 	    ss->re[i] = NULL;
 	}
+    }
+    if (isserver) {
+#ifndef OPENSSL_NO_TLSEXT
+	if (ss->sslparm & sslparm_sni) {
+	    SSL_CTX_set_tlsext_servername_callback
+		(ss->ctx, ssl_servername_callback);
+	}
+#endif
+	if (opts->sid_ctx) {
+	    int ret;
+	    int len = strlen((char*)opts->sid_ctx);
+	    ret = SSL_CTX_set_session_id_context(ss->ctx, opts->sid_ctx, len);
+	    if (!ret) {
+		len = SSL_MAX_SSL_SESSION_ID_LENGTH;
+		opts->sid_ctx[len] = '\0';
+		message(LOG_ERR, "Too long sid_ctx, truncated to '%s'",
+			opts->sid_ctx);
+		ret = SSL_CTX_set_session_id_context(ss->ctx,
+						     opts->sid_ctx, len);
+		if (!ret) {
+		    message(LOG_ERR, "SSL_CTX_set_session_id_context error");
+		}
+	    }
+	}
+	SSL_CTX_set_session_cache_mode
+	    (ss->ctx, (SSL_SESS_CACHE_SERVER | SSL_SESS_CACHE_NO_AUTO_CLEAR));
     }
     return ss;
  error:
@@ -7903,6 +7955,16 @@ int mkPortXhosts(int argc, int i, char *argv[]) {
     exit(1);
 }
 
+Stone *getStone(struct sockaddr *sa, socklen_t salen) {
+    Stone *stone;
+    for (stone=stones; stone != NULL; stone=stone->next) {
+	if (saComp(&stone->listen->addr, sa)) {
+	    return stone;
+	}
+    }
+    return NULL;
+}
+
 /* make stone */
 Stone *mkstone(
     char *dhost,	/* destination hostname */
@@ -7912,7 +7974,8 @@ Stone *mkstone(
     int nhosts,		/* # of hosts to permit */
     char *hosts[],	/* hosts to permit */
     int proto) {	/* UDP/TCP/SSL */
-    Stone *stonep;
+    Stone *stone;
+    Stone *st;
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
     socklen_t salen = sizeof(ss);
@@ -7921,14 +7984,17 @@ Stone *mkstone(
     sa_family_t family;
     char *mesg;
     char str[STRMAX+1];
-    stonep = calloc(1, sizeof(Stone));
-    if (!stonep) {
+    stone = calloc(1, sizeof(Stone));
+    if (!stone) {
 	message(LOG_CRIT, "Out of memory");
 	exit(1);
     }
-    stonep->common = type_stone;
-    stonep->p = NULL;
-    stonep->timeout = PairTimeOut;
+    stone->next = NULL;
+    stone->children = NULL;
+    stone->parent = NULL;
+    stone->common = type_stone;
+    stone->p = NULL;
+    stone->timeout = PairTimeOut;
     if (proto & proto_udp_s) {
 	satype = SOCK_DGRAM;
 	saproto = IPPROTO_UDP;
@@ -7952,7 +8018,7 @@ Stone *mkstone(
 	sa->sa_family = AF_INET6;
 	if (!host2sa(host, serv, sa, &salen, &satype, &saproto, AI_PASSIVE))
 	    exit(1);
-	stonep->port = ntohs(sin6p->sin6_port);
+	stone->port = ntohs(sin6p->sin6_port);
     } else
 #endif
     {
@@ -7960,35 +8026,35 @@ Stone *mkstone(
 	sa->sa_family = AF_INET;
 	if (!host2sa(host, serv, sa, &salen, &satype, &saproto, AI_PASSIVE))
 	    exit(1);
-	stonep->port = ntohs(sinp->sin_port);
+	stone->port = ntohs(sinp->sin_port);
     }
     if ((proto & proto_command) == command_proxy
 	|| (proto & proto_command) == command_health
 	|| (proto & proto_command) == command_identd) {
-	stonep->ndsts = 1;
+	stone->ndsts = 1;
 	if ((proto & proto_command) == command_proxy) {
-	    stonep->dsts = malloc(sizeof(SockAddr*) + sizeof(PortXHosts*));
-	    if (stonep->dsts) ((PortXHosts**)stonep->dsts)[1] = portXHosts;
+	    stone->dsts = malloc(sizeof(SockAddr*) + sizeof(PortXHosts*));
+	    if (stone->dsts) ((PortXHosts**)stone->dsts)[1] = portXHosts;
 	    /* only proxy stone needs portXHosts,
 	       so we divert dsts into holding current portXHosts */
 	} else {
-	    stonep->dsts = malloc(sizeof(SockAddr*));	/* dummy */
+	    stone->dsts = malloc(sizeof(SockAddr*));	/* dummy */
 	}
-	if (!stonep->dsts) goto memerr;
-	stonep->dsts[0] = saDup(sa, salen);	/* dummy */
+	if (!stone->dsts) goto memerr;
+	stone->dsts[0] = saDup(sa, salen);	/* dummy */
 #ifdef AF_LOCAL
     } else if (proto & proto_unix_d) {
 	struct sockaddr_storage dss;
 	struct sockaddr_un *sun = (struct sockaddr_un*)&dss;
-	stonep->ndsts = 1;
-	stonep->dsts = malloc(sizeof(SockAddr*));
-	if (!stonep->dsts) goto memerr;
+	stone->ndsts = 1;
+	stone->dsts = malloc(sizeof(SockAddr*));
+	if (!stone->dsts) goto memerr;
 	bzero(sun, sizeof(dss));
 	sun->sun_family = AF_LOCAL;
 	snprintf(sun->sun_path, sizeof(sun->sun_path)-1, "%s", dhost);
-	stonep->dsts[0] = saDup((struct sockaddr*)sun,
+	stone->dsts[0] = saDup((struct sockaddr*)sun,
 				sizeof(struct sockaddr_un));
-	if (!stonep->dsts[0]) goto memerr;
+	if (!stone->dsts[0]) goto memerr;
 #endif
     } else {
 	struct sockaddr_storage dss;
@@ -8014,47 +8080,53 @@ Stone *mkstone(
 	}
 	lbset = findLBSet(dsa);
 	if (lbset) {
-	    stonep->ndsts = lbset->ndsts;
-	    stonep->dsts = lbset->dsts;
+	    stone->ndsts = lbset->ndsts;
+	    stone->dsts = lbset->dsts;
 	} else {
-	    stonep->ndsts = 1;
-	    stonep->dsts = malloc(sizeof(SockAddr*));
-	    if (!stonep->dsts) {
+	    stone->ndsts = 1;
+	    stone->dsts = malloc(sizeof(SockAddr*));
+	    if (!stone->dsts) {
 	    memerr:
 		message(LOG_CRIT, "Out of memory");
 		exit(1);
 	    }
-	    stonep->dsts[0] = saDup(dsa, dsalen);
-	    if (!stonep->dsts[0]) goto memerr;
+	    stone->dsts[0] = saDup(dsa, dsalen);
+	    if (!stone->dsts[0]) goto memerr;
 	}
     }
-    stonep->proto = proto;
-    stonep->from = ConnectFrom;
-    if (!reusestone(stonep)) {	/* recycle stone */
-	stonep->sd = socket(sa->sa_family, satype, saproto);
-	if (InvalidSocket(stonep->sd)) {
+    stone->proto = proto;
+    stone->from = ConnectFrom;
+    if (!reusestone(stone)) {	/* recycle stone */
+	stone->sd = socket(sa->sa_family, satype, saproto);
+	if (InvalidSocket(stone->sd)) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
 	    message(LOG_ERR, "stone %d: Can't get socket "
 		    "family=%d type=%d proto=%d err=%d",
-		    stonep->sd, sa->sa_family, satype, saproto, errno);
+		    stone->sd, sa->sa_family, satype, saproto, errno);
 	    exit(1);
 	}
 #ifdef IPV6_V6ONLY
 	if ((proto & proto_v6_s) && (proto & proto_ip_only_s)) {
 	    int i = 1;
-	    setsockopt(stonep->sd, IPPROTO_IPV6, IPV6_V6ONLY,
+	    setsockopt(stone->sd, IPPROTO_IPV6, IPV6_V6ONLY,
 		       (char*)&i, sizeof(i));
 	}
 #endif
 	if (!(proto & proto_udp_s) && ReuseAddr) {
 	    int i = 1;
-	    setsockopt(stonep->sd, SOL_SOCKET, SO_REUSEADDR,
+	    setsockopt(stone->sd, SOL_SOCKET, SO_REUSEADDR,
 		       (char*)&i, sizeof(i));
 	}
-	if (!DryRun) {
-	    if (bind(stonep->sd, sa, salen) < 0) {
+	if ((st=getStone(sa, salen))) {
+	    closesocket(stone->sd);
+	    stone->parent = st;
+	    stone->children = st->children;
+	    st->children = stone;
+	    stone->sd = st->sd;
+	} else if (!DryRun) {
+	    if (bind(stone->sd, sa, salen) < 0) {
 		char str[STRMAX+1];
 #ifdef WINDOWS
 		errno = WSAGetLastError();
@@ -8062,56 +8134,56 @@ Stone *mkstone(
 		addrport2str(sa, salen, 0, str, STRMAX, 0);
 		str[STRMAX] = '\0';
 		message(LOG_ERR, "stone %d: Can't bind %s err=%d",
-			stonep->sd, str, errno);
+			stone->sd, str, errno);
 		exit(1);
 	    }
-	    if (!(stonep->proto & proto_block_s)) {
+	    if (!(stone->proto & proto_block_s)) {
 #ifdef WINDOWS
 		u_long param;
 		param = 1;
-		ioctlsocket(stonep->sd, FIONBIO, &param);
+		ioctlsocket(stone->sd, FIONBIO, &param);
 #else
-		fcntl(stonep->sd, F_SETFL, O_NONBLOCK);
+		fcntl(stone->sd, F_SETFL, O_NONBLOCK);
 #endif
 	    }
-	    if (stonep->port == 0) {
+	    if (stone->port == 0) {
 		salen = sizeof(ss);
-		if (getsockname(stonep->sd, sa, &salen) >= 0) {
-		    stonep->port = getport(sa);
+		if (getsockname(stone->sd, sa, &salen) >= 0) {
+		    stone->port = getport(sa);
 		}
 	    }
 	    if (!(proto & proto_udp_s)) {	/* TCP */
-		if (listen(stonep->sd, BacklogMax) < 0) {
+		if (listen(stone->sd, BacklogMax) < 0) {
 #ifdef WINDOWS
 		    errno = WSAGetLastError();
 #endif
 		    message(LOG_ERR, "stone %d: Can't listen err=%d",
-			    stonep->sd, errno);
+			    stone->sd, errno);
 		    exit(1);
 		}
 	    }
 	}	/* !DryRun */
     }
-    stonep->listen = saDup(sa, salen);
+    stone->listen = saDup(sa, salen);
 #ifdef USE_SSL
     if (proto & proto_ssl_s) {	/* server side SSL */
-	stonep->ssl_server = mkStoneSSL(&ServerOpts, 1);
-	if (stonep->ssl_server->lbmod) {
-	    if (stonep->ssl_server->lbmod > stonep->ndsts) {
+	stone->ssl_server = mkStoneSSL(&ServerOpts, 1);
+	if (stone->ssl_server->lbmod) {
+	    if (stone->ssl_server->lbmod > stone->ndsts) {
 		message(LOG_WARNING, "LB set (%d) < lbmod (%d)",
-			stonep->ndsts, stonep->ssl_server->lbmod);
-		stonep->ssl_server->lbmod = stonep->ndsts;
+			stone->ndsts, stone->ssl_server->lbmod);
+		stone->ssl_server->lbmod = stone->ndsts;
 	    }
 	}
     } else {
-	stonep->ssl_server = NULL;
+	stone->ssl_server = NULL;
     }
-    stonep->ssl_host = NULL;
     if (proto & proto_ssl_d) {	/* client side SSL */
-	stonep->ssl_host = dhost;
-	stonep->ssl_client = mkStoneSSL(&ClientOpts, 0);
+	stone->ssl_client = mkStoneSSL(&ClientOpts, 0);
+	if (!(stone->ssl_client->name && *stone->ssl_client->name))
+	    stone->ssl_client->name = dhost;
     } else {
-	stonep->ssl_client = NULL;
+	stone->ssl_client = NULL;
     }
 #endif
     mesg = NULL;
@@ -8119,34 +8191,34 @@ Stone *mkstone(
 	mesg = str;
 	if ((proto & proto_command) == command_proxy) {
 	    snprintf(mesg, STRMAX, "stone %d: using proxy by ",
-		     stonep->sd);
+		     stone->sd);
 	} else if ((proto & proto_command) == command_health) {
-	    snprintf(mesg, STRMAX, "stone %d: health check by ", stonep->sd);
+	    snprintf(mesg, STRMAX, "stone %d: health check by ", stone->sd);
 	} else if ((proto & proto_command) == command_identd) {
-	    snprintf(mesg, STRMAX, "stone %d: ident query by ", stonep->sd);
+	    snprintf(mesg, STRMAX, "stone %d: ident query by ", stone->sd);
 	} else {
 	    char addrport[STRMAX+1];
-	    addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-			 (stonep->proto & proto_stone_d),
+	    addrport2str(&stone->dsts[0]->addr, stone->dsts[0]->len,
+			 (stone->proto & proto_stone_d),
 			 addrport, STRMAX, 0);
 	    addrport[STRMAX] = '\0';
 	    snprintf(mesg, STRMAX, "stone %d: connecting to %s by ",
-		     stonep->sd, addrport);
+		     stone->sd, addrport);
 	}
     }
     family = AF_INET;
 #ifdef AF_INET6
-    if (stonep->proto & proto_v6_s) {
-	if (host == NULL && !(stonep->proto & proto_ip_only_s)) {
+    if (stone->proto & proto_v6_s) {
+	if (host == NULL && !(stone->proto & proto_ip_only_s)) {
 	    family = AF_UNSPEC;
 	} else {
 	    family = AF_INET6;
 	}
     }
 #endif
-    stonep->xhosts = mkXhosts(nhosts, hosts, family, mesg);
-    message(LOG_INFO, "%s", stone2str(stonep, str, STRMAX));
-    stonep->backups = NULL;
+    stone->xhosts = mkXhosts(nhosts, hosts, family, mesg);
+    message(LOG_INFO, "%s", stone2str(stone, str, STRMAX));
+    stone->backups = NULL;
     if ((proto & proto_command) != command_proxy
 	&& (proto & proto_command) != command_health
 	&& (proto & proto_command) != command_identd
@@ -8154,21 +8226,21 @@ Stone *mkstone(
 	Backup *bs[LB_MAX];
 	int found = 0;
 	int i;
-	for (i=0; i < stonep->ndsts; i++) {
-	    bs[i] = findBackup(&stonep->dsts[i]->addr);
+	for (i=0; i < stone->ndsts; i++) {
+	    bs[i] = findBackup(&stone->dsts[i]->addr);
 	    if (bs[i]) {
 		found = 1;
 		bs[i]->used = 1;
 	    }
 	}
 	if (found) {
-	    stonep->backups = malloc(sizeof(Backup*) * stonep->ndsts);
-	    if (stonep->backups) {
-		for (i=0; i < stonep->ndsts; i++) stonep->backups[i] = bs[i];
+	    stone->backups = malloc(sizeof(Backup*) * stone->ndsts);
+	    if (stone->backups) {
+		for (i=0; i < stone->ndsts; i++) stone->backups[i] = bs[i];
 	    }
 	}
     }
-    return stonep;
+    return stone;
 }
 
 /* main */
@@ -8327,6 +8399,10 @@ void help(char *com, char *sub) {
 "       no_tls1          ; turn off TLSv1\n"
 "       no_ssl3          ; turn off SSLv3\n"
 "       no_ssl2          ; turn off SSLv2\n"
+#ifndef OPENSSL_NO_TLSEXT
+"       sni              ; Server Name Indication\n"
+"       servername=<str> ; Server Name\n"
+#endif
 "       bugs             ; SSL implementation bug workarounds\n"
 #ifdef SSL_OP_CIPHER_SERVER_PREFERENCE
 "       serverpref       ; use server's cipher preferences (SSLv2)\n"
@@ -8697,6 +8773,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->serial = -2;
     opts->callback = verify_callback;
     opts->sid_ctx = NULL;
+    opts->useSNI = 0;
     if (isserver) {
 	char path[BUFMAX];
 	snprintf(path, BUFMAX-1, "%s/stone.pem", X509_get_default_cert_dir());
@@ -8721,6 +8798,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->caFile = opts->caPath = NULL;
     opts->pfxFile = NULL;
     opts->passwd = NULL;
+    opts->servername = NULL;
     opts->certIgnore = 0;
 #ifdef CRYPTOAPI
     opts->certStoreCA = 0;
@@ -8820,6 +8898,10 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 	opts->serial = -1;
     } else if (!strncmp(argv[argi], "sid_ctx=", 8)) {
 	opts->sid_ctx = (unsigned char*)strdup(argv[argi]+8);
+    } else if (!strcmp(argv[argi], "sni")) {
+	opts->useSNI = 1;
+    } else if (!strncmp(argv[argi], "servername=", 11)) {
+	opts->servername = strdup(argv[argi]+11);
     } else if (!strncmp(argv[argi], "key=", 4)) {
 	opts->keyFile = strdup(argv[argi]+4);
     } else if (!strncmp(argv[argi], "cert=", 5)) {
@@ -9550,8 +9632,10 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (PairTop) PairTop->prev = stone->pairs;
 	    PairTop = stone->pairs;
 	}
-	stone->next = stones;
-	stones = stone;
+	if (!stone->parent) {	/* stone is parent */
+	    stone->next = stones;
+	    stones = stone;
+	}
 	proto = sproto = dproto = 0;	/* default: TCP */
     }
 #ifndef USE_EPOLL
