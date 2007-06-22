@@ -349,6 +349,8 @@ typedef struct {
     int useSNI;
     char *keyFile;
     char *certFile;
+    char *keyFilePat;
+    char *certFilePat;
     char *caFile;
     char *caPath;
     char *pfxFile;
@@ -7511,6 +7513,57 @@ void rmStoneSSL(StoneSSL *ss) {
     }
     free(ss);
 }
+
+char *exPatFile(char *pat, char *name, char *src, char *dst) {
+    char str[STRMAX+1];
+    char *p;
+    int pos, len, nlen, slen, dlen;
+    int l;
+    if (!name) name = "";
+    if (!src) src = "";
+    if (!dst) dst = "";
+    nlen = strlen(name);
+    slen = strlen(src);
+    dlen = strlen(dst);
+    len = 0;
+    for (pos=0; pos < STRMAX; pos++) {
+	if (pat[pos] == '\0') {
+	    str[len] = '\0';
+	    break;
+	} else if (pat[pos] == '%') {
+	    switch (pat[++pos]) {
+	    case 'n':	l = nlen; p = name; break;
+	    case 's':	l = slen; p = src;  break;
+	    case 't':	l = dlen; p = dst;  break;
+	    default:
+		l = 1;
+		p = &pat[pos];
+	    }
+	    if (len + l >= STRMAX) l = STRMAX - len;
+	    strncpy(str+len, p, l);
+	    len += l;
+	} else {
+	    str[len++] = pat[pos];
+	}
+    }
+    str[STRMAX] = '\0';
+    return strdup(str);
+}
+
+void exPatOpts(SSLOpts *opts, char *src, char *dst) {
+    if (opts->certFilePat) {
+	opts->certFile = exPatFile(opts->certFilePat,
+				   opts->servername, src, dst);
+	if (Debug > 3) message(LOG_DEBUG, "exPatCert: %s => %s",
+			       opts->certFilePat, opts->certFile);
+    }
+    if (opts->keyFilePat) {
+	opts->keyFile = exPatFile(opts->keyFilePat,
+				   opts->servername, src, dst);
+	if (Debug > 3) message(LOG_DEBUG, "exPatKey: %s => %s",
+			       opts->keyFilePat, opts->keyFile);
+    }
+}
 #endif
 
 void rmoldstone(void) {
@@ -8167,6 +8220,7 @@ Stone *mkstone(
     stone->listen = saDup(sa, salen);
 #ifdef USE_SSL
     if (proto & proto_ssl_s) {	/* server side SSL */
+	exPatOpts(&ServerOpts, host, dhost);
 	stone->ssl_server = mkStoneSSL(&ServerOpts, 1);
 	if (stone->ssl_server->lbmod) {
 	    if (stone->ssl_server->lbmod > stone->ndsts) {
@@ -8179,6 +8233,7 @@ Stone *mkstone(
 	stone->ssl_server = NULL;
     }
     if (proto & proto_ssl_d) {	/* client side SSL */
+	exPatOpts(&ClientOpts, host, dhost);
 	stone->ssl_client = mkStoneSSL(&ClientOpts, 0);
 	if (!(stone->ssl_client->name && *stone->ssl_client->name))
 	    stone->ssl_client->name = dhost;
@@ -8411,7 +8466,11 @@ void help(char *com, char *sub) {
 "       sid_ctx=<str>    ; set session ID context\n"
 "       passfile=<file>  ; password file\n"
 "       key=<file>       ; key file\n"
+"       keypat=<file>    ; key file pattern\n"
 "       cert=<file>      ; certificate file\n"
+"       certpat=<file>   ; certificate file pattern\n"
+"       certkey=<file>   ; certificate & key file\n"
+"       certkeypat=<file>; certificate & key file pattern\n"
 "       CAfile=<file>    ; certificate file of CA\n"
 "       CApath=<dir>     ; dir of CAs\n"
 "       pfx=<file>       ; PKCS#12 file\n"
@@ -8778,6 +8837,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 	char path[BUFMAX];
 	snprintf(path, BUFMAX-1, "%s/stone.pem", X509_get_default_cert_dir());
 	opts->keyFile = opts->certFile = strdup(path);
+	opts->keyFilePat = opts->certFilePat = NULL;
 #if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_server_method();
 #elif !defined(OPENSSL_NO_SSL3)
@@ -8787,6 +8847,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 #endif
     } else {
 	opts->keyFile = opts->certFile = NULL;
+	opts->keyFilePat = opts->certFilePat = NULL;
 #if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_client_method();
 #elif !defined(OPENSSL_NO_SSL3)
@@ -8904,8 +8965,19 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 	opts->servername = strdup(argv[argi]+11);
     } else if (!strncmp(argv[argi], "key=", 4)) {
 	opts->keyFile = strdup(argv[argi]+4);
+	opts->keyFilePat = NULL;
+    } else if (!strncmp(argv[argi], "keypat=", 7)) {
+	opts->keyFilePat = strdup(argv[argi]+7);
     } else if (!strncmp(argv[argi], "cert=", 5)) {
 	opts->certFile = strdup(argv[argi]+5);
+	opts->certFilePat = NULL;
+    } else if (!strncmp(argv[argi], "certpat=", 8)) {
+	opts->certFilePat = strdup(argv[argi]+8);
+    } else if (!strncmp(argv[argi], "certkey=", 8)) {
+	opts->keyFile = opts->certFile = strdup(argv[argi]+8);
+	opts->keyFilePat = opts->certFilePat = NULL;
+    } else if (!strncmp(argv[argi], "certkeypat=", 11)) {
+	opts->keyFilePat = opts->certFilePat = strdup(argv[argi]+11);
     } else if (!strncmp(argv[argi], "CAfile=", 7)) {
 	opts->caFile = strdup(argv[argi]+7);
     } else if (!strncmp(argv[argi], "CApath=", 7)) {
