@@ -7315,13 +7315,19 @@ static int ssl_servername_callback(SSL *ssl, int *ad, void *arg) {
     Stone *stone;
     const char *name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
     if (!ss || !ss->name) return SSL_TLSEXT_ERR_NOACK;
+    if (!name) {
+	if (ss && ss->verbose)
+	    message(LOG_DEBUG, "%d TCP %d: No servername, expects: %s",
+		    pair->stone->sd, pair->sd, ss->name);
+	return SSL_TLSEXT_ERR_OK;
+    }
     if (strcmp(name, ss->name) == 0) return SSL_TLSEXT_ERR_OK;
     for (stone=pair->stone->children; stone; stone=stone->children) {
 	StoneSSL *sn = stone->ssl_server;
 	if (!sn || !sn->name) return SSL_TLSEXT_ERR_NOACK;
 	if (strcmp(name, sn->name) == 0) {
 	    if (sn->verbose)
-		message(LOG_DEBUG, "%d TCP %d: Swiching server context: %s",
+		message(LOG_DEBUG, "%d TCP %d: Switching server context: %s",
 			stone->sd, pair->sd, sn->name);
 	    SSL_set_SSL_CTX(ssl, sn->ctx);
 	    pair->stone = stone;
