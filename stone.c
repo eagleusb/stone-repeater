@@ -354,6 +354,9 @@ typedef struct {
     char *caFile;
     char *caPath;
     char *pfxFile;
+    char *pfxFilePat;
+    char *passFile;
+    char *passFilePat;
     char *passwd;
     char *servername;
     int certIgnore;
@@ -7557,17 +7560,47 @@ char *exPatFile(char *pat, char *name, char *src, char *dst) {
 }
 
 void exPatOpts(SSLOpts *opts, char *src, char *dst) {
-    if (opts->certFilePat) {
-	opts->certFile = exPatFile(opts->certFilePat,
-				   opts->servername, src, dst);
-	if (Debug > 3) message(LOG_DEBUG, "exPatCert: %s => %s",
-			       opts->certFilePat, opts->certFile);
+    if (opts->pfxFilePat) {
+	opts->pfxFile = exPatFile(opts->pfxFilePat,
+				  opts->servername, src, dst);
+	if (Debug > 3) message(LOG_DEBUG, "exPatPfx: %s => %s",
+			       opts->pfxFilePat, opts->pfxFile);
+    } else {
+	if (opts->certFilePat) {
+	    opts->certFile = exPatFile(opts->certFilePat,
+				       opts->servername, src, dst);
+	    if (Debug > 3) message(LOG_DEBUG, "exPatCert: %s => %s",
+				   opts->certFilePat, opts->certFile);
+	}
+	if (opts->keyFilePat) {
+	    opts->keyFile = exPatFile(opts->keyFilePat,
+				      opts->servername, src, dst);
+	    if (Debug > 3) message(LOG_DEBUG, "exPatKey: %s => %s",
+				   opts->keyFilePat, opts->keyFile);
+	}
     }
-    if (opts->keyFilePat) {
-	opts->keyFile = exPatFile(opts->keyFilePat,
+    if (opts->passFilePat) {
+	opts->passFile = exPatFile(opts->passFilePat,
 				   opts->servername, src, dst);
-	if (Debug > 3) message(LOG_DEBUG, "exPatKey: %s => %s",
-			       opts->keyFilePat, opts->keyFile);
+	if (Debug > 3) message(LOG_DEBUG, "exPatPass: %s => %s",
+			       opts->passFilePat, opts->passFile);
+    }
+    if (opts->passFile) {
+    	FILE *fp = fopen(opts->passFile, "r");
+	char str[STRMAX+1];
+	int i;
+	if (!fp) {
+	    message(LOG_ERR, "Can't open passwd file: %s", opts->passFile);
+	    exit(1);
+	}
+	for (i=0; i < STRMAX; i++) {
+	    int c = getc(fp);
+	    if (c == '\r' || c == '\n' || c == EOF) break;
+	    str[i] = c;
+	}
+	str[i] = '\0';
+	fclose(fp);
+	opts->passwd = strdup(str);
     }
 }
 #endif
@@ -8435,57 +8468,59 @@ void help(char *com, char *sub) {
 #ifdef USE_SSL
     } else if (!strcmp(sub, "ssl")) {
 	fprintf(stderr,
-"opt:  -q <SSL>          ; SSL client option\n"
-"      -z <SSL>          ; SSL server option\n"
-"SSL:   default          ; reset to default\n"
-"       verbose          ; verbose mode\n"
-"       verify           ; require peer's certificate\n"
-"       verify,once      ; verify client's certificate only once\n"
-"       verify,ifany     ; verify client's certificate if any\n"
-"       verify,none      ; don't require peer's certificate\n"
-"       crl_check        ; lookup CRLs\n"
-"       crl_check_all    ; lookup CRLs for whole chain\n"
-"       uniq             ; check serial # of peer's certificate\n"
-"       re<n>=<regex>    ; verify depth <n> with <regex>\n"
-"       depth=<n>        ; set verification depth to <n>\n"
+"opt:  -q <SSL>            ; SSL client option\n"
+"      -z <SSL>            ; SSL server option\n"
+"SSL:   default            ; reset to default\n"
+"       verbose            ; verbose mode\n"
+"       verify             ; require peer's certificate\n"
+"       verify,once        ; verify client's certificate only once\n"
+"       verify,ifany       ; verify client's certificate if any\n"
+"       verify,none        ; don't require peer's certificate\n"
+"       crl_check          ; lookup CRLs\n"
+"       crl_check_all      ; lookup CRLs for whole chain\n"
+"       uniq               ; check serial # of peer's certificate\n"
+"       re<n>=<regex>      ; verify depth <n> with <regex>\n"
+"       depth=<n>          ; set verification depth to <n>\n"
 #ifndef OPENSSL_NO_TLS1
-"       tls1             ; just use TLSv1\n"
+"       tls1               ; just use TLSv1\n"
 #endif
 #ifndef OPENSSL_NO_SSL3
-"       ssl3             ; just use SSLv3\n"
+"       ssl3               ; just use SSLv3\n"
 #endif
 #ifndef OPENSSL_NO_SSL2
-"       ssl2             ; just use SSLv2\n"
+"       ssl2               ; just use SSLv2\n"
 #endif
-"       no_tls1          ; turn off TLSv1\n"
-"       no_ssl3          ; turn off SSLv3\n"
-"       no_ssl2          ; turn off SSLv2\n"
+"       no_tls1            ; turn off TLSv1\n"
+"       no_ssl3            ; turn off SSLv3\n"
+"       no_ssl2            ; turn off SSLv2\n"
 #ifndef OPENSSL_NO_TLSEXT
-"       sni              ; Server Name Indication\n"
-"       servername=<str> ; Server Name\n"
+"       sni                ; Server Name Indication\n"
+"       servername=<str>   ; Server Name\n"
 #endif
-"       bugs             ; SSL implementation bug workarounds\n"
+"       bugs               ; SSL implementation bug workarounds\n"
 #ifdef SSL_OP_CIPHER_SERVER_PREFERENCE
-"       serverpref       ; use server's cipher preferences (SSLv2)\n"
+"       serverpref         ; use server's cipher preferences (SSLv2)\n"
 #endif
-"       shutdown=<mode>  ; accurate, nowait, unclean\n"
-"       sid_ctx=<str>    ; set session ID context\n"
-"       passfile=<file>  ; password file\n"
-"       key=<file>       ; key file\n"
-"       keypat=<file>    ; key file pattern\n"
-"       cert=<file>      ; certificate file\n"
-"       certpat=<file>   ; certificate file pattern\n"
-"       certkey=<file>   ; certificate & key file\n"
-"       certkeypat=<file>; certificate & key file pattern\n"
-"       CAfile=<file>    ; certificate file of CA\n"
-"       CApath=<dir>     ; dir of CAs\n"
-"       pfx=<file>       ; PKCS#12 file\n"
+"       shutdown=<mode>    ; accurate, nowait, unclean\n"
+"       sid_ctx=<str>      ; set session ID context\n"
+"       passfile=<file>    ; password file\n"
+"       passfilepat=<file> ; password file pattern\n"
+"       key=<file>         ; key file\n"
+"       keypat=<file>      ; key file pattern\n"
+"       cert=<file>        ; certificate file\n"
+"       certpat=<file>     ; certificate file pattern\n"
+"       certkey=<file>     ; certificate & key file\n"
+"       certkeypat=<file>  ; certificate & key file pattern\n"
+"       CAfile=<file>      ; certificate file of CA\n"
+"       CApath=<dir>       ; dir of CAs\n"
+"       pfx=<file>         ; PKCS#12 file\n"
+"       pfxpat=<file>      ; PKCS#12 file pattern\n"
 #ifdef CRYPTOAPI
-"       store=<prop>     ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
-"       storeCA          ; use CA cert in Windows cert store\n"
+"       store=<prop>       ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
+"       storeCA            ; use CA cert in Windows cert store\n"
 #endif
-"       cipher=<ciphers> ; list of ciphers\n"
-"       lb<n>=<m>        ; load balancing based on CN\n"
+"       cipher=<ciphers>   ; list of ciphers\n"
+"       lb<n>=<m>          ; load balancing based on CN\n"
 	    );
 #endif
     } else {
@@ -8864,6 +8899,9 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     }
     opts->caFile = opts->caPath = NULL;
     opts->pfxFile = NULL;
+    opts->pfxFilePat = NULL;
+    opts->passFile = NULL;
+    opts->passFilePat = NULL;
     opts->passwd = NULL;
     opts->servername = NULL;
     opts->certIgnore = 0;
@@ -8996,25 +9034,19 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 	opts->caPath = strdup(argv[argi]+7);
     } else if (!strncmp(argv[argi], "pfx=", 4)) {
 	opts->pfxFile = strdup(argv[argi]+4);
+	opts->pfxFilePat = NULL;
+	opts->keyFile = opts->certFile = NULL;
+	opts->keyFilePat = opts->certFilePat = NULL;
+    } else if (!strncmp(argv[argi], "pfxpat=", 7)) {
+	opts->pfxFilePat = strdup(argv[argi]+7);
 	opts->keyFile = opts->certFile = NULL;
 	opts->keyFilePat = opts->certFilePat = NULL;
     } else if (!strncmp(argv[argi], "passfile=", 9)) {
-	FILE *fp = fopen(argv[argi]+9, "r");
-	char str[STRMAX+1];
-	int i;
-	if (!fp) {
-	    message(LOG_ERR, "Can't open passwd file: %s", argv[argi]+9);
-	    help(argv[0], "ssl");
-	    exit(1);
-	}
-	for (i=0; i < STRMAX; i++) {
-	    int c = getc(fp);
-	    if (c == '\r' || c == '\n' || c == EOF) break;
-	    str[i] = c;
-	}
-	str[i] = '\0';
-	fclose(fp);
-	opts->passwd = strdup(str);
+	opts->passFile = strdup(argv[argi]+9);
+	opts->passFilePat = NULL;
+    } else if (!strncmp(argv[argi], "passfilepat=", 12)) {
+	opts->passFilePat = strdup(argv[argi]+12);
+	opts->passFile = NULL;
     } else if (!strncmp(argv[argi], "ignore", 6)) {
 	opts->certIgnore = 1;
 #ifdef CRYPTOAPI
