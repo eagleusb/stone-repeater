@@ -8972,24 +8972,32 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
     } else if (!strncmp(argv[argi], "key=", 4)) {
 	opts->keyFile = strdup(argv[argi]+4);
 	opts->keyFilePat = NULL;
+	opts->pfxFile = NULL;
     } else if (!strncmp(argv[argi], "keypat=", 7)) {
 	opts->keyFilePat = strdup(argv[argi]+7);
+	opts->pfxFile = NULL;
     } else if (!strncmp(argv[argi], "cert=", 5)) {
 	opts->certFile = strdup(argv[argi]+5);
 	opts->certFilePat = NULL;
+	opts->pfxFile = NULL;
     } else if (!strncmp(argv[argi], "certpat=", 8)) {
 	opts->certFilePat = strdup(argv[argi]+8);
+	opts->pfxFile = NULL;
     } else if (!strncmp(argv[argi], "certkey=", 8)) {
 	opts->keyFile = opts->certFile = strdup(argv[argi]+8);
 	opts->keyFilePat = opts->certFilePat = NULL;
+	opts->pfxFile = NULL;
     } else if (!strncmp(argv[argi], "certkeypat=", 11)) {
 	opts->keyFilePat = opts->certFilePat = strdup(argv[argi]+11);
+	opts->pfxFile = NULL;
     } else if (!strncmp(argv[argi], "CAfile=", 7)) {
 	opts->caFile = strdup(argv[argi]+7);
     } else if (!strncmp(argv[argi], "CApath=", 7)) {
 	opts->caPath = strdup(argv[argi]+7);
     } else if (!strncmp(argv[argi], "pfx=", 4)) {
 	opts->pfxFile = strdup(argv[argi]+4);
+	opts->keyFile = opts->certFile = NULL;
+	opts->keyFilePat = opts->certFilePat = NULL;
     } else if (!strncmp(argv[argi], "passfile=", 9)) {
 	FILE *fp = fopen(argv[argi]+9, "r");
 	char str[STRMAX+1];
