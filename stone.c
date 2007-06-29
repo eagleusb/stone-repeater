@@ -103,7 +103,13 @@ static char *CVS_ID =
 #include <ctype.h>
 #include <stdarg.h>
 #include <signal.h>
+
+#ifdef USE_PCRE
+#include <pcreposix.h>
+#else
 #include <regex.h>
+#endif
+
 typedef void (*FuncPtr)(void*);
 
 #ifdef WINDOWS
