@@ -6477,27 +6477,23 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		    setclose(wPair, flag);
 		}
 	    }
-	} else if (wPair->proto & proto_dgram) {
-	    rPair->proto |= (proto_select_r | proto_dirty);
-	    if (len > 0) {
-		if (sendPairUDP(wPair) < 0) {
-		    int flag = 0;
-		    if (!(rPair->proto & proto_shutdown))
-			if (doshutdown(rPair, 2) >= 0)
-			    flag = proto_shutdown;
-		    rPair->proto &= ~proto_select_w;
-		    rPair->proto |= proto_dirty;
-		    setclose(rPair, (proto_eof | flag));
-		}
-	    } else {	/* EINTR */
-		ret = RW_EINTR;
-	    }
 	} else {
 	    if (len > 0) {
 		int first_flag;
 		first_flag = (rPair->proto & proto_first_r);
 		if (first_flag) len = first_read(rPair);
-		if (len > 0 && ValidSocket(wsd)
+		if (wPair->proto & proto_dgram) {
+		    rPair->proto |= (proto_select_r | proto_dirty);
+		    if (sendPairUDP(wPair) < 0) {
+			int flag = 0;
+			if (!(rPair->proto & proto_shutdown))
+			    if (doshutdown(rPair, 2) >= 0)
+				flag = proto_shutdown;
+			rPair->proto &= ~proto_select_w;
+			rPair->proto |= proto_dirty;
+			setclose(rPair, (proto_eof | flag));
+		    }
+		} else if (len > 0 && ValidSocket(wsd)
 		    && (wPair->proto & proto_connect)
 		    && !(wPair->proto & (proto_shutdown | proto_close))
 		    && !(rPair->proto & proto_close)) {
@@ -6764,15 +6760,17 @@ int doAcceptConnect(Pair *p1) {
     if (!(p1->proto & proto_close)) {
 	struct epoll_event ev;
 	ev.events = EPOLLONESHOT;
-	ev.data.ptr = p1;
-	if (Debug > 6)
-	    message(LOG_DEBUG, "%d TCP %d: doAcceptConnect1 "
-		    "epoll_ctl %d ADD %x",
-		    stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
-	if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
-	    message(LOG_ERR, "%d TCP %d: doAcceptConnect1 "
-		    "epoll_ctl %d ADD err=%d",
-		    stone->sd, p1->sd, ePollFd, errno);
+	if (!(p1->proto & proto_dgram)) {
+	    ev.data.ptr = p1;
+	    if (Debug > 6)
+		message(LOG_DEBUG, "%d TCP %d: doAcceptConnect1 "
+			"epoll_ctl %d ADD %x",
+			stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: doAcceptConnect1 "
+			"epoll_ctl %d ADD err=%d",
+			stone->sd, p1->sd, ePollFd, errno);
+	    }
 	}
 	if (!(p2->proto & (proto_noconnect | proto_close))) {
 	    ev.data.ptr = p2;
@@ -8056,10 +8054,12 @@ int mkPortXhosts(int argc, int i, char *argv[]) {
     exit(1);
 }
 
-Stone *getStone(struct sockaddr *sa, socklen_t salen) {
+Stone *getStone(struct sockaddr *sa, socklen_t salen, int proto) {
     Stone *stone;
+    proto &= proto_udp_s;
     for (stone=stones; stone != NULL; stone=stone->next) {
-	if (saComp(&stone->listen->addr, sa)) {
+	if ((stone->proto & proto_udp_s) == proto
+	    && saComp(&stone->listen->addr, sa)) {
 	    return stone;
 	}
     }
@@ -8220,7 +8220,7 @@ Stone *mkstone(
 	    setsockopt(stone->sd, SOL_SOCKET, SO_REUSEADDR,
 		       (char*)&i, sizeof(i));
 	}
-	if ((st=getStone(sa, salen))) {
+	if ((st=getStone(sa, salen, proto))) {
 	    closesocket(stone->sd);
 	    stone->parent = st;
 	    stone->children = st->children;
