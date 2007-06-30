@@ -1772,22 +1772,12 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
     u_long param;
 #endif
-    time_t start, now;
 #ifdef USE_EPOLL
-    int epfd = epoll_create(BACKLOG_MAX);
+    int epfd;
     struct epoll_event ev;
     struct epoll_event evs[1];
-    if (epfd < 0) {
-	message(LOG_ERR, "health check: can't create epoll err=%d", errno);
-	return 1;	/* I can't tell the master is healthy or not */
-    }
-    ev.events = (EPOLLOUT | EPOLLONESHOT);
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
-	message(LOG_ERR, "health check: epoll_ctl ADD err=%d", errno);
-	close(epfd);
-	return 1;	/* I can't tell the master is healthy or not */
-    }
 #endif
+    time_t start, now;
     time(&start);
     sd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
     if (InvalidSocket(sd)) {
@@ -1801,6 +1791,19 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #endif
 	return 1;	/* I can't tell the master is healthy or not */
     }
+#ifdef USE_EPOLL
+    epfd = epoll_create(BACKLOG_MAX);
+    if (epfd < 0) {
+	message(LOG_ERR, "health check: can't create epoll err=%d", errno);
+	return 1;	/* I can't tell the master is healthy or not */
+    }
+    ev.events = (EPOLLOUT | EPOLLONESHOT);
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
+	message(LOG_ERR, "health check: epoll_ctl ADD err=%d", errno);
+	close(epfd);
+	return 1;	/* I can't tell the master is healthy or not */
+    }
+#endif
     addrport[0] = '\0';
     if (!(proto & proto_block_d)) {
 #ifdef WINDOWS
