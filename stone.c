@@ -995,7 +995,7 @@ void packet_dump(char *head, char *buf, int len, XHosts *xhost) {
     int mode = (xhost->mode & XHostsMode_Dump);
     int i, j, k, l;
     int nb = 8;
-    k = 0;
+    j = k = l = 0;
     for (i=0; i < len; i += j) {
 	if (mode <= 2) {
 	    nb = 16;
@@ -1786,9 +1786,6 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #endif
 	message(LOG_ERR, "health check: can't create socket err=%d",
 		errno);
-#ifdef USE_EPOLL
-	close(epfd);
-#endif
 	return 1;	/* I can't tell the master is healthy or not */
     }
 #ifdef USE_EPOLL
@@ -3060,9 +3057,10 @@ int sendPairUDP(Pair *pair) {
     Stone *stone = pair->stone;
     ExBuf *next = pair->t;
     ExBuf *cur = NULL;
-    ExBuf *ex;
-    unsigned char *buf;
-    int pos, len;
+    ExBuf *ex = NULL;	/* dummy init to suppress warnings */
+    unsigned char *buf = NULL;
+    int pos = 0;
+    int len = 0;
     int err = 0;
     char prefix[STRMAX+1];
     if ((pair->proto & proto_command) == command_source) {
@@ -4911,7 +4909,9 @@ static unsigned char basis_64[] =
 
 int baseEncode(unsigned char *buf, int len, int max) {
     unsigned char *org = buf + max - len;
-    unsigned char c1, c2, c3;
+    unsigned char c1;
+    unsigned char c2 = 0;	/* dummy init to suppress warnings */
+    unsigned char c3 = 0;
     int blen = 0;
     int i;
     bcopy(buf, org, len);
@@ -5883,7 +5883,7 @@ int healthSTONE(Pair *pair, char *parm, int start) {
 
 int healthLIMIT(Pair *pair, char *parm, int start) {
     Comm *comm = limitComm;
-    char *q;
+    char *q = NULL;
     while (comm->str) {
 	if ((q=comm_match(parm, comm->str)) != NULL) break;
 	comm++;
@@ -7783,8 +7783,8 @@ typedef int sa_family_t;
 
 void mkXhostsExt(char *host, char *str, XHosts *ext) {
     int kind = 0;
-    char *top;
-    u_long num;
+    char *top = NULL;	/* dummy init to suppress warnings */
+    u_long num = 0;
     int i = 0;
     do {
 	switch(kind) {
@@ -9940,7 +9940,8 @@ void daemonize(void) {
 #endif
 
 void initialize(int argc, char *argv[]) {
-    int i, j;
+    int i;
+    int j = 0;	/* dummy init to suppress warnings */
 #ifdef WINDOWS
     WSADATA WSAData;
     if (WSAStartup(MAKEWORD(1, 1), &WSAData)) {
