@@ -3308,7 +3308,7 @@ int doSSL_accept(Pair *pair) {
 			    "shutdowned by peer sf=%x errno=%d",
 			    pair->stone->sd, sd,
 			    pair->ssl_flag, errno);
-		return ret;
+		return -1;	/* shutdowned */
 	    }
 	    message(priority(pair), "%d TCP %d: SSL_accept "
 		    "I/O error sf=%x errno=%d", pair->stone->sd, sd,
@@ -3322,7 +3322,7 @@ int doSSL_accept(Pair *pair) {
 	unsigned long e = ERR_get_error();
 	message(priority(pair), "%d TCP %d: SSL_accept lib %s",
 		pair->stone->sd, sd, ERR_error_string(e, NULL));
-	return ret;
+	return -1;	/* error */
     }
     if (Debug > 4)
 	message(LOG_DEBUG, "%d TCP %d: SSL_accept interrupted sf=%x err=%d",
@@ -6180,6 +6180,10 @@ void proto2fdset(Pair *pair, int isthread,
     } else
 #endif
     if (pair->proto & proto_close) {
+	if (ValidSocket(sd)) {
+	    pair->sd = INVALID_SOCKET;
+	    closesocket(sd);
+	}
 	return;
     } else if (pair->proto & proto_conninprog) {
 #ifdef USE_EPOLL
@@ -6394,6 +6398,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	    /* SSL_accept fails */
 	    pair->proto |= (proto_close | proto_dirty);
 	    if (opposite) opposite->proto |= (proto_close | proto_dirty);
+	    return RW_LEAVE;	/* leave */
 	}
 	if (pair->proto & proto_connect)
 	    if (opposite) reqconn(opposite, &stone->dsts[0]->addr,
