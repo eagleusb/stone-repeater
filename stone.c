@@ -1,6 +1,6 @@
 /*
  * stone.c	simple repeater
- * Copyright(c)1995-2006 by Hiroaki Sengoku <sengoku@gcd.org>
+ * Copyright(c)1995-2007 by Hiroaki Sengoku <sengoku@gcd.org>
  * Version 1.0	Jan 28, 1995
  * Version 1.1	Jun  7, 1995
  * Version 1.2	Aug 20, 1995
@@ -77,6 +77,7 @@
  * -DNO_SNPRINTF  without snprintf(3)
  * -DNO_SYSLOG	  without syslog(2)
  * -DNO_RINDEX	  without rindex(3)
+ * -DNO_STRDUP	  without strdup(3)
  * -DNO_THREAD	  without thread
  * -DNO_PID_T	  without pid_t
  * -DNO_SOCKLEN_T without socklen_t
@@ -90,7 +91,7 @@
  * -DWINDOWS	  Windows95/98/NT
  * -DNT_SERVICE	  WindowsNT/2000 native service
  */
-#define VERSION	"2.3c"
+#define VERSION	"2.3d"
 static char *CVS_ID =
 "@(#) $Id$";
 
@@ -102,12 +103,19 @@ static char *CVS_ID =
 #include <ctype.h>
 #include <stdarg.h>
 #include <signal.h>
+
+#ifdef USE_PCRE
+#include <pcreposix.h>
+#else
 #include <regex.h>
+#endif
+
 typedef void (*FuncPtr)(void*);
 
 #ifdef WINDOWS
 #define FD_SETSIZE	4096
 #include <process.h>
+#include <winsock2.h>
 #include <ws2tcpip.h>
 #if !defined(EINPROGRESS) && defined(WSAEWOULDBLOCK)
 #define EINPROGRESS     WSAEWOULDBLOCK
@@ -147,12 +155,12 @@ typedef void (*FuncPtr)(void*);
 #define bzero(b,n)	memset(b,0,n)
 #define	usleep(usec)	Sleep(usec)
 #define ASYNC(func,arg)	{\
-    if (Debug > 7) message(LOG_DEBUG,"ASYNC: %d",AsyncCount);\
+    if (Debug > 7) message(LOG_DEBUG, "ASYNC: %d", AsyncCount);\
     waitMutex(AsyncMutex);\
     AsyncCount++;\
     freeMutex(AsyncMutex);\
-    if (_beginthread((FuncPtr)func,0,arg) < 0) {\
-	message(LOG_ERR,"_beginthread error err=%d",errno);\
+    if (_beginthread((FuncPtr)func, 0, arg) < 0) {\
+	message(LOG_ERR, "_beginthread error err=%d", errno);\
 	func(arg);\
     }\
 }
@@ -297,6 +305,7 @@ int FdSetBug = 0;
 #ifdef USE_SSL
 #include <openssl/crypto.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -305,10 +314,15 @@ int FdSetBug = 0;
 
 #ifdef CRYPTOAPI
 int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
+int CryptoAPI_verify_certificate(X509 *x509);
 #endif
 
 #define NMATCH_MAX	9	/* \1 ... \9 */
 #define DEPTH_MAX	10
+
+#ifndef TLSEXT_NAMETYPE_host_name
+#define OPENSSL_NO_TLSEXT
+#endif
 
 typedef struct {
     int verbose;
@@ -317,9 +331,15 @@ typedef struct {
     long serial;
     SSL_CTX *ctx;
     regex_t *re[DEPTH_MAX];
+    char *name;
     unsigned char lbmod;
     unsigned char lbparm;
+    unsigned char sslparm;
 } StoneSSL;
+
+const int sslparm_ignore  = 0x01;
+const int sslparm_storeca = 0x02;
+const int sslparm_sni     = 0x04;
 
 typedef struct {
     int verbose;
@@ -329,16 +349,25 @@ typedef struct {
     int vflags;
     long off;
     long serial;
-    SSL_METHOD *meth;
+    const SSL_METHOD *meth;
     int (*callback)(int, X509_STORE_CTX *);
-    char *sid_ctx;
+    unsigned char *sid_ctx;
+    int useSNI;
     char *keyFile;
     char *certFile;
+    char *keyFilePat;
+    char *certFilePat;
     char *caFile;
     char *caPath;
     char *pfxFile;
+    char *pfxFilePat;
+    char *passFile;
+    char *passFilePat;
     char *passwd;
+    char *servername;
+    int certIgnore;
 #ifdef CRYPTOAPI
+    int certStoreCA;
     char *certStore;
 #endif
     char *cipherList;
@@ -447,7 +476,8 @@ typedef struct _LBSet {
 typedef struct _Stone {
     int common;
     SOCKET sd;			/* socket descriptor to listen */
-    short port;
+    int port;
+    SockAddr *listen;
     short ndsts;		/* # of destinations */
     SockAddr **dsts;		/* destinations */
     SockAddr *from;
@@ -457,6 +487,8 @@ typedef struct _Stone {
     char *p;
     int timeout;
     struct _Stone *next;
+    struct _Stone *children;
+    struct _Stone *parent;
 #ifdef USE_SSL
     StoneSSL *ssl_server;
     StoneSSL *ssl_client;
@@ -471,10 +503,18 @@ typedef struct _TimeLog {
     char str[0];		/* Log message */
 } TimeLog;
 
+const int data_parm_mask =	0x00ff;
+const int data_apop =		0x0100;
+const int data_identuser =	0x0200;
+const int data_ucred =		0x0300;
+const int data_peeraddr = 	0x0400;
+
+#define DATA_HEAD_LEN	sizeof(int)
+
 typedef struct _ExBuf {	/* extensible buffer */
     struct _ExBuf *next;
     int start;		/* index of buf */
-    int len;
+    int len;		/* last data is at buf[start+len-1] */
     int bufmax;		/* buffer size */
     char buf[BUFMAX];
 } ExBuf;
@@ -495,7 +535,7 @@ typedef struct _Pair {
     SOCKET sd;		/* socket descriptor */
     int proto;
     int count;		/* reference counter */
-    char *p;
+    ExBuf *d;
     TimeLog *log;
     int tx;		/* sent bytes */
     int rx;		/* received bytes */
@@ -592,9 +632,9 @@ const int proto_ssl_s =		 0x1000000;	  /* SSL source */
 const int proto_ssl_d =		 0x2000000;	  /*     destination */
 						/* only for Pair */
 const int proto_dirty =		    0x1000;	  /* ev must be updated */
-/*const int proto_ =		    0x2000;	  */
-const int proto_noconnect =	    0x4000;	  /* no connection needed */
-const int proto_connect =	    0x8000;	  /* connection established */
+const int proto_noconnect =	    0x2000;	  /* no connection needed */
+const int proto_connect =	    0x4000;	  /* connection established */
+const int proto_dgram =		    0x8000;	  /* UDP */
 const int proto_first_r =	   0x10000;	  /* first read packet */
 const int proto_first_w =	   0x20000;	  /* first written packet */
 const int proto_select_r =	   0x40000;	  /* select to read */
@@ -767,7 +807,7 @@ int snprintf(char *str, size_t len, char *fmt, ...) {
 #endif
 
 #ifdef NO_BCOPY
-void bcopy(void *b1, void *b2, int len) {
+void bcopy(const void *b1, void *b2, int len) {
     if (b1 < b2 && (char*)b2 < (char*)b1 + len) {	/* overlapping */
 	char *p, *q;
 	q = (char*)b2 + len - 1;
@@ -788,25 +828,56 @@ char *rindex(char *p, int ch) {
 }
 #endif
 
+#ifdef NO_STRDUP
+char *strdup(const char *s) {
+    int len = strlen(s);
+    char *ret = malloc(len+1);
+    if (ret) {
+	bcopy(s, ret, len+1);
+    }
+    return ret;
+}
+#endif
+
+#ifdef WINDOWS
+struct tm *localtime_r(const time_t *clock, struct tm *t) {
+    FILETIME utc, local;
+    SYSTEMTIME system;
+    LONGLONG ll;
+    ll = Int32x32To64(*clock, 10000000) + 116444736000000000ULL;
+    utc.dwLowDateTime = (DWORD)ll;
+    utc.dwHighDateTime = ll >> 32;
+    if (!FileTimeToLocalFileTime(&utc, &local)) return NULL;
+    if (!FileTimeToSystemTime(&local, &system)) return NULL;
+    t->tm_sec = system.wSecond;
+    t->tm_min = system.wMinute;
+    t->tm_hour = system.wHour;
+    t->tm_mday = system.wDay;
+    t->tm_mon = system.wMonth-1;
+    t->tm_year = system.wYear-1900;
+    t->tm_wday = system.wDayOfWeek;
+    return t;
+}
+#endif
+
+static char Month[][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+			  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
 char *strntime(char *str, int len, time_t *clock, long micro) {
-    char *p, *q;
-    int i;
-    p = ctime(clock);
-    if (p) {
-	q = p + strlen(p);
-	while (*p++ != ' ')	;
-	while (*--q != ' ')	;
-	i = 0;
-	len--;
-	while (p <= q && i < len) str[i++] = *p++;
-	if (micro >= 0) {
-	    i--;
-	    snprintf(str+i, len-i, ".%06ld ", micro);
-	} else {
-	    str[i] = '\0';
-	}
+#ifdef THREAD_UNSAFE
+    struct tm *t = localtime(clock);
+#else
+    struct tm tm;
+    struct tm *t = localtime_r(clock, &tm);
+#endif
+    if (micro >= 0) {
+	snprintf(str, len, "%s %2d %02d:%02d:%02d.%06ld ",
+		 Month[t->tm_mon], t->tm_mday,
+		 t->tm_hour, t->tm_min, t->tm_sec, micro);
     } else {
-	snprintf(str, len, "%lu ", *clock);
+	snprintf(str, len, "%s %2d %02d:%02d:%02d ",
+		 Month[t->tm_mon], t->tm_mday,
+		 t->tm_hour, t->tm_min, t->tm_sec);
     }
     return str;
 }
@@ -924,7 +995,7 @@ void packet_dump(char *head, char *buf, int len, XHosts *xhost) {
     int mode = (xhost->mode & XHostsMode_Dump);
     int i, j, k, l;
     int nb = 8;
-    k = 0;
+    j = k = l = 0;
     for (i=0; i < len; i += j) {
 	if (mode <= 2) {
 	    nb = 16;
@@ -950,9 +1021,9 @@ void packet_dump(char *head, char *buf, int len, XHosts *xhost) {
 	if (k > j/10 || nb < 16) {
 	    j = l = 0;
 	    for (j=0; j < nb && i+j < len; j++) {
-		if (mode == 1 && (' ' <= buf[i+j] && buf[i+j] <= '~'))
+		if (mode == 1 && (' ' <= buf[i+j] && buf[i+j] <= '~')) {
 		    sprintf(&line[l], " '%c", buf[i+j]);
-		else {
+		} else {
 		    sprintf(&line[l], " %02x", (unsigned char)buf[i+j]);
 		    if (buf[i+j] == '\n') k = 0; else k++;
 		}
@@ -971,6 +1042,21 @@ void packet_dump(char *head, char *buf, int len, XHosts *xhost) {
 	line[l] = '\0';
 	message(LOG_DEBUG, "%s%s", head, line);
     }
+}
+
+void message_buf(Pair *pair, int len, char *str) {	/* dump for debug */
+    char head[STRMAX+1];
+    Pair *p = pair->pair;
+    if (p == NULL) return;
+    head[STRMAX] = '\0';
+    if ((pair->proto & proto_command) == command_source) {
+	snprintf(head, STRMAX, "%d %s%d<%d",
+		 pair->stone->sd, str, pair->sd, p->sd);
+    } else {
+	snprintf(head, STRMAX, "%d %s%d>%d",
+		 pair->stone->sd, str, p->sd, pair->sd);
+    }
+    packet_dump(head, pair->t->buf + pair->t->start, len, pair->xhost);
 }
 
 char *addr2ip(struct in_addr *addr, char *str, int len) {
@@ -1119,7 +1205,9 @@ int islocalhost(struct sockaddr *sa) {
 
 #ifdef NO_ADDRINFO
 #define NTRY_MAX	10
+#ifndef NI_NUMERICHOST
 #define NI_NUMERICHOST	1
+#endif
 
 char *addr2str(struct sockaddr *sa, socklen_t salen,
 	       char *str, int len, int flags) {
@@ -1267,6 +1355,15 @@ char *addrport2str(struct sockaddr *sa, socklen_t salen,
     return str;
 }
 #endif
+
+char *addrport2strOnce(struct sockaddr *sa, socklen_t salen,
+		       int proto, char *str, int len, int flags) {
+    if (! *str) {
+	addrport2str(sa, salen, proto, str, len, flags);
+	str[len] = '\0';
+    }
+    return str;
+}
 
 int isdigitstr(char *str) {
     while (*str && !isspace(*str)) {
@@ -1508,7 +1605,7 @@ int saComp(struct sockaddr *a, struct sockaddr *b) {
     return 0;
 }
 
-/* *addrp is permitted to connect to *stonep ? */
+/* *addrp is permitted to connect to *stone ? */
 XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
     int match = 1;
     if (!xhosts) return XHostsTrue; /* any hosts can access */
@@ -1675,11 +1772,24 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
     u_long param;
 #endif
-    time_t start, now;
 #ifdef USE_EPOLL
-    int epfd = epoll_create(BACKLOG_MAX);
+    int epfd;
     struct epoll_event ev;
     struct epoll_event evs[1];
+#endif
+    time_t start, now;
+    time(&start);
+    sd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
+    if (InvalidSocket(sd)) {
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	message(LOG_ERR, "health check: can't create socket err=%d",
+		errno);
+	return 1;	/* I can't tell the master is healthy or not */
+    }
+#ifdef USE_EPOLL
+    epfd = epoll_create(BACKLOG_MAX);
     if (epfd < 0) {
 	message(LOG_ERR, "health check: can't create epoll err=%d", errno);
 	return 1;	/* I can't tell the master is healthy or not */
@@ -1691,21 +1801,7 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 	return 1;	/* I can't tell the master is healthy or not */
     }
 #endif
-    time(&start);
-    sd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
-    if (InvalidSocket(sd)) {
-#ifdef WINDOWS
-	errno = WSAGetLastError();
-#endif
-	message(LOG_ERR, "health check: can't create socket err=%d",
-		errno);
-#ifdef USE_EPOLL
-	close(epfd);
-#endif
-	return 1;	/* I can't tell the master is healthy or not */
-    }
-    addrport2str(sa, salen, (proto & proto_pair_d), addrport, STRMAX, 0);
-    addrport[STRMAX] = '\0';
+    addrport[0] = '\0';
     if (!(proto & proto_block_d)) {
 #ifdef WINDOWS
 	param = 1;
@@ -1744,11 +1840,15 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 		);
 	    getsockopt(sd, SOL_SOCKET, SO_ERROR, (char*)&optval, &optlen);
 	    if (optval) {
+		addrport2strOnce(sa, salen, (proto & proto_pair_d),
+				 addrport, STRMAX, 0);
 		message(LOG_ERR, "health check: connect %s getsockopt err=%d",
 			addrport, optval);
 		goto fail;
 	    }
 	} else {
+	    addrport2strOnce(sa, salen, (proto & proto_pair_d),
+			     addrport, STRMAX, 0);
 	    message(LOG_ERR, "health check: connect %s err=%d",
 		    addrport, errno);
 	    goto fail;
@@ -1765,6 +1865,8 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
+	    addrport2strOnce(sa, salen, (proto & proto_pair_d),
+			     addrport, STRMAX, 0);
 	    message(LOG_ERR, "health check: send %s err=%d",
 		    addrport, errno);
 	    goto fail;
@@ -1799,6 +1901,8 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 #ifdef WINDOWS
 		errno = WSAGetLastError();
 #endif
+		addrport2strOnce(sa, salen, (proto & proto_pair_d),
+				 addrport, STRMAX, 0);
 		message(LOG_ERR, "health check: recv from %s err=%d",
 			addrport, errno);
 		goto fail;
@@ -1806,9 +1910,12 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
 	    len += ret;
 	    buf[len] = '\0';
 	    err = regexec(&chat->expect, buf, 0, NULL, 0);
-	    if (Debug > 8)
+	    if (Debug > 8) {
+		addrport2strOnce(sa, salen, (proto & proto_pair_d),
+				 addrport, STRMAX, 0);
 		message(LOG_DEBUG, "health check: %s regexec=%d",
 			addrport, err);
+	    }
 	    if (len > BUFMAX/2) {
 		bcopy(buf+(len-BUFMAX/2), buf, BUFMAX/2);
 		len = BUFMAX/2;
@@ -1831,8 +1938,11 @@ int healthCheck(struct sockaddr *sa, socklen_t salen,
     closesocket(sd);
     return 1;	/* healthy ! */
  timeout:
-    if (Debug > 8)
+    if (Debug > 8) {
+	addrport2strOnce(sa, salen, (proto & proto_pair_d),
+			 addrport, STRMAX, 0);
 	message(LOG_DEBUG, "health check: %s timeout", addrport);
+    }
  fail:
     shutdown(sd, 2);
 #ifdef USE_EPOLL
@@ -1848,19 +1958,26 @@ void asyncHealthCheck(Backup *b) {
     ASYNC_BEGIN;
     time(&now);
     b->last = now + 60 * 60;	/* suppress further check */
-    addrport2str(&b->check->addr, b->check->len,
-		 (b->proto & proto_pair_d), addrport, STRMAX, 0);
-    addrport[STRMAX] = '\0';
-    if (Debug > 8)
+    addrport[0] = '\0';
+    if (Debug > 8) {
+	addrport2strOnce(&b->check->addr, b->check->len,
+			 (b->proto & proto_pair_d), addrport, STRMAX, 0);
 	message(LOG_DEBUG, "asyncHealthCheck %s", addrport);
+    }
     if (healthCheck(&b->check->addr, b->check->len,
 		    b->proto, b->interval, b->chat)) {	/* healthy ? */
-	if (Debug > 3 || (b->bn && Debug > 1))
+	if (Debug > 3 || (b->bn && Debug > 1)) {
+	    addrport2strOnce(&b->check->addr, b->check->len,
+			     (b->proto & proto_pair_d), addrport, STRMAX, 0);
 	    message(LOG_DEBUG, "health check %s success", addrport);
+	}
 	if (b->bn) b->bn = 0;
     } else {	/* unhealthy */
-	if (Debug > 3 || (b->bn == 0 && Debug > 0))
+	if (Debug > 3 || (b->bn == 0 && Debug > 0)) {
+	    addrport2strOnce(&b->check->addr, b->check->len,
+			     (b->proto & proto_pair_d), addrport, STRMAX, 0);
 	    message(LOG_DEBUG, "health check %s fail", addrport);
+	}
 	if (b->bn == 0) b->bn++;
     }
     b->last = now;
@@ -2193,41 +2310,229 @@ int lbsopts(int argc, int i, char *argv[]) {
     return i;
 }
 
-char *stone2str(Stone *stonep, char *str, int strlen) {
-    struct sockaddr_storage ss;
-    struct sockaddr *sa = (struct sockaddr*)&ss;
-    int salen = sizeof(ss);
+char *stone2str(Stone *stone, char *str, int strlen) {
     int proto;
     char src[STRMAX+1];
-    if (getsockname(stonep->sd, sa, &salen) < 0) {
-#ifdef WINDOWS
-	errno = WSAGetLastError();
-#endif
-	message(LOG_ERR, "stone %d: Can't get socket's name err=%d",
-		stonep->sd, errno);
-	str[0] = '\0';
-	return NULL;
-    }
-    addrport2str(sa, salen, (stonep->proto & proto_stone_s), src, STRMAX, 0);
+    addrport2str(&stone->listen->addr, stone->listen->len,
+		 (stone->proto & proto_stone_s), src, STRMAX, 0);
     src[STRMAX] = '\0';
-    proto = stonep->proto;
+    proto = stone->proto;
     if ((proto & proto_command) == command_proxy) {
-	snprintf(str, strlen, "stone %d: proxy <- %s", stonep->sd, src);
+	snprintf(str, strlen, "stone %d: proxy <- %s", stone->sd, src);
     } else if ((proto & proto_command) == command_health) {
-	snprintf(str, strlen, "stone %d: health <- %s", stonep->sd, src);
+	snprintf(str, strlen, "stone %d: health <- %s", stone->sd, src);
     } else if ((proto & proto_command) == command_identd) {
-	snprintf(str, strlen, "stone %d: identd <- %s", stonep->sd, src);
+	snprintf(str, strlen, "stone %d: identd <- %s", stone->sd, src);
     } else {
 	char dst[STRMAX+1];
-	addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-		     (stonep->proto & proto_stone_d), dst, STRMAX, 0);
+	addrport2str(&stone->dsts[0]->addr, stone->dsts[0]->len,
+		     (stone->proto & proto_stone_d), dst, STRMAX, 0);
 	dst[STRMAX] = '\0';
-	snprintf(str, strlen, "stone %d: %s <- %s", stonep->sd, dst, src);
+	snprintf(str, strlen, "stone %d: %s <- %s", stone->sd, dst, src);
     }
     str[strlen] = '\0';
     return str;
 }
 
+void ungetExBuf(ExBuf *ex) {
+    ExBuf *freeptr = NULL;
+    time_t now;
+    time(&now);
+    waitMutex(ExBufMutex);
+    if (ex->start < 0) {
+	freeMutex(ExBufMutex);
+	message(LOG_ERR, "ungetExBuf duplication. can't happen, ignore");
+	return;
+    }
+    if (now - freeExBotClock > FREE_TIMEOUT) {
+	if (nFreeExBot > 2) {
+	    freeptr = freeExBot->next;
+	    freeExBot->next = NULL;
+	    nFreeExBuf -= (nFreeExBot - 1);
+	} else {
+	    freeExBot = freeExBuf;
+	    nFreeExBot = nFreeExBuf;
+	}
+	freeExBotClock = now;
+    }
+    ex->start = -1;
+    ex->len = 0;
+    ex->next = freeExBuf;
+    freeExBuf = ex;
+    nFreeExBuf++;
+    freeMutex(ExBufMutex);
+    if (freeptr) {
+	if (Debug > 3) message(LOG_DEBUG, "freeExBot %d nfex=%d",
+			       nFreeExBot, nFreeExBuf);
+	freeExBot = NULL;
+	nFreeExBot = 0;
+	while (freeptr) {
+	    ExBuf *p = freeptr;
+	    freeptr = freeptr->next;
+	    free(p);
+	}
+    }
+}
+
+ExBuf *getExBuf(void) {
+    ExBuf *ret = NULL;
+    time_t now;
+    time(&now);
+    waitMutex(ExBufMutex);
+    if (freeExBuf) {
+	ret = freeExBuf;
+	freeExBuf = ret->next;
+	nFreeExBuf--;
+	if (nFreeExBuf < nFreeExBot) {
+	    nFreeExBot = nFreeExBuf;
+	    freeExBot = freeExBuf;
+	    freeExBotClock = now;
+	}
+    }
+    freeMutex(ExBufMutex);
+    if (!ret) {
+	int size = XferBufMax;
+	do {
+	    ret = malloc(sizeof(ExBuf) + size - BUFMAX);
+	} while (!ret && XferBufMax > BUFMAX && (XferBufMax /= 2));
+	if (!ret) {
+	    message(LOG_CRIT, "Out of memory, no ExBuf");
+	    return ret;
+	}
+	ret->bufmax = size;
+    }
+    ret->next = NULL;
+    ret->start = 0;
+    ret->len = 0;
+    return ret;
+}
+
+ExBuf *getExData(Pair *pair, int type, int rmflag) {
+    ExBuf *ex = pair->d;
+    ExBuf *prev = NULL;
+    while (ex) {
+	int t = *(int*)ex->buf;
+	if (t == type) {
+	    if (rmflag) {
+		if (prev) prev->next = ex->next;
+		else pair->d = ex->next;
+	    }
+	    return ex;
+	}
+	prev = ex;
+	ex = ex->next;
+    }
+    return NULL;
+}
+
+ExBuf *newExData(Pair *pair, int type) {
+    ExBuf *ex = getExBuf();
+    if (!ex) return NULL;
+    *(int*)ex->buf = type;
+    ex->next = pair->d;
+    pair->d = ex;
+    return ex;
+}
+
+/* modify dest if needed */
+int modPairDest(Pair *p1, struct sockaddr *dst, socklen_t dstlenmax) {
+    Pair *p2;
+    socklen_t dstlen = 0;
+    int offset = -1;	/* offset in load balancing group */
+#ifdef USE_SSL
+    SSL *ssl;
+#endif
+    p2 = p1->pair;
+    if (p2 == NULL) return -1;
+#ifdef USE_SSL
+    ssl = p2->ssl;
+    if (ssl) {
+	SSL_SESSION *sess = SSL_get1_session(ssl);
+	if (sess) {
+	    unsigned char **match;
+	    if (Debug > 2) {
+		char str[SSL_MAX_SSL_SESSION_ID_LENGTH * 2 + 1];
+		int i;
+		for (i=0; i < sess->session_id_length; i++)
+		    sprintf(&str[i*2], "%02x", sess->session_id[i]);
+		message(LOG_DEBUG, "%d TCP %d: SSL session ID=%s",
+			p2->stone->sd, p2->sd, str);
+	    }
+	    match = SSL_SESSION_get_ex_data(sess, MatchIndex);
+	    if (match && p2->stone->ssl_server) {
+		int lbparm = p2->stone->ssl_server->lbparm;
+		int lbmod = p2->stone->ssl_server->lbmod;
+		unsigned char *s;
+		if (0 <= lbparm && lbparm <= 9) s = match[lbparm];
+		else s = match[1];
+		if (!s) s = match[0];
+		if (lbmod) {
+		    int offset2 = 0;
+		    offset = 0;
+		    while (*s) {
+			if (offset2 >= 0) {
+			    if ('0' <= *s && *s <= '9') {
+				offset2 = offset2 * 10 + (*s - '0');
+			    } else {
+				offset2 = -1;
+			    }
+			}
+			offset <<= 6;
+			offset += (*s & 0x3f);
+			s++;
+		    }
+		    if (offset2 > 0) offset = offset2;
+		    offset %= lbmod;
+		    if (Debug > 2)
+			message(LOG_DEBUG, "%d TCP %d: pair %d lb%d=%d",
+				p1->stone->sd, p1->sd, p2->sd, lbparm, offset);
+		}
+	    }
+	    SSL_SESSION_free(sess);
+	}
+    }
+#endif
+    if (offset < 0 && p1->stone->ndsts > 1) {	/* load balancing */
+	int n = p1->stone->ndsts;
+	offset = (p1->stone->proto & state_mask) % n;
+	if (p1->stone->backups) {
+	    int i;
+	    for (i=0; i < n; i++) {
+		Backup *b = p1->stone->backups[(offset+i) % n];
+		if (!b || b->bn == 0) {	/* no backup or healthy, use it */
+		    offset = (offset+i) % n;
+		    break;
+		}
+		if (Debug > 8)
+		    message(LOG_DEBUG,
+			    "%d TCP %d: ofs=%d is unhealthy, skipped",
+			    p1->stone->sd, p1->sd, (offset+i) % n);
+	    }
+	}
+	/* round robin */
+	p1->stone->proto = ((p1->stone->proto & ~state_mask)
+			    | ((offset+1) & state_mask));
+    }
+    if (offset >= 0) {
+	dstlen = p1->stone->dsts[offset]->len;
+	if (dstlen < dstlenmax)
+	    bcopy(&p1->stone->dsts[offset]->addr, dst, dstlen);
+    }
+    if (p1->stone->backups) {
+	Backup *backup;
+	if (offset >= 0) backup = p1->stone->backups[offset];
+	else backup = p1->stone->backups[0];
+	if (backup) {
+	    backup->used = 2;
+	    if (backup->bn) {	/* unhealthy */
+		dstlen = backup->backup->len;
+		if (dstlen < dstlenmax)
+		    bcopy(&backup->backup->addr, dst, dstlen);
+	    }
+	}
+    }
+    return dstlen;
+}
 
 /* relay UDP */
 
@@ -2616,6 +2921,248 @@ int scanUDP(
     }
     return 1;
 }
+
+#define UDP_HEAD_LEN	2	/* sizeof(short): UDP packet length */
+
+int recvPairUDP(Pair *pair) {
+    Stone *stone = pair->stone;
+    SOCKET sd = pair->sd;
+    Pair *p;
+    ExBuf *ex;
+    ExBuf *t;
+    int len;
+    int flags = 0;
+    struct sockaddr_storage ss;
+    struct sockaddr *from = (struct sockaddr*)&ss;
+    socklen_t fromlen = sizeof(ss);
+    p = pair->pair;
+    if (p == NULL) {	/* no pair, no more read */
+	message(priority(pair), "%d UDP %d: no pair, closing",
+		stone->sd, sd);
+	return -1;
+    }
+    ex = p->b;	/* bottom */
+    if (ex->len > 0) {	/* not emply */
+	ex = getExBuf();
+	if (!ex) return -1;	/* out of memory */
+	if (Debug > 4) message(LOG_DEBUG, "%d UDP %d: get ExBuf nbuf=%d",
+			       stone->sd, p->sd, p->nbuf);
+    }
+    ex->start = 0;
+#ifdef MSG_DONTWAIT
+    if (!(stone->proto & proto_block_d)) flags = MSG_DONTWAIT;
+#endif
+#ifdef MSG_TRUNC
+    flags |= MSG_TRUNC;
+#endif
+    len = recvfrom(sd, ex->buf + UDP_HEAD_LEN,
+		   ex->bufmax - UDP_HEAD_LEN,
+		   flags, from, &fromlen);
+    if (len < 0) {
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	message(LOG_ERR, "%d UDP %d: recvfrom err=%d",
+		stone->sd, sd, errno);
+	if (ex != p->b) ungetExBuf(ex);
+	return -1;
+    }
+    time(&pair->clock);
+    p->clock = pair->clock;
+    pair->rx += len;
+    if (Debug > 8)
+	message(LOG_DEBUG, "%d UDP %d: recvfrom len=%d",
+		stone->sd, sd, len);
+    t = getExData(pair, data_peeraddr, 0);
+    if (t) {
+	SockAddr *peer = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+	if (!saComp(&peer->addr, from))	goto unknown;
+    } else {	/* from unknown */
+	char addrport[STRMAX+1];
+    unknown:
+	addrport2str(from, fromlen, proto_udp, addrport, STRMAX, 0);
+	addrport[STRMAX] = '\0';
+	message(LOG_ERR, "%d UDP %d: received from unknown %s",
+		stone->sd, sd, addrport);
+	if (ex != p->b) ungetExBuf(ex);
+	return -1;
+    }
+    if (ex != p->b) {
+	p->b->next = ex;
+	p->b = ex;
+	p->nbuf++;
+    }
+    ex->buf[0] = ((unsigned)len >> 8);
+    ex->buf[1] = ((unsigned)len % 256);
+    ex->len += UDP_HEAD_LEN + len;
+    return ex->len;
+}
+
+static int sendPairUDPbuf(Stone *stone, Pair *pair, char *buf, int len) {
+    int flags = 0;
+    ExBuf *t;
+    SockAddr *peer;
+    int issrc = ((pair->proto & proto_command) == command_source);
+    SOCKET sd;
+    Pair *p = pair->pair;
+#ifdef MSG_DONTWAIT
+    if (!(stone->proto & proto_block_d)) flags = MSG_DONTWAIT;
+#endif
+    t = getExData(pair, data_peeraddr, 0);
+    if (t) {
+	peer = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+    } else if (!issrc) {
+	int lenmax;
+	int dstlen;
+	t = newExData(pair, data_peeraddr);
+	peer = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+	lenmax = t->bufmax - DATA_HEAD_LEN - SockAddrBaseSize;
+	peer->len = stone->dsts[0]->len;
+	bcopy(&stone->dsts[0]->addr, &peer->addr, peer->len);
+	dstlen = modPairDest(pair, &peer->addr, lenmax);
+	if (dstlen > 0) peer->len = dstlen;	/* dest is modified */
+    } else {
+	message(LOG_ERR, "%d UDP<TCP%d: can't happen: no peer",
+		stone->sd, (p ? p->sd : -1));
+	return -1;
+    }
+    if (issrc) sd = stone->sd;
+    else sd = pair->sd;
+    if (sendto(sd, buf, len, flags, &peer->addr, peer->len) != len) {
+	char addrport[STRMAX+1];
+	addrport2str(&peer->addr, peer->len, proto_udp, addrport, STRMAX, 0);
+	addrport[STRMAX] = '\0';
+#ifdef WINDOWS
+	errno = WSAGetLastError();
+#endif
+	if (issrc) {
+	    message(LOG_ERR, "%d UDP<TCP%d: sendto failed err=%d: to %s",
+		    stone->sd, (p ? p->sd : -1), errno, addrport);
+	} else {
+	    message(LOG_ERR, "%d TCP%d>UDP%d: sendto failed err=%d: to %s",
+		    stone->sd, (p ? p->sd : -1), pair->sd, errno, addrport);
+	}
+	return -1;	/* error */
+    }
+    time(&pair->clock);
+    if (p) p->clock = pair->clock;
+    pair->tx += len;
+    if ((pair->xhost->mode & XHostsMode_Dump) > 0
+	|| ((pair->proto & proto_first_w) && Debug > 3))
+	message_buf(pair, len, "UDP");
+    return 0;	/* success */
+}
+
+int sendPairUDP(Pair *pair) {
+    Stone *stone = pair->stone;
+    ExBuf *next = pair->t;
+    ExBuf *cur = NULL;
+    ExBuf *ex = NULL;	/* dummy init to suppress warnings */
+    unsigned char *buf = NULL;
+    int pos = 0;
+    int len = 0;
+    int err = 0;
+    char prefix[STRMAX+1];
+    if ((pair->proto & proto_command) == command_source) {
+	Pair *p = pair->pair;
+	snprintf(prefix, STRMAX, "%d UDP<TCP%d:",
+		 stone->sd, (p ? p->sd : -1));
+    } else {
+	Pair *p = pair->pair;
+	snprintf(prefix, STRMAX, "%d TCP%d>UDP%d:",
+		 stone->sd, (p ? p->sd : -1), pair->sd);
+    }
+    while (next) {
+	ex = next;
+	next = ex->next;
+	int add;
+	if (ex->len <= 0) {	/* dispose empty buf */
+	    if (ex != pair->b) ungetExBuf(ex);
+	    continue;
+	}
+	if (!cur) {
+	    cur = ex;
+	    buf = (unsigned char*)&cur->buf[cur->start];
+	    pos = cur->len;
+	    len = (buf[0] << 8);
+	    if (pos == 1) {
+		ExBuf *t;
+		for (t=cur->next; t; t=t->next) {
+		    if (t->len > 0) {
+			len += (unsigned)t->buf[t->start];
+			break;
+		    }
+		}
+		if (!t) break;	/* must read header */
+	    } else {	/* assume UDP_HEAD_LEN == 2 */
+		len += buf[1];
+	    }
+	    if (Debug > 8)
+		message(LOG_DEBUG, "%s sendPairUDP len=%d (curbuf=%d)",
+			prefix, len, cur->len);
+	    len += UDP_HEAD_LEN;
+	    if (len > cur->bufmax) {
+		message(LOG_ERR, "%s sendPairUDP packet too large len=%d",
+			prefix, len);
+		err = -1;
+	    } else if (len > cur->bufmax - cur->start) {
+		if (Debug > 6)
+		    message(LOG_DEBUG, "%s sendPairUDP len=%d "
+			    "is larger than (bufmax-start=%d)=%d, move",
+			    prefix, len,
+			    cur->start, cur->bufmax - cur->start);
+		bcopy(cur->buf+cur->start, cur->buf, cur->len);
+		buf = (unsigned char*)cur->buf;
+		cur->start = 0;
+	    }
+	    if (len < cur->len) {	/* cur contains next packet */
+		cur->start += len;
+		cur->len -= len;
+		goto complete;
+	    } else if (len == cur->len) {
+		cur->len = cur->bufmax;	/* mark not to be used */
+		cur->start = 0;
+		goto complete;
+	    } else {
+		cur->len = cur->bufmax;	/* mark not to be used */
+		cur->start = 0;
+	    }
+	    continue;
+	}
+	add = len - pos;
+	if (ex->len > add) {	/* ex contains next packet */
+	    ex->start += add;
+	    ex->len -= add;
+	} else {	/* use entire buf */
+	    add = ex->len;
+	    ex->len = ex->bufmax;	/* mark not to be used */
+	    ex->start = 0;
+	}
+	if (!err) bcopy(ex->buf+ex->start, buf+pos, add);
+	pos += add;
+	if (ex != pair->b) ungetExBuf(ex);
+	if (pos >= len) {	/* complete the packet */
+	complete:
+	    if (!err) err = sendPairUDPbuf(stone, pair,
+					   (char*)(buf+UDP_HEAD_LEN),
+					   len-UDP_HEAD_LEN);
+	    if (cur != pair->b) ungetExBuf(cur);
+	    cur = NULL;
+	}
+    }
+    if (ex == pair->b) {
+	if (ex->len == ex->bufmax) ex->len = 0;
+	pair->t = ex;
+    } else {
+	if (0 < ex->len && ex->len < ex->bufmax) {
+	    pair->t = ex;
+	} else {
+	    pair->t = ex->next;
+	    ungetExBuf(ex);
+	}
+    }
+    return err;
+}
 
 /* relay TCP */
 
@@ -2662,88 +3209,9 @@ void message_pair(int pri, Pair *pair) {
     p = pair->pair;
     if (p) psd = p->sd;
     else psd = INVALID_SOCKET;
-    if (p && p->p) {
-	message(pri, "%d TCP%3d:%3d %08x %d %s %s tx:%d rx:%d lp:%d",
-		pair->stone->sd, sd, psd, pair->proto, pair->count, str, p->p,
-		pair->tx, pair->rx, pair->loop);
-    } else {
-	message(pri, "%d TCP%3d:%3d %08x %d %s tx:%d rx:%d lp:%d",
-		pair->stone->sd, sd, psd, pair->proto, pair->count, str,
-		pair->tx, pair->rx, pair->loop);
-    }
-}
-
-void ungetExBuf(ExBuf *ex) {
-    ExBuf *freeptr = NULL;
-    time_t now;
-    time(&now);
-    waitMutex(ExBufMutex);
-    if (ex->start < 0) {
-	freeMutex(ExBufMutex);
-	message(LOG_ERR, "ungetExBuf duplication. can't happen, ignore");
-	return;
-    }
-    if (now - freeExBotClock > FREE_TIMEOUT) {
-	if (nFreeExBot > 2) {
-	    freeptr = freeExBot->next;
-	    freeExBot->next = NULL;
-	    nFreeExBuf -= (nFreeExBot - 1);
-	} else {
-	    freeExBot = freeExBuf;
-	    nFreeExBot = nFreeExBuf;
-	}
-	freeExBotClock = now;
-    }
-    ex->start = -1;
-    ex->len = 0;
-    ex->next = freeExBuf;
-    freeExBuf = ex;
-    nFreeExBuf++;
-    freeMutex(ExBufMutex);
-    if (freeptr) {
-	if (Debug > 3) message(LOG_DEBUG, "freeExBot %d nfex=%d",
-			       nFreeExBot, nFreeExBuf);
-	freeExBot = NULL;
-	nFreeExBot = 0;
-	while (freeptr) {
-	    ExBuf *p = freeptr;
-	    freeptr = freeptr->next;
-	    free(p);
-	}
-    }
-}
-
-ExBuf *getExBuf(void) {
-    ExBuf *ret = NULL;
-    time_t now;
-    time(&now);
-    waitMutex(ExBufMutex);
-    if (freeExBuf) {
-	ret = freeExBuf;
-	freeExBuf = ret->next;
-	nFreeExBuf--;
-	if (nFreeExBuf < nFreeExBot) {
-	    nFreeExBot = nFreeExBuf;
-	    freeExBot = freeExBuf;
-	    freeExBotClock = now;
-	}
-    }
-    freeMutex(ExBufMutex);
-    if (!ret) {
-	int size = XferBufMax;
-	do {
-	    ret = malloc(sizeof(ExBuf) + size - BUFMAX);
-	} while (!ret && XferBufMax > BUFMAX && (XferBufMax /= 2));
-	if (!ret) {
-	    message(LOG_CRIT, "Out of memory, no ExBuf");
-	    return ret;
-	}
-	ret->bufmax = size;
-    }
-    ret->next = NULL;
-    ret->start = 0;
-    ret->len = 0;
-    return ret;
+    message(pri, "%d TCP%3d:%3d %08x %d %s tx:%d rx:%d lp:%d",
+	    pair->stone->sd, sd, psd, pair->proto, pair->count, str,
+	    pair->tx, pair->rx, pair->loop);
 }
 
 #ifdef USE_SSL
@@ -2840,7 +3308,7 @@ int doSSL_accept(Pair *pair) {
 			    "shutdowned by peer sf=%x errno=%d",
 			    pair->stone->sd, sd,
 			    pair->ssl_flag, errno);
-		return ret;
+		return -1;	/* shutdowned */
 	    }
 	    message(priority(pair), "%d TCP %d: SSL_accept "
 		    "I/O error sf=%x errno=%d", pair->stone->sd, sd,
@@ -2854,7 +3322,7 @@ int doSSL_accept(Pair *pair) {
 	unsigned long e = ERR_get_error();
 	message(priority(pair), "%d TCP %d: SSL_accept lib %s",
 		pair->stone->sd, sd, ERR_error_string(e, NULL));
-	return ret;
+	return -1;	/* error */
     }
     if (Debug > 4)
 	message(LOG_DEBUG, "%d TCP %d: SSL_accept interrupted sf=%x err=%d",
@@ -2881,6 +3349,14 @@ int doSSL_connect(Pair *pair) {
 	SSL_set_fd(ssl, sd);
 	pair->ssl = ssl;
     }
+#ifndef OPENSSL_NO_TLSEXT
+    if (pair->stone->ssl_client->sslparm & sslparm_sni) {
+	if (!SSL_set_tlsext_host_name(ssl, pair->stone->ssl_client->name)) {
+	    message(LOG_ERR, "%d TCP %d: Can't set TLS servername: %s",
+		    pair->stone->sd, sd, pair->stone->ssl_client->name);
+	}
+    }
+#endif
     pair->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
     pair->proto |= proto_dirty;
     ret = SSL_connect(ssl);
@@ -3075,7 +3551,7 @@ Pair *newPair(void) {
 	pair->timeout = PairTimeOut;
 	pair->count = 0;
 	pair->b = pair->t;
-	pair->p = NULL;
+	pair->d = NULL;
 	pair->log = NULL;
 	pair->tx = 0;
 	pair->rx = 0;
@@ -3094,7 +3570,6 @@ Pair *newPair(void) {
 
 void freePair(Pair *pair) {
     SOCKET sd;
-    char *p;
     TimeLog *log;
 #ifdef USE_SSL
     SSL *ssl;
@@ -3105,10 +3580,13 @@ void freePair(Pair *pair) {
     pair->sd = INVALID_SOCKET;
     if (Debug > 8) message(LOG_DEBUG, "%d TCP %d: freePair",
 			   pair->stone->sd, sd);
-    p = pair->p;
-    if (p) {
-	pair->p = NULL;
-	free(p);
+    ex = pair->d;
+    pair->d = NULL;
+    while (ex) {
+	ExBuf *f = ex;
+	ex = f->next;
+	f->next = NULL;
+	ungetExBuf(f);
     }
     log = pair->log;
     if (log) {
@@ -3195,7 +3673,12 @@ void insertPairs(Pair *p1) {
 void message_time_log(Pair *pair) {
     TimeLog *log = pair->log;
     if (log && log->clock) {
+#ifdef THREAD_UNSAFE
 	struct tm *t = localtime(&log->clock);
+#else
+	struct tm tm;
+	struct tm *t = localtime_r(&log->clock, &tm);
+#endif
 	time_t now;
 	time(&now);
 	message(log->pri, "%02d:%02d:%02d %d %s",
@@ -3290,13 +3773,9 @@ void message_conn(int pri, Conn *conn) {
 int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     struct sockaddr_storage ss;
     struct sockaddr *dst = (struct sockaddr*)&ss;	/* destination */
-    socklen_t dstlen = sizeof(ss);
+    socklen_t dstlen;
     int ret;
     Pair *p2;
-#ifdef USE_SSL
-    SSL *ssl;
-#endif
-    int offset = -1;	/* offset in load balancing group */
     time_t clock;
     char addrport[STRMAX+1];
 #ifdef WINDOWS
@@ -3311,81 +3790,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     time(&clock);
     if (Debug > 8) message(LOG_DEBUG, "%d TCP %d: doconnect",
 			   p1->stone->sd, p1->sd);
-#ifdef USE_SSL
-    ssl = p2->ssl;
-    if (ssl) {
-	SSL_SESSION *sess = SSL_get1_session(ssl);
-	if (sess) {
-	    char **match;
-	    if (Debug > 2) {
-		unsigned char str[SSL_MAX_SSL_SESSION_ID_LENGTH * 2 + 1];
-		int i;
-		for (i=0; i < sess->session_id_length; i++)
-		    sprintf(&str[i*2], "%02x", sess->session_id[i]);
-		message(LOG_DEBUG, "%d TCP %d: SSL session ID=%s",
-			p2->stone->sd, p2->sd, str);
-	    }
-	    match = SSL_SESSION_get_ex_data(sess, MatchIndex);
-	    if (match && p2->stone->ssl_server) {
-		int lbparm = p2->stone->ssl_server->lbparm;
-		int lbmod = p2->stone->ssl_server->lbmod;
-		unsigned char *s;
-		if (0 <= lbparm && lbparm <= 9) s = match[lbparm];
-		else s = match[1];
-		if (!s) s = match[0];
-		if (lbmod) {
-		    offset = 0;
-		    while (*s) {
-			offset <<= 6;
-			offset += (*s & 0x3f);
-			s++;
-		    }
-		    offset %= lbmod;
-		    if (Debug > 2)
-			message(LOG_DEBUG, "%d TCP %d: pair %d lb%d=%d",
-				p1->stone->sd, p1->sd, p2->sd, lbparm, offset);
-		}
-	    }
-	    SSL_SESSION_free(sess);
-	}
-    }
-#endif
-    if (offset < 0 && p1->stone->ndsts > 1) {	/* load balancing */
-	int n = p1->stone->ndsts;
-	offset = (p1->stone->proto & state_mask) % n;
-	if (p1->stone->backups) {
-	    int i;
-	    for (i=0; i < n; i++) {
-		Backup *b = p1->stone->backups[(offset+i) % n];
-		if (!b || b->bn == 0) {	/* no backup or healthy, use it */
-		    offset = (offset+i) % n;
-		    break;
-		}
-		if (Debug > 8)
-		    message(LOG_DEBUG, "%d TCP %d: ofs=%d is unhealthy, skipped",
-			    p1->stone->sd, p1->sd, (offset+i) % n);
-	    }
-	}
-	/* round robin */
-	p1->stone->proto = ((p1->stone->proto & ~state_mask)
-			    | ((offset+1) & state_mask));
-    }
-    if (offset >= 0) {
-	dstlen = p1->stone->dsts[offset]->len;
-	bcopy(&p1->stone->dsts[offset]->addr, dst, dstlen);
-    }
-    if (p1->stone->backups) {
-	Backup *backup;
-	if (offset >= 0) backup = p1->stone->backups[offset];
-	else backup = p1->stone->backups[0];
-	if (backup) {
-	    backup->used = 2;
-	    if (backup->bn) {	/* unhealthy */
-		dstlen = backup->backup->len;
-		bcopy(&backup->backup->addr, dst, dstlen);
-	    }
-	}
-    }
+    ret = modPairDest(p1, dst, sizeof(ss));
+    if (ret > 0) dstlen = ret;	/* dest is modified */
     /*
       now destination is determined, engage
     */
@@ -3397,11 +3803,13 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 	fcntl(p1->sd, F_SETFL, O_NONBLOCK);
 #endif
     }
-    addrport2str(dst, dstlen, (p1->proto & proto_pair_d), addrport, STRMAX, 0);
-    addrport[STRMAX] = '\0';
-    if (Debug > 2)
+    addrport[0] = '\0';
+    if (Debug > 2) {
+	addrport2strOnce(dst, dstlen, (p1->proto & proto_pair_d),
+			 addrport, STRMAX, 0);
 	message(LOG_DEBUG, "%d TCP %d: connecting to TCP %d %s",
 		p1->stone->sd, p2->sd, p1->sd, addrport);
+    }
     ret = connect(p1->sd, dst, dstlen);
     if (ret < 0) {
 #ifdef WINDOWS
@@ -3418,6 +3826,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		message(LOG_DEBUG, "%d TCP %d: connect interrupted",
 			p1->stone->sd, p1->sd);
 	    if (clock - p1->clock < CONN_TIMEOUT) return 0;
+	    addrport2strOnce(dst, dstlen, (p1->proto & proto_pair_d),
+			     addrport, STRMAX, 0);
 	    message(priority(p2), "%d TCP %d: connect timeout to %s",
 		    p2->stone->sd, p2->sd, addrport);
 	} else if (errno == EISCONN || errno == EADDRINUSE
@@ -3431,6 +3841,8 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 		message_pair(LOG_DEBUG, p1);
 	    }
 	} else {
+	    addrport2strOnce(dst, dstlen, (p1->proto & proto_pair_d),
+			     addrport, STRMAX, 0);
 	    message(priority(p1),
 		    "%d TCP %d: can't connect err=%d: to %s",
 		    p1->stone->sd, p1->sd, errno, addrport);
@@ -3592,24 +4004,24 @@ int scanConns(void) {
     return 1;
 }
 
-Pair *acceptPair(Stone *stonep) {
+Pair *acceptPair(Stone *stone) {
     struct sockaddr_storage ss;
     struct sockaddr *from = (struct sockaddr*)&ss;
     socklen_t fromlen = sizeof(ss);
     Pair *pair;
-    SOCKET nsd = accept(stonep->sd, from, &fromlen);
+    SOCKET nsd = accept(stone->sd, from, &fromlen);
     if (InvalidSocket(nsd)) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
 #endif
 	if (errno == EINTR) {
 	    if (Debug > 4)
-		message(LOG_DEBUG, "stone %d: accept interrupted", stonep->sd);
+		message(LOG_DEBUG, "stone %d: accept interrupted", stone->sd);
 	    return NULL;
 	} else if (errno == EAGAIN) {
 	    if (Debug > 4)
 		message(LOG_DEBUG, "stone %d: accept no connection",
-			stonep->sd);
+			stone->sd);
 	    return NULL;
 	}
 #ifndef NO_FORK
@@ -3617,13 +4029,13 @@ Pair *acceptPair(Stone *stonep) {
 	    return NULL;
 	}
 #endif
-	message(LOG_ERR, "stone %d: accept error err=%d", stonep->sd, errno);
+	message(LOG_ERR, "stone %d: accept error err=%d", stone->sd, errno);
 	return NULL;
     }
     pair = newPair();
     if (!pair) {
 	message(LOG_CRIT, "stone %d: out of memory, closing TCP %d",
-		stonep->sd, nsd);
+		stone->sd, nsd);
 	closesocket(nsd);
 	freePair(pair);
 	return NULL;
@@ -3631,10 +4043,10 @@ Pair *acceptPair(Stone *stonep) {
     bcopy(&fromlen, pair->t->buf, sizeof(fromlen));	/* save to ExBuf */
     bcopy(from, pair->t->buf + sizeof(fromlen), fromlen);
     pair->sd = nsd;
-    pair->stone = stonep;
-    pair->proto = ((stonep->proto & proto_pair_s & ~proto_command) |
+    pair->stone = stone;
+    pair->proto = ((stone->proto & proto_pair_s & ~proto_command) |
 		   proto_first_r | proto_first_w | command_source);
-    pair->timeout = stonep->timeout;
+    pair->timeout = stone->timeout;
     return pair;
 }
 
@@ -3837,65 +4249,60 @@ int getident(char *str, struct sockaddr *sa, socklen_t salen,
 }
 
 int acceptCheck(Pair *pair1) {
-    struct sockaddr_storage ss1, ss2;
-    struct sockaddr *from = (struct sockaddr*)&ss1;
-    socklen_t fromlen = sizeof(ss1);
-    struct sockaddr *to = (struct sockaddr*)&ss2;
-    socklen_t tolen = sizeof(ss2);
-    Stone *stonep = pair1->stone;
+    struct sockaddr_storage ss;
+    struct sockaddr *from = (struct sockaddr*)&ss;
+    socklen_t fromlen = sizeof(ss);
+    Stone *stone = pair1->stone;
     Pair *pair2 = NULL;
     int satype;
     int saproto = 0;
-    int len;
 #ifdef ENLARGE
     int prevXferBufMax = XferBufMax;
 #endif
     XHosts *xhost;
     char ident[STRMAX+1];
     char fromstr[STRMAX*2+1];
-    len = 0;
+    int fslen;
+    fslen = 0;
     ident[0] = '\0';
     bcopy(pair1->t->buf, &fromlen, sizeof(fromlen));	/* restore */
-    if (0 < fromlen && fromlen <= sizeof(ss1)) {
+    if (0 < fromlen && fromlen <= sizeof(ss)) {
 	bcopy(pair1->t->buf + sizeof(fromlen), from, fromlen);
     } else {
 	message(LOG_ERR, "%d TCP %d: acceptCheck Can't happen fromlen=%d",
-		stonep->sd, pair1->sd, fromlen);
+		stone->sd, pair1->sd, fromlen);
 	if (getpeername(pair1->sd, from, &fromlen) < 0) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
 	    message(LOG_ERR,
 		    "%d TCP %d: acceptCheck Can't get peer's name err=%d",
-		    stonep->sd, pair1->sd, errno);
+		    stone->sd, pair1->sd, errno);
 	    return 0;
 	}
     }
-    if (stonep->proto & proto_ident) {
-	if (getsockname(pair1->sd, to, &tolen) < 0) {
-#ifdef WINDOWS
-	    errno = WSAGetLastError();
-#endif
-	    message(LOG_ERR, "stone %d: acceptCheck "
-		    "Can't get socket's name sd=%d err=%d",
-		    stonep->sd, pair1->sd, errno);
-	    shutdown(pair1->sd, 2);
-	    return 0;
-	}
-	if (getident(ident, from, fromlen, stonep->port, to, tolen)) {
+    if (stone->proto & proto_ident) {
+	if (getident(ident, from, fromlen, stone->port,
+		     &stone->listen->addr, stone->listen->len)) {
+	    ExBuf *t = newExData(pair1, data_identuser);
 	    strncpy(fromstr, ident, STRMAX);	/* (size of ident) <= STRMAX */
 	    fromstr[STRMAX] = '\0';
-	    len = strlen(fromstr);
-	    fromstr[len++] = '@';  /* omit size check, because len <= STRMAX */
+	    fslen = strlen(fromstr);
+	    if (t) {
+		strcpy(t->buf + DATA_HEAD_LEN, fromstr);
+		t->len = DATA_HEAD_LEN + fslen;
+	    }
+	    /* omit size check, because fslen <= STRMAX */
+	    fromstr[fslen++] = '@';
 	}
     }
-    addrport2str(from, fromlen, (stonep->proto & proto_stone_s),
-		 fromstr+len, STRMAX*2-len, 0);
-    fromstr[STRMAX*2] = '\0';
-    xhost = checkXhost(stonep->xhosts, from, fromlen);
+    fromstr[fslen] = '\0';
+    xhost = checkXhost(stone->xhosts, from, fromlen);
     if (!xhost) {
+	addrport2strOnce(from, fromlen, (stone->proto & proto_stone_s),
+			 fromstr+fslen, STRMAX*2-fslen, 0);
 	message(LOG_WARNING, "stone %d: access denied: from %s",
-		stonep->sd, fromstr);
+		stone->sd, fromstr);
 	shutdown(pair1->sd, 2);
 	return 0;
     }
@@ -3917,27 +4324,32 @@ int acceptCheck(Pair *pair1) {
 	str[STRMAX] = '\0';
 	strntime(tstr, STRMAX, &clock, -1);
 	tstr[STRMAX] = '\0';
+	addrport2strOnce(from, fromlen, (stone->proto & proto_stone_s),
+			 fromstr+fslen, STRMAX*2-fslen, 0);
 	fprintf(AccFp, "%s%d[%d] %s[%s]%d\n",
-		tstr, stonep->port, stonep->sd, fromstr, str, port);
+		tstr, stone->port, stone->sd, fromstr, str, port);
 		
     }
-    if ((xhost->mode & XHostsMode_Dump) > 0 || Debug > 1)
+    if ((xhost->mode & XHostsMode_Dump) > 0 || Debug > 1) {
+	addrport2strOnce(from, fromlen, (stone->proto & proto_stone_s),
+			 fromstr+fslen, STRMAX*2-fslen, 0);
 	message(LOG_DEBUG, "stone %d: accepted TCP %d from %s mode=%d",
-		stonep->sd, pair1->sd, fromstr, xhost->mode);
+		stone->sd, pair1->sd, fromstr, xhost->mode);
+    }
     pair2 = newPair();
     if (!pair2) {
 	message(LOG_CRIT, "stone %d: out of memory, closing TCP %d",
-		stonep->sd, pair1->sd);
+		stone->sd, pair1->sd);
 	if (pair2) freePair(pair2);
 	return 0;
     }
-    pair2->stone = stonep;
+    pair2->stone = stone;
     pair1->xhost = pair2->xhost = xhost;
-    pair2->proto = ((stonep->proto & proto_pair_d) |
+    pair2->proto = ((stone->proto & proto_pair_d) |
 		    proto_first_r | proto_first_w);
-    pair2->timeout = stonep->timeout;
+    pair2->timeout = stone->timeout;
     /* now successfully accepted */
-    if (!(stonep->proto & proto_block_d)) {
+    if (!(stone->proto & proto_block_d)) {
 #ifdef WINDOWS
 	u_long param;
 	param = 1;
@@ -3947,7 +4359,7 @@ int acceptCheck(Pair *pair1) {
 #endif
     }
 #ifdef USE_SSL
-    if (stonep->proto & proto_ssl_s) {
+    if (stone->proto & proto_ssl_s) {
 	if (doSSL_accept(pair1) < 0) goto error;
     } else
 #endif	/* src & pair1 is connected */
@@ -3956,7 +4368,8 @@ int acceptCheck(Pair *pair1) {
       SSL connection may not be established yet,
       but we can prepare the pair for connecting to the destination
     */
-    if (stonep->proto & proto_udp_d) {
+    if (stone->proto & proto_udp_d) {
+	pair2->proto |= proto_dgram;
 	satype = SOCK_DGRAM;
 	saproto = IPPROTO_UDP;
     } else {
@@ -3964,13 +4377,13 @@ int acceptCheck(Pair *pair1) {
 	saproto = IPPROTO_TCP;
     }
 #ifdef AF_LOCAL
-    if (stonep->proto & proto_unix_d) {
+    if (stone->proto & proto_unix_d) {
 	saproto = 0;
 	pair2->sd = socket(AF_LOCAL, satype, saproto);
     } else
 #endif
 #ifdef AF_INET6
-    if (stonep->proto & proto_v6_d)
+    if (stone->proto & proto_v6_d)
 	pair2->sd = socket(AF_INET6, satype, saproto);
     else
 #endif
@@ -3980,24 +4393,24 @@ int acceptCheck(Pair *pair1) {
 	errno = WSAGetLastError();
 #endif
 	message(priority(pair1), "%d TCP %d: can't create socket err=%d",
-		stonep->sd, pair1->sd, errno);
+		stone->sd, pair1->sd, errno);
 #ifdef USE_SSL
     error:
 #endif
 	freePair(pair2);
 	return 0;
     }
-    if (stonep->from) {
-	if (bind(pair2->sd, &stonep->from->addr, stonep->from->len) < 0) {
+    if (stone->from) {
+	if (bind(pair2->sd, &stone->from->addr, stone->from->len) < 0) {
 	    char str[STRMAX+1];
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
-	    addrport2str(&stonep->from->addr, stonep->from->len, 0,
+	    addrport2str(&stone->from->addr, stone->from->len, 0,
 			 str, STRMAX, 0);
 	    str[STRMAX] = '\0';
 	    message(LOG_ERR, "stone %d: can't bind %s err=%d",
-		    stonep->sd, str, errno);
+		    stone->sd, str, errno);
 	}
     }
     pair2->pair = pair1;
@@ -4043,45 +4456,86 @@ int strnAddr(char *buf, int limit, SOCKET sd, int which, int isport) {
 
 #ifdef SO_PEERCRED
 #include <pwd.h>
-int strnUser(char *buf, int limit, SOCKET sd, int which,
-	     struct ucred *crp, int *cretp) {
+#endif
+
+int strnUser(char *buf, int limit, Pair *pair, int which) {
+#if defined(AF_LOCAL) && defined(SO_PEERCRED)
+    Stone *stone = pair->stone;
+#endif
+    ExBuf *ex;
     int len;
     char str[STRMAX+1];
-    if (*cretp < -1) {
-	len = sizeof(*crp);
-	*cretp = getsockopt(sd, SOL_SOCKET, SO_PEERCRED, crp, &len);
-    }
-    if (*cretp < 0) {
-	
-    }
-    switch (which) {
-    case 1:	/* gid */
-	snprintf(str, STRMAX, "%d", (*cretp >= 0 ? crp->gid : -1));
-	break;
-    case 2:	/* user name */
-	*str = '\0';
-	if (*cretp >= 0) {
-	    struct passwd *passwd = getpwuid(crp->uid);
-	    if (passwd) snprintf(str, STRMAX, "%s", passwd->pw_name);
+    str[0] = '\0';
+    if (which == 2 && (ex = getExData(pair, data_identuser, 0))) {
+	len = ex->len - DATA_HEAD_LEN;
+	strncpy(str, ex->buf + DATA_HEAD_LEN, len);
+	str[len] = '\0';
+    } else
+#if defined(AF_LOCAL) && defined(SO_PEERCRED)
+    if (stone->listen->addr.sa_family == AF_LOCAL) {
+	struct ucred *cred = NULL;
+	ex = getExData(pair, data_ucred, 0);
+	if (ex) {
+	    cred = (struct ucred*)(ex->buf + DATA_HEAD_LEN);
+	} else {
+	    socklen_t optlen = sizeof(*cred);
+	    ex = newExData(pair, data_ucred);
+	    if (ex) {
+		cred = (struct ucred*)(ex->buf + DATA_HEAD_LEN);
+		if (getsockopt(pair->sd, SOL_SOCKET, SO_PEERCRED,
+			       cred, &optlen) < 0) {
+		    message(LOG_ERR, "%d TCP %d: Can't get PEERCRED err=%d",
+			    stone->sd, pair->sd, errno);
+		    ungetExBuf(ex);
+		    cred = NULL;
+		}
+	    }
 	}
-	break;
-    case 3:	/* group name */
-	*str = '\0';
-	if (*cretp >= 0) {
-	    struct group *group = getgrgid(crp->gid);
-	    if (group) snprintf(str, STRMAX, "%s", group->gr_name);
+	switch (which) {
+	case 1:	/* gid */
+	    snprintf(str, STRMAX, "%d", (cred ? cred->gid : -1));
+	    break;
+	case 2:	/* user name */
+	    *str = '\0';
+	    if (cred) {
+#ifdef THREAD_UNSAFE
+		struct passwd *passwd = getpwuid(cred->uid);
+		if (passwd) snprintf(str, STRMAX, "%s", passwd->pw_name);
+#else
+		struct passwd pwbuf;
+		char sbuf[STRMAX+1];
+		struct passwd *passwd;
+		int ret = getpwuid_r(cred->uid, &pwbuf, sbuf, STRMAX, &passwd);
+		if (ret == 0) snprintf(str, STRMAX, "%s", passwd->pw_name);
+#endif
+	    }
+	    break;
+	case 3:	/* group name */
+	    *str = '\0';
+	    if (cred) {
+#ifdef THREAD_UNSAFE
+		struct group *group = getgrgid(cred->gid);
+		if (group) snprintf(str, STRMAX, "%s", group->gr_name);
+#else
+		struct group gbuf;
+		char sbuf[STRMAX+1];
+		struct group *group;
+		int ret = getgrgid_r(cred->gid, &gbuf, sbuf, STRMAX, &group);
+		if (ret == 0) snprintf(str, STRMAX, "%s", group->gr_name);
+#endif
+	    }
+	    break;
+	default:	/* uid */
+	    snprintf(str, STRMAX, "%d", (cred ? cred->uid : -1));
+	    break;
 	}
-	break;
-    default:	/* uid */
-	snprintf(str, STRMAX, "%d", (*cretp >= 0 ? crp->uid : -1));
-	break;
     }
+#endif
     len = strlen(str);
     if (len > limit) len = limit;
     strncpy(buf, str, len);
     return len;
 }
-#endif
 
 int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
     int i = 0;
@@ -4092,10 +4546,6 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
     SSL *ssl = pair->ssl;
     SSL_SESSION *sess = NULL;
     int cond;
-#endif
-#ifdef SO_PEERCRED
-    struct ucred cr;
-    int cret = -2;
 #endif
     p = *pp;
     while (i < limit && (c = *p++)) {
@@ -4163,24 +4613,18 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 		if (buf) i += strnAddr(buf+i, limit-i, pair->sd, 1, 1);
 		continue;
 #endif
-#ifdef SO_PEERCRED
 	    case 'u':
-		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 0,
-				       &cr, &cret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 0);
 		continue;
 	    case 'g':
-		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 1,
-				       &cr, &cret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 1);
 		continue;
 	    case 'U':
-		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 2,
-				       &cr, &cret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 2);
 		continue;
 	    case 'G':
-		if (buf) i += strnUser(buf+i, limit-i, pair->sd, 3,
-				       &cr, &cret);
+		if (buf) i += strnUser(buf+i, limit-i, pair, 3);
 		continue;
-#endif
 	    case '\0':
 		c = '\\';
 		p--;
@@ -4265,26 +4709,12 @@ int scanClose(Pair *pairs) {	/* scan close request */
 	freeMutex(PairMutex);
 	if (trash.next) trash.next->prev = p2;	/* push `p2' to trash */
 	p2->prev = &trash;
+	p2->pair = NULL;
 	p2->count = REF_UNIT;
 	p2->next = trash.next;
 	trash.next = p2;
     }
     return 1;
-}
-
-void message_buf(Pair *pair, int len, char *str) {	/* dump for debug */
-    char head[STRMAX+1];
-    Pair *p = pair->pair;
-    if (p == NULL) return;
-    head[STRMAX] = '\0';
-    if ((pair->proto & proto_command) == command_source) {
-	snprintf(head, STRMAX, "%d %s%d<%d",
-		 pair->stone->sd, str, pair->sd, p->sd);
-    } else {
-	snprintf(head, STRMAX, "%d %s%d>%d",
-		 pair->stone->sd, str, p->sd, pair->sd);
-    }
-    packet_dump(head, pair->t->buf + pair->t->start, len, pair->xhost);
 }
 
 void message_pairs(int pri) {	/* dump for debug */
@@ -4479,7 +4909,9 @@ static unsigned char basis_64[] =
 
 int baseEncode(unsigned char *buf, int len, int max) {
     unsigned char *org = buf + max - len;
-    unsigned char c1, c2, c3;
+    unsigned char c1;
+    unsigned char c2 = 0;	/* dummy init to suppress warnings */
+    unsigned char c3 = 0;
     int blen = 0;
     int i;
     bcopy(buf, org, len);
@@ -4596,8 +5028,8 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: get ExBuf nbuf=%d",
 			       pair->stone->sd, p->sd, p->nbuf);
     }
-    bufmax = ex->bufmax - ex->start;
-    start = ex->start;
+    bufmax = ex->bufmax - ex->start - ex->len;
+    start = ex->start + ex->len;
     if (p->proto & proto_base) bufmax = (bufmax - 1) / 4 * 3;
     else if (pair->proto & proto_base) {
 	if (!(pair->proto & proto_first_r)) {
@@ -4719,10 +5151,10 @@ int doread(Pair *pair) {	/* read into buf from pair->pair->b->start */
 	time(&pair->clock);
 	p->clock = pair->clock;
 	if (p->proto & proto_base) {
-	    ex->len = baseEncode(&ex->buf[ex->start], ex->len,
+	    ex->len = baseEncode((unsigned char*)&ex->buf[ex->start], ex->len,
 				 ex->bufmax - ex->start);
 	} else if (pair->proto & proto_base) {
-	    ex->len = baseDecode(&ex->buf[ex->start], ex->len,
+	    ex->len = baseDecode((unsigned char*)&ex->buf[ex->start], ex->len,
 				 ex->buf+ex->bufmax-1);
 	    len = *(ex->buf+ex->bufmax-1);
 	    if (Debug > 4 && len > 0) {	/* len < 4 */
@@ -4778,8 +5210,8 @@ int commOutput(Pair *pair, char *fmt, ...) {
     vsnprintf(str, ex->bufmax-1 - (ex->start + ex->len), fmt, ap);
     va_end(ap);
     if (p->proto & proto_base)
-	ex->len += baseEncode(str, strlen(str),
-			       ex->bufmax-1 - (ex->start + ex->len));
+	ex->len += baseEncode((unsigned char*)str, strlen(str),
+			      ex->bufmax-1 - (ex->start + ex->len));
     else ex->len += strlen(str);
     p->proto |= (proto_select_w | proto_dirty);	/* need to write */
     return ex->len;
@@ -4909,7 +5341,7 @@ int doproxy(Pair *pair, char *host, char *serv) {
 	    XPorts *ports;
 	    XHosts *xhost;
 	    int isok = 0;
-	    short port = getport(sa);
+	    int port = getport(sa);
 	    for (ports=pxh->ports; ports; ports=ports->next) {
 		if (ports->from <= port && port <= ports->end) {
 		    isok = 1;
@@ -4962,13 +5394,26 @@ int doproxy(Pair *pair, char *host, char *serv) {
 	) {
 	SOCKET nsd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
 	if (ValidSocket(nsd)) {
+	    Pair *p = pair->pair;
+#ifdef USE_EPOLL
+	    struct epoll_event ev;
+	    ev.events = EPOLLONESHOT;
+	    ev.data.ptr = pair;
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, nsd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: reopen "
+			"epoll_ctl %d ADD err=%d",
+			pair->stone->sd, nsd, ePollFd, errno);
+	    }
+#endif
 	    pair->sd = nsd;
-	    message(LOG_INFO, "stone %d: close %d, reopen %d as family=%d",
-		    pair->stone->sd, sd, nsd, sa->sa_family);
+	    message(LOG_INFO, "%d TCP %d: close %d %08x, "
+		    "reopen %d as family=%d",
+		    pair->stone->sd, (p ? p->sd : INVALID_SOCKET),
+		    sd, pair->proto, nsd, sa->sa_family);
 	    closesocket(sd);
 	}
     }
-    pair->proto &= ~proto_command;
+    pair->proto &= ~(proto_connect | proto_command);
     if (reqconn(pair, sa, salen) < 0) return -1;
     if ((pair->proto & state_mask) == 1) {
 	if (Debug > 7) message(LOG_DEBUG, "%d TCP %d: command_proxy again",
@@ -5096,15 +5541,23 @@ Comm proxyComm[] = {
 #ifdef USE_POP
 int popUSER(Pair *pair, char *parm, int start) {
     int ulen, tlen;
+    char *data;
+    ExBuf *ex = getExData(pair, data_apop, 0);
+    if (!ex) {
+	message(LOG_ERR, "%d TCP %d: popUSER Can't happen no ExData",
+		pair->stone->sd, pair->sd);
+	return -1;
+    }
+    data = ex->buf + DATA_HEAD_LEN;
     if (Debug) message(LOG_DEBUG, ": USER %s", parm);
     ulen = strlen(parm);
-    tlen = strlen(pair->p);
+    tlen = strlen(data);
     if (ulen + 1 + tlen + 1 >= BUFMAX-1) {
 	commOutput(pair, "+Err Too long user name\r\n");
 	return -1;
     }
-    bcopy(pair->p, pair->p + ulen + 1, tlen + 1);
-    strcpy(pair->p, parm);
+    bcopy(data, data + ulen + 1, tlen + 1);
+    strcpy(data, parm);
     commOutput(pair, "+OK Password required for %s\r\n", parm);
     pair->proto &= ~state_mask;
     pair->proto |= 1;
@@ -5119,29 +5572,34 @@ int popPASS(Pair *pair, char *parm, int start) {
     char *str;
     int ulen, tlen, plen, i;
     int state = (pair->proto & state_mask);
-    ExBuf *ex = pair->b;	/* bottom */
-    char *p = pair->p;
-    pair->p = NULL;
+    ExBuf *ex;
+    ExBuf *t;
+    char *data;
+    int max;
     if (Debug > 5) message(LOG_DEBUG, ": PASS %s", parm);
     if (state < 1) {
 	commOutput(pair, "-ERR USER first\r\n");
 	return -2;	/* read more */
     }
-    ulen = strlen(p);
-    str = p + ulen + 1;
+    t = getExData(pair, data_apop, 1);
+    data = t->buf + DATA_HEAD_LEN;
+    max = t->bufmax - DATA_HEAD_LEN;
+    ulen = strlen(data);
+    str = data + ulen + 1;
     tlen = strlen(str);
     plen = strlen(parm);
-    if (ulen + 1 + tlen + plen + 1 >= BUFMAX-1) {
+    if (ulen + 1 + tlen + plen + 1 >= max-1) {
 	commOutput(pair, "+Err Too long password\r\n");
 	return -1;
     }
     strcat(str, parm);
-    sprintf(ex->buf, "APOP %s ", p);
+    ex = pair->b;	/* bottom */
+    sprintf(ex->buf, "APOP %s ", data);
     ulen = strlen(ex->buf);
     MD5Init(&context);
     MD5Update(&context, str, tlen + plen);
     MD5Final(digest, &context);
-    free(p);
+    ungetExBuf(t);
     for (i=0; i < DIGEST_LEN; i++) {
 	sprintf(ex->buf + ulen + i*2, "%02x", digest[i]);
     }
@@ -5413,15 +5871,19 @@ int healthCONFIG(Pair *pair, char *parm, int start) {
 int healthSTONE(Pair *pair, char *parm, int start) {
     Stone *stone;
     char str[STRMAX+1];
-    for (stone=stones; stone != NULL; stone=stone->next)
+    for (stone=stones; stone != NULL; stone=stone->next) {
+	Stone *child;
+	for (child=stone->children; child != NULL; child=child->children)
+	    commOutput(pair, "200-%s\n", stone2str(child, str, STRMAX));
 	commOutput(pair, "200%c%s\n", (stone->next ? '-' : ' '),
 		   stone2str(stone, str, STRMAX));
+    }
     return -2;	/* read more */
 }
 
 int healthLIMIT(Pair *pair, char *parm, int start) {
     Comm *comm = limitComm;
-    char *q;
+    char *q = NULL;
     while (comm->str) {
 	if ((q=comm_match(parm, comm->str)) != NULL) break;
 	comm++;
@@ -5587,7 +6049,7 @@ int first_read(Pair *pair) {
 	    break;
 #ifdef USE_POP
 	case command_pop:
-	    if (p->p) len = docomm(p, popComm);
+	    if (getExData(p, data_apop, 0)) len = docomm(p, popComm);
 	    break;
 #endif
 	case command_health:
@@ -5638,22 +6100,22 @@ int first_read(Pair *pair) {
     }
 #ifdef USE_POP
     if ((pair->proto & proto_command) == command_pop	/* apop */
-	&& pair->p == NULL) {
+	&& !getExData(pair, data_apop, 0)) {
 	int i;
 	char *q;
 	for (i=ex->start; i < ex->start + ex->len; i++) {
 	    if (ex->buf[i] == '<') {	/* time stamp of APOP banner */
-		q = pair->p = malloc(BUFMAX);
-		if (!q) {
-		    message(LOG_CRIT, "%d TCP %d: out of memory",
-			    stone->sd, sd);
-		    break;
-		}
+		ExBuf *t = newExData(pair, data_apop);
+		if (!t) break;
+		q = t->buf + DATA_HEAD_LEN;
 		for (; i < ex->start + ex->len; i++) {
 		    *q++ = ex->buf[i];
 		    if (ex->buf[i] == '>') break;
 		}
 		*q = '\0';
+		if (Debug > 6)
+		    message(LOG_DEBUG, "%d TCP %d: APOP challenge: %s",
+			    stone->sd, sd, t->buf + DATA_HEAD_LEN);
 		break;
 	    }
 	}
@@ -5718,6 +6180,10 @@ void proto2fdset(Pair *pair, int isthread,
     } else
 #endif
     if (pair->proto & proto_close) {
+	if (ValidSocket(sd)) {
+	    pair->sd = INVALID_SOCKET;
+	    closesocket(sd);
+	}
 	return;
     } else if (pair->proto & proto_conninprog) {
 #ifdef USE_EPOLL
@@ -5839,12 +6305,14 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		    int ready_r, int ready_w, int ready_e,
 		    int hangup, int error) {
     Pair *rPair, *wPair;
+    Stone *stone;
     SOCKET stsd, sd, rsd, wsd;
     int len;
     int ret = RW_CONTINUE;	/* assume to continue */
     sd = pair->sd;
     if (InvalidSocket(sd)) return ret;
-    stsd = pair->stone->sd;
+    stone = pair->stone;
+    stsd = stone->sd;
     pair->loop++;
     if (hangup && (pair->proto & proto_connect)) ready_r = 1;
     if ((pair->proto & proto_conninprog)
@@ -5860,14 +6328,14 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 #endif
 	    message(LOG_ERR, "%d TCP %d: getsockopt err=%d", stsd, sd, errno);
 	    pair->proto |= (proto_close | proto_dirty);
-	    opposite->proto |= (proto_close | proto_dirty);
+	    if (opposite) opposite->proto |= (proto_close | proto_dirty);
 	    return RW_LEAVE;	/* leave */
 	}
 	if (optval) {
 	    message(LOG_ERR, "%d TCP %d: connect getsockopt err=%d",
 		    stsd, sd, optval);
 	    pair->proto |= (proto_close | proto_dirty);
-	    opposite->proto |= (proto_close | proto_dirty);
+	    if (opposite) opposite->proto |= (proto_close | proto_dirty);
 	    return RW_LEAVE;	/* leave */
 	} else {	/* succeed in connecting */
 	    if (Debug > 4)
@@ -5914,10 +6382,12 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	pair->proto |= proto_dirty;
 	if (doSSL_connect(pair) < 0) {
 	    /* SSL_connect fails, shutdown pairs */
-	    if (opposite && !(opposite->proto & proto_shutdown))
-		if (doshutdown(opposite, 2) >= 0)
-		    opposite->proto |= (proto_shutdown | proto_dirty);
-	    opposite->proto |= (proto_close | proto_dirty);
+	    if (opposite) {
+		if (!(opposite->proto & proto_shutdown))
+		    if (doshutdown(opposite, 2) >= 0)
+			opposite->proto |= (proto_shutdown | proto_dirty);
+		opposite->proto |= (proto_close | proto_dirty);
+	    }
 	    pair->proto |= (proto_close | proto_dirty);
 	}
     } else if (((pair->ssl_flag & sf_ab_on_r) && ready_r)
@@ -5927,11 +6397,12 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	if (doSSL_accept(pair) < 0) {
 	    /* SSL_accept fails */
 	    pair->proto |= (proto_close | proto_dirty);
-	    opposite->proto |= (proto_close | proto_dirty);
+	    if (opposite) opposite->proto |= (proto_close | proto_dirty);
+	    return RW_LEAVE;	/* leave */
 	}
 	if (pair->proto & proto_connect)
-	    reqconn(opposite, &pair->stone->dsts[0]->addr,
-		    pair->stone->dsts[0]->len);
+	    if (opposite) reqconn(opposite, &stone->dsts[0]->addr,
+				  stone->dsts[0]->len);
 #endif
     } else if (((pair->proto & proto_select_r) && ready_r	/* read */
 #ifdef USE_SSL
@@ -5953,9 +6424,13 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 #endif
 	rPair->proto &= ~proto_select_r;
 	rPair->proto |= proto_dirty;
-	rPair->count += REF_UNIT;
-	len = doread(rPair);
-	rPair->count -= REF_UNIT;
+	if (rPair->proto & proto_dgram) {	/* TCP <= UDP */
+	    len = recvPairUDP(rPair);
+	} else {
+	    rPair->count += REF_UNIT;
+	    len = doread(rPair);
+	    rPair->count -= REF_UNIT;
+	}
 	if (len < 0 || (rPair->proto & proto_close) || wPair == NULL) {
 	    if (len == -2	/* if EOF w/ pair, */
 		&& !(rPair->proto & proto_shutdown)
@@ -5998,19 +6473,32 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 		rPair->proto |= proto_dirty;
 		setclose(rPair, (proto_eof | flag));
 		flag = 0;
-		if (!(wPair->proto & proto_shutdown))
-		    if (doshutdown(wPair, 2) >= 0)
-			flag = proto_shutdown;
-		wPair->proto &= ~proto_select_w;
-		wPair->proto |= proto_dirty;
-		setclose(wPair, flag);
+		if (wPair) {
+		    if (!(wPair->proto & proto_shutdown))
+			if (doshutdown(wPair, 2) >= 0)
+			    flag = proto_shutdown;
+		    wPair->proto &= ~proto_select_w;
+		    wPair->proto |= proto_dirty;
+		    setclose(wPair, flag);
+		}
 	    }
 	} else {
 	    if (len > 0) {
 		int first_flag;
 		first_flag = (rPair->proto & proto_first_r);
 		if (first_flag) len = first_read(rPair);
-		if (len > 0 && ValidSocket(wsd)
+		if (wPair->proto & proto_dgram) {
+		    rPair->proto |= (proto_select_r | proto_dirty);
+		    if (sendPairUDP(wPair) < 0) {
+			int flag = 0;
+			if (!(rPair->proto & proto_shutdown))
+			    if (doshutdown(rPair, 2) >= 0)
+				flag = proto_shutdown;
+			rPair->proto &= ~proto_select_w;
+			rPair->proto |= proto_dirty;
+			setclose(rPair, (proto_eof | flag));
+		    }
+		} else if (len > 0 && ValidSocket(wsd)
 		    && (wPair->proto & proto_connect)
 		    && !(wPair->proto & (proto_shutdown | proto_close))
 		    && !(rPair->proto & proto_close)) {
@@ -6056,12 +6544,14 @@ int doReadWritePair(Pair *pair, Pair *opposite,
 	wPair->count -= REF_UNIT;
 	if (len < 0 || (wPair->proto & proto_close) || rPair == NULL) {
 	    int flag = 0;
-	    if (rPair && ValidSocket(rsd)
-		&& !(rPair->proto & proto_shutdown))
-		if (doshutdown(rPair, 2) >= 0) flag = proto_shutdown;
-	    rPair->proto &= ~proto_select_w;
-	    rPair->proto |= proto_dirty;
-	    setclose(rPair, flag);
+	    if (rPair) {
+		if (ValidSocket(rsd)
+		    && !(rPair->proto & proto_shutdown))
+		    if (doshutdown(rPair, 2) >= 0) flag = proto_shutdown;
+		rPair->proto &= ~proto_select_w;
+		rPair->proto |= proto_dirty;
+		setclose(rPair, flag);
+	    }
 	    flag = 0;
 	    if (!(wPair->proto & proto_shutdown))
 		if (doshutdown(wPair, 2) >= 0) flag = proto_shutdown;
@@ -6122,7 +6612,7 @@ int doReadWritePair(Pair *pair, Pair *opposite,
     } else if (error) {
 	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: error", stsd, sd);
 	pair->proto |= (proto_close | proto_dirty);
-	opposite->proto |= (proto_close | proto_dirty);
+	if (opposite) opposite->proto |= (proto_close | proto_dirty);
 	return RW_LEAVE;	/* leave */
     }
     return ret;
@@ -6169,7 +6659,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	for (i=0; i < npairs; i++) proto2fdset(p[i], 1, &ro, &wo, &eo);
 	if (Debug > 10)
 	    message_select(LOG_DEBUG, "selectReadWrite1", &ro, &wo, &eo);
-	if (select(FD_SETSIZE, &ro, &wo, &eo, &tv) <= 0) goto leave;
+	if (select(FD_SETSIZE, &ro, &wo, &eo, &tv) <= 0) goto exit_loop;
 	if (Debug > 10)
 	    message_select(LOG_DEBUG, "selectReadWrite2", &ro, &wo, &eo);
 	for (i=0; i < npairs; i++) {
@@ -6180,7 +6670,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    if (InvalidSocket(sd)) continue;
 	    ret = doReadWritePair(p[i], p[1-i], FD_ISSET(sd, &ro),
 				  FD_ISSET(sd, &wo), FD_ISSET(sd, &eo), 0, 0);
-	    if (ret == RW_LEAVE) goto leave;
+	    if (ret == RW_LEAVE) goto exit_loop;
 	    if (ret == RW_ONCE) break;		/* read once */
 	    if (ret == RW_EINTR) loop = 0;	/* EINTR */
 	}
@@ -6192,7 +6682,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 			(p[0] ? p[0]->sd : INVALID_SOCKET),
 			(p[1] ? p[1]->sd : INVALID_SOCKET),
 			tx[0], rx[0], tx[1], rx[1]);
-		goto leave;
+		goto exit_loop;
 	    }
 	    rx[0] = p[0]->rx;
 	    tx[0] = p[0]->tx;
@@ -6203,7 +6693,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	    loop = 0;
 	}
     }
- leave:
+ exit_loop:
     for (i=0; i < npairs; i++) {
 	p[i]->proto &= ~proto_thread;
 	p[i]->proto |= proto_dirty;
@@ -6239,7 +6729,7 @@ int doPair(Pair *pair) {
 }
 #endif
 
-void doAcceptConnect(Pair *p1) {
+int doAcceptConnect(Pair *p1) {
     Stone *stone = p1->stone;
     Pair *p2;
     int ret;
@@ -6247,7 +6737,7 @@ void doAcceptConnect(Pair *p1) {
 			   stone->sd, p1->sd);
     if (!acceptCheck(p1)) {
 	freePair(p1);
-	return;
+	return 0;	/* pair is disposed */
     }
     p2 = p1->pair;
     if (p2->proto & proto_ohttp_d) {
@@ -6262,28 +6752,30 @@ void doAcceptConnect(Pair *p1) {
 	ex->len = i;
     }
     ret = -1;
-    if (p1->proto & proto_connect) {
+    if ((p1->proto & proto_connect) || (p1->proto & proto_dgram)) {
 	ret = reqconn(p2, &stone->dsts[0]->addr,	/* 0 is default */
 		      stone->dsts[0]->len);
 	if (ret < 0) {
 	    freePair(p2);
 	    freePair(p1);
-	    return;
+	    return 0;	/* pair is disposed */
 	}
     }
 #ifdef USE_EPOLL
     if (!(p1->proto & proto_close)) {
 	struct epoll_event ev;
 	ev.events = EPOLLONESHOT;
-	ev.data.ptr = p1;
-	if (Debug > 6)
-	    message(LOG_DEBUG, "%d TCP %d: doAcceptConnect1 "
-		    "epoll_ctl %d ADD %x",
-		    stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
-	if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
-	    message(LOG_ERR, "%d TCP %d: doAcceptConnect1 "
-		    "epoll_ctl %d ADD err=%d",
-		    stone->sd, p1->sd, ePollFd, errno);
+	if (!(p1->proto & proto_dgram)) {
+	    ev.data.ptr = p1;
+	    if (Debug > 6)
+		message(LOG_DEBUG, "%d TCP %d: doAcceptConnect1 "
+			"epoll_ctl %d ADD %x",
+			stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
+	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
+		message(LOG_ERR, "%d TCP %d: doAcceptConnect1 "
+			"epoll_ctl %d ADD err=%d",
+			stone->sd, p1->sd, ePollFd, errno);
+	    }
 	}
 	if (!(p2->proto & (proto_noconnect | proto_close))) {
 	    ev.data.ptr = p2;
@@ -6310,9 +6802,11 @@ void doAcceptConnect(Pair *p1) {
 	p1->proto |= proto_dirty;
 	p2->proto |= proto_dirty;
 	insertPairs(p1);
+	return 1;	/* pair is inserted */
     } else {
 	freePair(p2);
 	freePair(p1);
+	return 0;	/* pair is disposed */
     }
 }
 
@@ -6322,88 +6816,110 @@ void asyncAcceptConnect(Pair *pair) {
     ASYNC_END;
 }
 
-void asyncClose(Pair *pair) {
-    SOCKET sd = pair->sd;
-#ifdef USE_SSL
-    int count = 0;
-#ifdef USE_EPOLL
-    int epfd = -1;
-#else
-    fd_set ro, wo;
-    struct timeval tv;
-#endif
-#endif
-    ASYNC_BEGIN;
-    if (InvalidSocket(sd) || (pair->proto & proto_shutdown)) goto exit;
-    if (Debug > 8) message(LOG_DEBUG, "asyncClose");
-#ifdef USE_SSL
-    if (pair->ssl) {
-	int want;
-#ifdef USE_EPOLL
-	int epfd = epoll_create(BACKLOG_MAX);
-	struct epoll_event ev;
-	struct epoll_event evs[1];
-	if (epfd < 0) {
-	    message(LOG_ERR, "asyncClose: can't create epoll err=%d", errno);
-	    goto exit;
+Pair *getPairUDP(struct sockaddr *from, socklen_t fromlen, Stone *stone) {
+    Pair *pair;
+    ExBuf *t;
+    SockAddr *peer;
+    for (pair=stone->pairs->next; pair && pair->clock != -1; pair=pair->next) {
+	Pair *p = pair->pair;
+	if ((pair->proto & proto_dgram) && p && (p->proto & proto_connect)) {
+	    ExBuf *t = getExData(pair, data_peeraddr, 0);
+	    SockAddr *dst;
+	    dst = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+	    if (saComp(&dst->addr, from)) {
+		time(&pair->clock);
+		return pair;
+	    }
 	}
-	ev.events = EPOLLONESHOT;
-	ev.data.ptr = pair;
-	if (epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev) < 0) {
-	    message(LOG_ERR, "asyncClose: epoll_ctl %d ADD err=%d",
-		    epfd, errno);
-	    close(epfd);
-	    goto exit;
-	}
-#endif
-	do {
-	    want = 0;
-	    doSSL_shutdown(pair, 2);
-#ifdef USE_EPOLL
-	    ev.events = EPOLLONESHOT;
-	    if (pair->ssl_flag & sf_sb_on_r) {
-		ev.events |= EPOLLIN;
-		want = 1;
-	    }
-	    if (pair->ssl_flag & sf_sb_on_w) {
-		ev.events |= EPOLLOUT;
-		want = 1;
-	    }
-	    epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
-#else
-	    FD_ZERO(&ro);
-	    FD_ZERO(&wo);
-	    if (pair->ssl_flag & sf_sb_on_r) {
-		FdSet(sd, &ro);
-		want = 1;
-	    }
-	    if (pair->ssl_flag & sf_sb_on_w) {
-		FdSet(sd, &wo);
-		want = 1;
-	    }
-	    tv.tv_sec = 0;
-	    tv.tv_usec = TICK_SELECT;
-#endif
-	} while (want &&
-#ifdef USE_EPOLL
-		 epoll_wait(epfd, evs, 1, TICK_SELECT / 1000) >= 0
-#else
-		 select(FD_SETSIZE, &ro, &wo, NULL, &tv) >= 0
-#endif
-		 && (count++ < (3000000 / TICK_SELECT)));  /* timeout 3 sec */
     }
+    /* can't find pair, so create */
+    pair = newPair();
+    if (!pair) return NULL;
+    /* save `from' to ExBuf to check in doAcceptConnect */
+    bcopy(&fromlen, pair->t->buf, DATA_HEAD_LEN);
+    bcopy(from, pair->t->buf + DATA_HEAD_LEN, fromlen);
+    pair->stone = stone;
+    pair->proto = (proto_dgram | command_source);
+    pair->timeout = stone->timeout;
+    t = newExData(pair, data_peeraddr);
+    peer = (SockAddr*)(t->buf + DATA_HEAD_LEN);
+    peer->len = fromlen;
+    bcopy(from, &peer->addr, fromlen);
+    if (doAcceptConnect(pair)) return pair;
+    return NULL;	/* pair is disposed */
+}
+
+void recvStoneUDP(Stone *stone) {
+    if (stone->proto & proto_udp_d) {	/* UDP => UDP */
+	PktBuf *pb = recvUDP(stone);
+	if (pb) {
+	    sendUDP(pb);
+	    ungetPktBuf(pb);
+	}
+    } else {	/* UDP => TCP */
+	struct sockaddr_storage ss;
+	struct sockaddr *from = (struct sockaddr*)&ss;
+	socklen_t fromlen = sizeof(ss);
+	int flags = 0;
+	int len;
+	Pair *rPair;
+	Pair *wPair;
+	ExBuf *ex;
+	char addrport[STRMAX+1];
+	ex = getExBuf();
+	if (!ex) {
+	    message(LOG_CRIT, "%d UDP: out of memory", stone->sd);
+	    return;
+	}
+	ex->start = 0;
+#ifdef MSG_DONTWAIT
+	if (!(stone->proto & proto_block_s)) flags = MSG_DONTWAIT;
 #endif
-    shutdown(sd, 2);
- exit:
-#ifdef USE_SSL
-#ifdef USE_EPOLL
-    if (epfd >= 0) close(epfd);
+#ifdef MSG_TRUNC
+	flags |= MSG_TRUNC;
 #endif
+	len = recvfrom(stone->sd, ex->buf + UDP_HEAD_LEN,
+		       ex->bufmax - UDP_HEAD_LEN,
+		       flags, from, &fromlen);
+	addrport[0] = '\0';
+	if (len < 0) {
+#ifdef WINDOWS
+	    errno = WSAGetLastError();
 #endif
-    setclose(pair, proto_shutdown);
-    pair->proto &= ~proto_thread;
-    pair->proto |= proto_dirty;
-    ASYNC_END;
+	    addrport2strOnce(from, fromlen, proto_udp, addrport, STRMAX, 0);
+	    message(LOG_ERR, "%d UDP: recvfrom err=%d %s",
+		    stone->sd, errno, addrport);
+	    ungetExBuf(ex);
+	    return;
+	}
+	ex->buf[0] = ((unsigned)len >> 8);
+	ex->buf[1] = ((unsigned)len % 256);
+	ex->len += UDP_HEAD_LEN + len;
+	if (Debug > 8) {
+	    addrport2strOnce(from, fromlen, proto_udp, addrport, STRMAX, 0);
+	    message(LOG_DEBUG, "%d UDP: recvfrom len=%d %s",
+		    stone->sd, len, addrport);
+	}
+	rPair = getPairUDP(from, fromlen, stone);
+	if (!rPair) {
+	    message(LOG_ERR, "%d UDP: fail to get pair", stone->sd);
+	    ungetExBuf(ex);
+	    return;
+	}
+	rPair->rx += len;
+	wPair = rPair->pair;
+	if (wPair) {
+	    wPair->clock = rPair->clock;
+	    wPair->b->next = ex;
+	    wPair->b = ex;
+	    if (wPair->t->len <= 0) {
+		ExBuf *t = wPair->t;
+		wPair->t = wPair->t->next;	/* drop top */
+		ungetExBuf(t);
+	    }
+	    wPair->proto |= (proto_select_w | proto_dirty);
+	}
+    }
 }
 
 #ifdef USE_EPOLL
@@ -6429,11 +6945,7 @@ void dispatch(int epfd, struct epoll_event *evs, int nevs) {
 		message(LOG_DEBUG, "stone %d: epoll %d events=%x type=%d",
 			p->stone.sd, epfd, ev.events, common);
 	    if (p->stone.proto & proto_udp_s) {
-		PktBuf *pb = recvUDP(&p->stone);
-		if (pb) {
-		    sendUDP(pb);
-		    ungetPktBuf(pb);
-		}
+		recvStoneUDP(&p->stone);
 	    } else {
 		Pair *pair = acceptPair(&p->stone);
 		if (pair) {
@@ -6503,32 +7015,32 @@ int scanPairs(
 	    pairs = pair;
 	    continue;
 	}
-	if (!(pair->proto & proto_thread) && ValidSocket(sd)) {
+	if (!(pair->proto & (proto_thread | proto_dgram))
+	    && ValidSocket(sd)) {
 	    time_t clock;
 	    int idle = 1;	/* assume no events happen on sd */
 #ifndef USE_EPOLL
 	    if (FD_ISSET(sd, rop) || FD_ISSET(sd, wop) || FD_ISSET(sd, eop)) {
-		if (doPair(pair)) idle = 0;
+		Pair *p = pair->pair;
+		if (p && (p->proto & proto_dgram)) {
+		    doReadWritePair(pair, p,
+				    FD_ISSET(sd, rop),
+				    FD_ISSET(sd, wop),
+				    FD_ISSET(sd, eop), 0, 0);
+		    idle = 0;
+		} else if (doPair(pair)) idle = 0;
 	    }
 #endif
 	    if (idle && pair->timeout > 0
 		&& (time(&clock), clock - pair->clock > pair->timeout)) {
+		Pair *p = pair->pair;
 		if (Debug > 2) {
 		    message(LOG_DEBUG, "%d TCP %d: idle time exceeds",
 			    pair->stone->sd, sd);
 		    message_pair(LOG_DEBUG, pair);
 		}
-		if (pair->count > 0) pair->count -= REF_UNIT;
-		pair->proto |= (proto_thread | proto_dirty);
-#ifdef USE_EPOLL
-		/* must be set proto_thread before delete from ePollFd */
-		if (Debug > 6)
-		    message(LOG_DEBUG, "%d TCP %d: scanPairs "
-			    "epoll_ctl %d DEL %x",
-			    pair->stone->sd, sd, ePollFd, (int)pair);
-		epoll_ctl(ePollFd, EPOLL_CTL_DEL, pair->sd, NULL);
-#endif
-		ASYNC(asyncClose, pair);
+		setclose(pair, proto_shutdown);
+		if (p) setclose(p, proto_shutdown);
 	    }
 	}
     }
@@ -6550,21 +7062,16 @@ int scanStones(fd_set *rop, fd_set *wop, fd_set *eop) {
 	} else {
 	    if (FD_ISSET(stone->sd, rop) && FD_ISSET(stone->sd, &rin)) {
 		if (stone->proto & proto_udp_s) {
-		    PktBuf *pb = recvUDP(stone);
-		    if (pb) {
-			sendUDP(pb);
-			ungetPktBuf(pb);
-		    }
+		    recvStoneUDP(stone);
 		} else {
 		    Pair *pair = acceptPair(stone);
 		    if (pair) ASYNC(asyncAcceptConnect, pair);
 		}
 	    }
 	}
-	if (stone->proto & proto_udp_s) {
+	if ((stone->proto & proto_udp_s) && (stone->proto & proto_udp_d)) {
 	    scanUDP(rop, eop, (Origin *)stone->p);
-	}
-	if (!(stone->proto & proto_udp_s) || !(stone->proto & proto_udp_d)) {
+	} else {
 	    scanPairs(rop, wop, eop, stone->pairs);
 	}
     }
@@ -6598,6 +7105,68 @@ static void freeMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
     if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %x",
 			   --NewMatchCount, (int)match);
     free(match);
+}
+
+static int hostcmp(char *pat, char *host) {
+    char a, b;
+    while (*pat) {
+	if (*pat == '*') {
+	    pat++;
+	    while (*host) {
+		if (*host == *pat) break;
+		host++;
+	    }
+	}
+	a = toupper(*pat);
+	b = toupper(*host);
+	if (a != b) return a - b;
+	pat++;
+	host++;
+    }
+    return *host;
+}
+
+static int hostcheck(Pair *pair, X509 *cert, char *host) {
+    X509_EXTENSION *ext;
+    GENERAL_NAMES *ialt;
+    char name[LONGSTRMAX+1];
+    int i = X509_get_ext_by_NID(cert, NID_subject_alt_name, -1);
+    if (i >= 0
+	&& (ext=X509_get_ext(cert, i))
+	&& (ialt=X509V3_EXT_d2i(ext))) {
+	int done = 0;
+	for (i=0; !done && i < sk_GENERAL_NAME_num(ialt); i++) {
+	    GENERAL_NAME *gen = sk_GENERAL_NAME_value(ialt, i);
+	    if (gen->type == GEN_DNS && gen->d.ia5) {
+		int len = gen->d.ia5->length;
+		if (len > LONGSTRMAX) len = LONGSTRMAX;
+		strncpy(name, (char*)gen->d.ia5->data, len);
+		name[len] = '\0';
+		if (hostcmp(name, host) == 0) {
+		    if (Debug > 4)
+			message(LOG_DEBUG, "match %s dNSName=%s",
+				host, name);
+		    done = 1;	/* match */
+		} else if (Debug > 5) message(LOG_DEBUG, "dNSName: %s", name);
+	    }
+	    GENERAL_NAME_free(gen);
+	}
+	sk_GENERAL_NAME_free(ialt);
+	if (done) return 1;
+    }
+    if (X509_NAME_get_text_by_NID(X509_get_subject_name(cert), NID_commonName,
+				  name, sizeof(name)) >= 0) {
+	if (hostcmp(name, host) == 0) {
+	    if (Debug > 4) message(LOG_DEBUG, "match %s CN=%s", host, name);
+	    return 1;	/* match */
+	}
+	message(LOG_ERR, "%d TCP %d: connect to %s, but CN=%s",
+		pair->stone->sd, pair->sd, host, name);
+	return 0;
+    }
+    message(LOG_ERR, "%d TCP %d: no dNSName nor CN",
+	    pair->stone->sd, pair->sd);
+    return 0;
 }
 
 static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
@@ -6646,6 +7215,9 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 		    serial, ss->serial);
 	    return 0;	/* fail */
 	}
+	if (ss->name
+	    && !ss->re[depth]
+	    && !hostcheck(pair, err_cert, ss->name)) return 0;
     }
     if (Debug > 3)
 	message(LOG_DEBUG,
@@ -6661,11 +7233,35 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	X509_STORE_CTX_set_error(ctx, X509_V_ERR_CERT_CHAIN_TOO_LONG);
     }
     if (!preverify_ok) {
-	if (ss->verbose)
-	    message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s",
-		    pair->stone->sd, pair->sd,
-		    err, X509_verify_cert_error_string(err));
-	return 0;
+#ifdef CRYPTOAPI
+	if (ss->sslparm & sslparm_storeca) {
+	    int ret = CryptoAPI_verify_certificate(err_cert);
+	    if (ret < 0) {
+		if (ss->verbose)
+		    message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s, "
+			    "CryptoAPI verify %ld",
+			    pair->stone->sd, pair->sd,
+			    err, X509_verify_cert_error_string(err),
+			    ERR_get_error());
+		return 0;
+	    } else if (ret == 0) {
+		if (ss->verbose)
+		    message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s, "
+			    "CryptoAPI certificate is not trusted",
+			    pair->stone->sd, pair->sd,
+			    err, X509_verify_cert_error_string(err));
+		return 0;
+	    }
+	} else {
+#endif
+	    if (ss->verbose)
+		message(LOG_DEBUG, "%d TCP %d: verify error err=%d %s",
+			pair->stone->sd, pair->sd,
+			err, X509_verify_cert_error_string(err));
+	    if (!(ss->sslparm & sslparm_ignore)) return 0;
+#ifdef CRYPTOAPI
+	}
+#endif
     }
     re = ss->re[DEPTH_MAX - depthmax + depth];
     if (!re) re = ss->re[depth];
@@ -6727,6 +7323,36 @@ static int passwd_callback(char *buf, int size, int rwflag, void *passwd) {
     return(strlen(buf));
 }
 
+#ifndef OPENSSL_NO_TLSEXT
+static int ssl_servername_callback(SSL *ssl, int *ad, void *arg) {
+    Pair *pair = SSL_get_ex_data(ssl, PairIndex);
+    StoneSSL *ss = pair->stone->ssl_server;
+    Stone *stone;
+    const char *name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+    if (!ss || !ss->name) return SSL_TLSEXT_ERR_NOACK;
+    if (!name) {
+	if (ss && ss->verbose)
+	    message(LOG_DEBUG, "%d TCP %d: No servername, expects: %s",
+		    pair->stone->sd, pair->sd, ss->name);
+	return SSL_TLSEXT_ERR_OK;
+    }
+    if (strcmp(name, ss->name) == 0) return SSL_TLSEXT_ERR_OK;
+    for (stone=pair->stone->children; stone; stone=stone->children) {
+	StoneSSL *sn = stone->ssl_server;
+	if (!sn || !sn->name) return SSL_TLSEXT_ERR_NOACK;
+	if (strcmp(name, sn->name) == 0) {
+	    if (sn->verbose)
+		message(LOG_DEBUG, "%d TCP %d: Switching server context: %s",
+			stone->sd, pair->sd, sn->name);
+	    SSL_set_SSL_CTX(ssl, sn->ctx);
+	    pair->stone = stone;
+	    return SSL_TLSEXT_ERR_OK;
+	}
+    }
+    return SSL_TLSEXT_ERR_ALERT_FATAL;
+}
+#endif
+
 StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     StoneSSL *ss;
     int err;
@@ -6739,6 +7365,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     }
     ss->verbose = opts->verbose;
     ss->shutdown_mode = opts->shutdown_mode;
+    ss->name = opts->servername;
     ss->ctx = SSL_CTX_new(opts->meth);
     if (!ss->ctx) {
 	message(LOG_ERR, "SSL_CTX_new error");
@@ -6762,22 +7389,6 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	if (opts->vflags)
 	    X509_STORE_set_flags(SSL_CTX_get_cert_store(ss->ctx),
 				 opts->vflags);
-    }
-    if (isserver) {
-	if (opts->sid_ctx) {
-	    int ret;
-	    int len = strlen(opts->sid_ctx);
-	    ret = SSL_CTX_set_session_id_context(ss->ctx, opts->sid_ctx, len);
-	    if (!ret) {
-		len = SSL_MAX_SSL_SESSION_ID_LENGTH;
-		opts->sid_ctx[len] = '\0';
-		message(LOG_ERR, "Too long sid_ctx, truncated to '%s'",
-			opts->sid_ctx);
-	    }
-	}
-	SSL_CTX_set_session_cache_mode(ss->ctx,
-				       (SSL_SESS_CACHE_SERVER
-					   | SSL_SESS_CACHE_NO_AUTO_CLEAR));
     }
     if (opts->pfxFile) {
 	FILE *fp = fopen(opts->pfxFile, "r");
@@ -6843,7 +7454,11 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	    goto error;
 	}
     }
+    ss->sslparm = 0;
+    if (opts->useSNI) ss->sslparm |= sslparm_sni;
+    if (opts->certIgnore) ss->sslparm |= sslparm_ignore;
 #ifdef CRYPTOAPI
+    if (opts->certStoreCA) ss->sslparm |= sslparm_storeca;
     if (opts->certStore) {
 	if (!SSL_CTX_use_CryptoAPI_certificate(ss->ctx, opts->certStore)) {
 	    message(LOG_ERR, "Can't load certificate \"%s\" "
@@ -6875,6 +7490,32 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	    ss->re[i] = NULL;
 	}
     }
+    if (isserver) {
+#ifndef OPENSSL_NO_TLSEXT
+	if (ss->sslparm & sslparm_sni) {
+	    SSL_CTX_set_tlsext_servername_callback
+		(ss->ctx, ssl_servername_callback);
+	}
+#endif
+	if (opts->sid_ctx) {
+	    int ret;
+	    int len = strlen((char*)opts->sid_ctx);
+	    ret = SSL_CTX_set_session_id_context(ss->ctx, opts->sid_ctx, len);
+	    if (!ret) {
+		len = SSL_MAX_SSL_SESSION_ID_LENGTH;
+		opts->sid_ctx[len] = '\0';
+		message(LOG_ERR, "Too long sid_ctx, truncated to '%s'",
+			opts->sid_ctx);
+		ret = SSL_CTX_set_session_id_context(ss->ctx,
+						     opts->sid_ctx, len);
+		if (!ret) {
+		    message(LOG_ERR, "SSL_CTX_set_session_id_context error");
+		}
+	    }
+	}
+	SSL_CTX_set_session_cache_mode
+	    (ss->ctx, (SSL_SESS_CACHE_SERVER | SSL_SESS_CACHE_NO_AUTO_CLEAR));
+    }
     return ss;
  error:
     if (opts->verbose)
@@ -6892,6 +7533,87 @@ void rmStoneSSL(StoneSSL *ss) {
 	}
     }
     free(ss);
+}
+
+char *exPatFile(char *pat, char *name, char *src, char *dst) {
+    char str[STRMAX+1];
+    char *p;
+    int pos, len, nlen, slen, dlen;
+    int l;
+    if (!name) name = "";
+    if (!src) src = "";
+    if (!dst) dst = "";
+    nlen = strlen(name);
+    slen = strlen(src);
+    dlen = strlen(dst);
+    len = 0;
+    for (pos=0; pos < STRMAX; pos++) {
+	if (pat[pos] == '\0') {
+	    str[len] = '\0';
+	    break;
+	} else if (pat[pos] == '%') {
+	    switch (pat[++pos]) {
+	    case 'n':	l = nlen; p = name; break;
+	    case 's':	l = slen; p = src;  break;
+	    case 't':	l = dlen; p = dst;  break;
+	    default:
+		l = 1;
+		p = &pat[pos];
+	    }
+	    if (len + l >= STRMAX) l = STRMAX - len;
+	    strncpy(str+len, p, l);
+	    len += l;
+	} else {
+	    str[len++] = pat[pos];
+	}
+    }
+    str[STRMAX] = '\0';
+    return strdup(str);
+}
+
+void exPatOpts(SSLOpts *opts, char *src, char *dst) {
+    if (opts->pfxFilePat) {
+	opts->pfxFile = exPatFile(opts->pfxFilePat,
+				  opts->servername, src, dst);
+	if (Debug > 3) message(LOG_DEBUG, "exPatPfx: %s => %s",
+			       opts->pfxFilePat, opts->pfxFile);
+    } else {
+	if (opts->certFilePat) {
+	    opts->certFile = exPatFile(opts->certFilePat,
+				       opts->servername, src, dst);
+	    if (Debug > 3) message(LOG_DEBUG, "exPatCert: %s => %s",
+				   opts->certFilePat, opts->certFile);
+	}
+	if (opts->keyFilePat) {
+	    opts->keyFile = exPatFile(opts->keyFilePat,
+				      opts->servername, src, dst);
+	    if (Debug > 3) message(LOG_DEBUG, "exPatKey: %s => %s",
+				   opts->keyFilePat, opts->keyFile);
+	}
+    }
+    if (opts->passFilePat) {
+	opts->passFile = exPatFile(opts->passFilePat,
+				   opts->servername, src, dst);
+	if (Debug > 3) message(LOG_DEBUG, "exPatPass: %s => %s",
+			       opts->passFilePat, opts->passFile);
+    }
+    if (opts->passFile) {
+    	FILE *fp = fopen(opts->passFile, "r");
+	char str[STRMAX+1];
+	int i;
+	if (!fp) {
+	    message(LOG_ERR, "Can't open passwd file: %s", opts->passFile);
+	    exit(1);
+	}
+	for (i=0; i < STRMAX; i++) {
+	    int c = getc(fp);
+	    if (c == '\r' || c == '\n' || c == EOF) break;
+	    str[i] = c;
+	}
+	str[i] = '\0';
+	fclose(fp);
+	opts->passwd = strdup(str);
+    }
 }
 #endif
 
@@ -7066,8 +7788,8 @@ typedef int sa_family_t;
 
 void mkXhostsExt(char *host, char *str, XHosts *ext) {
     int kind = 0;
-    char *top;
-    u_long num;
+    char *top = NULL;	/* dummy init to suppress warnings */
+    u_long num = 0;
     int i = 0;
     do {
 	switch(kind) {
@@ -7186,7 +7908,7 @@ XHosts *mkXhosts(int nhosts, char *hosts[], sa_family_t family, char *mesg) {
 	    short mode = 0;
 	    struct sockaddr_storage ss;
 	    struct sockaddr *sa = (struct sockaddr*)&ss;
-	    int salen = sizeof(ss);
+	    socklen_t salen = sizeof(ss);
 	    strcpy(xhost, hosts[i]);
 	    p = strchr(xhost, '/');
 	    if (p) {
@@ -7337,6 +8059,18 @@ int mkPortXhosts(int argc, int i, char *argv[]) {
     exit(1);
 }
 
+Stone *getStone(struct sockaddr *sa, socklen_t salen, int proto) {
+    Stone *stone;
+    proto &= proto_udp_s;
+    for (stone=stones; stone != NULL; stone=stone->next) {
+	if ((stone->proto & proto_udp_s) == proto
+	    && saComp(&stone->listen->addr, sa)) {
+	    return stone;
+	}
+    }
+    return NULL;
+}
+
 /* make stone */
 Stone *mkstone(
     char *dhost,	/* destination hostname */
@@ -7346,23 +8080,27 @@ Stone *mkstone(
     int nhosts,		/* # of hosts to permit */
     char *hosts[],	/* hosts to permit */
     int proto) {	/* UDP/TCP/SSL */
-    Stone *stonep;
+    Stone *stone;
+    Stone *st;
     struct sockaddr_storage ss;
     struct sockaddr *sa = (struct sockaddr*)&ss;
-    int salen = sizeof(ss);
+    socklen_t salen = sizeof(ss);
     int satype;
     int saproto = 0;
     sa_family_t family;
     char *mesg;
     char str[STRMAX+1];
-    stonep = calloc(1, sizeof(Stone));
-    if (!stonep) {
+    stone = calloc(1, sizeof(Stone));
+    if (!stone) {
 	message(LOG_CRIT, "Out of memory");
 	exit(1);
     }
-    stonep->common = type_stone;
-    stonep->p = NULL;
-    stonep->timeout = PairTimeOut;
+    stone->next = NULL;
+    stone->children = NULL;
+    stone->parent = NULL;
+    stone->common = type_stone;
+    stone->p = NULL;
+    stone->timeout = PairTimeOut;
     if (proto & proto_udp_s) {
 	satype = SOCK_DGRAM;
 	saproto = IPPROTO_UDP;
@@ -7386,7 +8124,7 @@ Stone *mkstone(
 	sa->sa_family = AF_INET6;
 	if (!host2sa(host, serv, sa, &salen, &satype, &saproto, AI_PASSIVE))
 	    exit(1);
-	stonep->port = ntohs(sin6p->sin6_port);
+	stone->port = ntohs(sin6p->sin6_port);
     } else
 #endif
     {
@@ -7394,94 +8132,107 @@ Stone *mkstone(
 	sa->sa_family = AF_INET;
 	if (!host2sa(host, serv, sa, &salen, &satype, &saproto, AI_PASSIVE))
 	    exit(1);
-	stonep->port = ntohs(sinp->sin_port);
+	stone->port = ntohs(sinp->sin_port);
     }
     if ((proto & proto_command) == command_proxy
 	|| (proto & proto_command) == command_health
 	|| (proto & proto_command) == command_identd) {
-	stonep->ndsts = 1;
+	stone->ndsts = 1;
 	if ((proto & proto_command) == command_proxy) {
-	    stonep->dsts = malloc(sizeof(SockAddr*) + sizeof(PortXHosts*));
-	    if (stonep->dsts) ((PortXHosts**)stonep->dsts)[1] = portXHosts;
+	    stone->dsts = malloc(sizeof(SockAddr*) + sizeof(PortXHosts*));
+	    if (stone->dsts) ((PortXHosts**)stone->dsts)[1] = portXHosts;
 	    /* only proxy stone needs portXHosts,
 	       so we divert dsts into holding current portXHosts */
 	} else {
-	    stonep->dsts = malloc(sizeof(SockAddr*));	/* dummy */
+	    stone->dsts = malloc(sizeof(SockAddr*));	/* dummy */
 	}
-	if (!stonep->dsts) goto memerr;
-	stonep->dsts[0] = saDup(sa, salen);	/* dummy */
+	if (!stone->dsts) goto memerr;
+	stone->dsts[0] = saDup(sa, salen);	/* dummy */
 #ifdef AF_LOCAL
     } else if (proto & proto_unix_d) {
 	struct sockaddr_storage dss;
 	struct sockaddr_un *sun = (struct sockaddr_un*)&dss;
-	stonep->ndsts = 1;
-	stonep->dsts = malloc(sizeof(SockAddr*));
-	if (!stonep->dsts) goto memerr;
+	stone->ndsts = 1;
+	stone->dsts = malloc(sizeof(SockAddr*));
+	if (!stone->dsts) goto memerr;
 	bzero(sun, sizeof(dss));
 	sun->sun_family = AF_LOCAL;
 	snprintf(sun->sun_path, sizeof(sun->sun_path)-1, "%s", dhost);
-	stonep->dsts[0] = saDup((struct sockaddr*)sun,
+	stone->dsts[0] = saDup((struct sockaddr*)sun,
 				sizeof(struct sockaddr_un));
-	if (!stonep->dsts[0]) goto memerr;
+	if (!stone->dsts[0]) goto memerr;
 #endif
     } else {
 	struct sockaddr_storage dss;
 	struct sockaddr *dsa = (struct sockaddr*)&dss;
 	socklen_t dsalen = sizeof(dss);
-	int dsatype = satype;
-	int dsaproto = 0;
+	int dsatype;
+	int dsaproto;
 	LBSet *lbset;
 #ifdef AF_INET6
 	if (proto & proto_v6_d) dsa->sa_family = AF_INET6;
 	else
 #endif
 	    dsa->sa_family = AF_INET;
+	if (proto & proto_udp_d) {
+	    dsatype = SOCK_DGRAM;
+	    dsaproto = IPPROTO_UDP;
+	} else {
+	    dsatype = SOCK_STREAM;
+	    dsaproto = IPPROTO_TCP;
+	}
 	if (!host2sa(dhost, dserv, dsa, &dsalen, &dsatype, &dsaproto, 0)) {
 	    exit(1);
 	}
 	lbset = findLBSet(dsa);
 	if (lbset) {
-	    stonep->ndsts = lbset->ndsts;
-	    stonep->dsts = lbset->dsts;
+	    stone->ndsts = lbset->ndsts;
+	    stone->dsts = lbset->dsts;
 	} else {
-	    stonep->ndsts = 1;
-	    stonep->dsts = malloc(sizeof(SockAddr*));
-	    if (!stonep->dsts) {
+	    stone->ndsts = 1;
+	    stone->dsts = malloc(sizeof(SockAddr*));
+	    if (!stone->dsts) {
 	    memerr:
 		message(LOG_CRIT, "Out of memory");
 		exit(1);
 	    }
-	    stonep->dsts[0] = saDup(dsa, dsalen);
-	    if (!stonep->dsts[0]) goto memerr;
+	    stone->dsts[0] = saDup(dsa, dsalen);
+	    if (!stone->dsts[0]) goto memerr;
 	}
     }
-    stonep->proto = proto;
-    stonep->from = ConnectFrom;
-    if (!reusestone(stonep)) {	/* recycle stone */
-	stonep->sd = socket(sa->sa_family, satype, saproto);
-	if (InvalidSocket(stonep->sd)) {
+    stone->proto = proto;
+    stone->from = ConnectFrom;
+    if (!reusestone(stone)) {	/* recycle stone */
+	stone->sd = socket(sa->sa_family, satype, saproto);
+	if (InvalidSocket(stone->sd)) {
 #ifdef WINDOWS
 	    errno = WSAGetLastError();
 #endif
 	    message(LOG_ERR, "stone %d: Can't get socket "
 		    "family=%d type=%d proto=%d err=%d",
-		    stonep->sd, sa->sa_family, satype, saproto, errno);
+		    stone->sd, sa->sa_family, satype, saproto, errno);
 	    exit(1);
 	}
 #ifdef IPV6_V6ONLY
 	if ((proto & proto_v6_s) && (proto & proto_ip_only_s)) {
 	    int i = 1;
-	    setsockopt(stonep->sd, IPPROTO_IPV6, IPV6_V6ONLY,
+	    setsockopt(stone->sd, IPPROTO_IPV6, IPV6_V6ONLY,
 		       (char*)&i, sizeof(i));
 	}
 #endif
 	if (!(proto & proto_udp_s) && ReuseAddr) {
 	    int i = 1;
-	    setsockopt(stonep->sd, SOL_SOCKET, SO_REUSEADDR,
+	    setsockopt(stone->sd, SOL_SOCKET, SO_REUSEADDR,
 		       (char*)&i, sizeof(i));
 	}
-	if (!DryRun) {
-	    if (bind(stonep->sd, sa, salen) < 0) {
+	if ((st=getStone(sa, salen, proto))) {
+	    closesocket(stone->sd);
+	    stone->parent = st;
+	    stone->children = st->children;
+	    st->children = stone;
+	    stone->sd = st->sd;
+	} else if (!DryRun) {
+	    if (bind(stone->sd, sa, salen) < 0) {
 		char str[STRMAX+1];
 #ifdef WINDOWS
 		errno = WSAGetLastError();
@@ -7489,51 +8240,58 @@ Stone *mkstone(
 		addrport2str(sa, salen, 0, str, STRMAX, 0);
 		str[STRMAX] = '\0';
 		message(LOG_ERR, "stone %d: Can't bind %s err=%d",
-			stonep->sd, str, errno);
+			stone->sd, str, errno);
 		exit(1);
 	    }
-	    if (!(stonep->proto & proto_block_s)) {
+	    if (!(stone->proto & proto_block_s)) {
 #ifdef WINDOWS
 		u_long param;
 		param = 1;
-		ioctlsocket(stonep->sd, FIONBIO, &param);
+		ioctlsocket(stone->sd, FIONBIO, &param);
 #else
-		fcntl(stonep->sd, F_SETFL, O_NONBLOCK);
+		fcntl(stone->sd, F_SETFL, O_NONBLOCK);
 #endif
 	    }
-	    if (stonep->port == 0) {
+	    if (stone->port == 0) {
 		salen = sizeof(ss);
-		getsockname(stonep->sd, sa, &salen);
+		if (getsockname(stone->sd, sa, &salen) >= 0) {
+		    stone->port = getport(sa);
+		}
 	    }
 	    if (!(proto & proto_udp_s)) {	/* TCP */
-		if (listen(stonep->sd, BacklogMax) < 0) {
+		if (listen(stone->sd, BacklogMax) < 0) {
 #ifdef WINDOWS
 		    errno = WSAGetLastError();
 #endif
 		    message(LOG_ERR, "stone %d: Can't listen err=%d",
-			    stonep->sd, errno);
+			    stone->sd, errno);
 		    exit(1);
 		}
 	    }
 	}	/* !DryRun */
     }
+    stone->listen = saDup(sa, salen);
 #ifdef USE_SSL
     if (proto & proto_ssl_s) {	/* server side SSL */
-	stonep->ssl_server = mkStoneSSL(&ServerOpts, 1);
-	if (stonep->ssl_server->lbmod) {
-	    if (stonep->ssl_server->lbmod > stonep->ndsts) {
+	exPatOpts(&ServerOpts, host, dhost);
+	stone->ssl_server = mkStoneSSL(&ServerOpts, 1);
+	if (stone->ssl_server->lbmod) {
+	    if (stone->ssl_server->lbmod > stone->ndsts) {
 		message(LOG_WARNING, "LB set (%d) < lbmod (%d)",
-			stonep->ndsts, stonep->ssl_server->lbmod);
-		stonep->ssl_server->lbmod = stonep->ndsts;
+			stone->ndsts, stone->ssl_server->lbmod);
+		stone->ssl_server->lbmod = stone->ndsts;
 	    }
 	}
     } else {
-	stonep->ssl_server = NULL;
+	stone->ssl_server = NULL;
     }
     if (proto & proto_ssl_d) {	/* client side SSL */
-	stonep->ssl_client = mkStoneSSL(&ClientOpts, 0);
+	exPatOpts(&ClientOpts, host, dhost);
+	stone->ssl_client = mkStoneSSL(&ClientOpts, 0);
+	if (!(stone->ssl_client->name && *stone->ssl_client->name))
+	    stone->ssl_client->name = dhost;
     } else {
-	stonep->ssl_client = NULL;
+	stone->ssl_client = NULL;
     }
 #endif
     mesg = NULL;
@@ -7541,34 +8299,34 @@ Stone *mkstone(
 	mesg = str;
 	if ((proto & proto_command) == command_proxy) {
 	    snprintf(mesg, STRMAX, "stone %d: using proxy by ",
-		     stonep->sd);
+		     stone->sd);
 	} else if ((proto & proto_command) == command_health) {
-	    snprintf(mesg, STRMAX, "stone %d: health check by ", stonep->sd);
+	    snprintf(mesg, STRMAX, "stone %d: health check by ", stone->sd);
 	} else if ((proto & proto_command) == command_identd) {
-	    snprintf(mesg, STRMAX, "stone %d: ident query by ", stonep->sd);
+	    snprintf(mesg, STRMAX, "stone %d: ident query by ", stone->sd);
 	} else {
 	    char addrport[STRMAX+1];
-	    addrport2str(&stonep->dsts[0]->addr, stonep->dsts[0]->len,
-			 (stonep->proto & proto_stone_d),
+	    addrport2str(&stone->dsts[0]->addr, stone->dsts[0]->len,
+			 (stone->proto & proto_stone_d),
 			 addrport, STRMAX, 0);
 	    addrport[STRMAX] = '\0';
 	    snprintf(mesg, STRMAX, "stone %d: connecting to %s by ",
-		     stonep->sd, addrport);
+		     stone->sd, addrport);
 	}
     }
     family = AF_INET;
 #ifdef AF_INET6
-    if (stonep->proto & proto_v6_s) {
-	if (host == NULL && !(stonep->proto & proto_ip_only_s)) {
+    if (stone->proto & proto_v6_s) {
+	if (host == NULL && !(stone->proto & proto_ip_only_s)) {
 	    family = AF_UNSPEC;
 	} else {
 	    family = AF_INET6;
 	}
     }
 #endif
-    stonep->xhosts = mkXhosts(nhosts, hosts, family, mesg);
-    message(LOG_INFO, "%s", stone2str(stonep, str, STRMAX));
-    stonep->backups = NULL;
+    stone->xhosts = mkXhosts(nhosts, hosts, family, mesg);
+    message(LOG_INFO, "%s", stone2str(stone, str, STRMAX));
+    stone->backups = NULL;
     if ((proto & proto_command) != command_proxy
 	&& (proto & proto_command) != command_health
 	&& (proto & proto_command) != command_identd
@@ -7576,21 +8334,21 @@ Stone *mkstone(
 	Backup *bs[LB_MAX];
 	int found = 0;
 	int i;
-	for (i=0; i < stonep->ndsts; i++) {
-	    bs[i] = findBackup(&stonep->dsts[i]->addr);
+	for (i=0; i < stone->ndsts; i++) {
+	    bs[i] = findBackup(&stone->dsts[i]->addr);
 	    if (bs[i]) {
 		found = 1;
 		bs[i]->used = 1;
 	    }
 	}
 	if (found) {
-	    stonep->backups = malloc(sizeof(Backup*) * stonep->ndsts);
-	    if (stonep->backups) {
-		for (i=0; i < stonep->ndsts; i++) stonep->backups[i] = bs[i];
+	    stone->backups = malloc(sizeof(Backup*) * stone->ndsts);
+	    if (stone->backups) {
+		for (i=0; i < stone->ndsts; i++) stone->backups[i] = bs[i];
 	    }
 	}
     }
-    return stonep;
+    return stone;
 }
 
 /* main */
@@ -7598,7 +8356,7 @@ Stone *mkstone(
 void help(char *com, char *sub) {
     message(LOG_INFO, "stone %s  http://www.gcd.org/sengoku/stone/", VERSION);
     message(LOG_INFO, "%s",
-	    "Copyright(C)2005 by Hiroaki Sengoku <sengoku@gcd.org>");
+	    "Copyright(C)2007 by Hiroaki Sengoku <sengoku@gcd.org>");
 #ifdef USE_SSL
     message(LOG_INFO, "%s",
 	    "using " OPENSSL_VERSION_TEXT "  http://www.openssl.org/");
@@ -7724,48 +8482,59 @@ void help(char *com, char *sub) {
 #ifdef USE_SSL
     } else if (!strcmp(sub, "ssl")) {
 	fprintf(stderr,
-"opt:  -q <SSL>          ; SSL client option\n"
-"      -z <SSL>          ; SSL server option\n"
-"SSL:   default          ; reset to default\n"
-"       verbose          ; verbose mode\n"
-"       verify           ; require peer's certificate\n"
-"       verify,once      ; verify client's certificate only once\n"
-"       verify,ifany     ; verify client's certificate if any\n"
-"       verify,none      ; don't require peer's certificate\n"
-"       crl_check        ; lookup CRLs\n"
-"       crl_check_all    ; lookup CRLs for whole chain\n"
-"       uniq             ; check serial # of peer's certificate\n"
-"       re<n>=<regex>    ; verify depth <n> with <regex>\n"
-"       depth=<n>        ; set verification depth to <n>\n"
+"opt:  -q <SSL>            ; SSL client option\n"
+"      -z <SSL>            ; SSL server option\n"
+"SSL:   default            ; reset to default\n"
+"       verbose            ; verbose mode\n"
+"       verify             ; require peer's certificate\n"
+"       verify,once        ; verify client's certificate only once\n"
+"       verify,ifany       ; verify client's certificate if any\n"
+"       verify,none        ; don't require peer's certificate\n"
+"       crl_check          ; lookup CRLs\n"
+"       crl_check_all      ; lookup CRLs for whole chain\n"
+"       uniq               ; check serial # of peer's certificate\n"
+"       re<n>=<regex>      ; verify depth <n> with <regex>\n"
+"       depth=<n>          ; set verification depth to <n>\n"
 #ifndef OPENSSL_NO_TLS1
-"       tls1             ; just use TLSv1\n"
+"       tls1               ; just use TLSv1\n"
 #endif
 #ifndef OPENSSL_NO_SSL3
-"       ssl3             ; just use SSLv3\n"
+"       ssl3               ; just use SSLv3\n"
 #endif
 #ifndef OPENSSL_NO_SSL2
-"       ssl2             ; just use SSLv2\n"
+"       ssl2               ; just use SSLv2\n"
 #endif
-"       no_tls1          ; turn off TLSv1\n"
-"       no_ssl3          ; turn off SSLv3\n"
-"       no_ssl2          ; turn off SSLv2\n"
-"       bugs             ; SSL implementation bug workarounds\n"
+"       no_tls1            ; turn off TLSv1\n"
+"       no_ssl3            ; turn off SSLv3\n"
+"       no_ssl2            ; turn off SSLv2\n"
+#ifndef OPENSSL_NO_TLSEXT
+"       sni                ; Server Name Indication\n"
+"       servername=<str>   ; Server Name\n"
+#endif
+"       bugs               ; SSL implementation bug workarounds\n"
 #ifdef SSL_OP_CIPHER_SERVER_PREFERENCE
-"       serverpref       ; use server's cipher preferences (SSLv2)\n"
+"       serverpref         ; use server's cipher preferences (SSLv2)\n"
 #endif
-"       shutdown=<mode>  ; accurate, nowait, unclean\n"
-"       sid_ctx=<str>    ; set session ID context\n"
-"       passfile=<file>  ; password file\n"
-"       key=<file>       ; key file\n"
-"       cert=<file>      ; certificate file\n"
-"       CAfile=<file>    ; certificate file of CA\n"
-"       CApath=<dir>     ; dir of CAs\n"
-"       pfx=<file>       ; PKCS#12 file\n"
+"       shutdown=<mode>    ; accurate, nowait, unclean\n"
+"       sid_ctx=<str>      ; set session ID context\n"
+"       passfile=<file>    ; password file\n"
+"       passfilepat=<file> ; password file pattern\n"
+"       key=<file>         ; key file\n"
+"       keypat=<file>      ; key file pattern\n"
+"       cert=<file>        ; certificate file\n"
+"       certpat=<file>     ; certificate file pattern\n"
+"       certkey=<file>     ; certificate & key file\n"
+"       certkeypat=<file>  ; certificate & key file pattern\n"
+"       CAfile=<file>      ; certificate file of CA\n"
+"       CApath=<dir>       ; dir of CAs\n"
+"       pfx=<file>         ; PKCS#12 file\n"
+"       pfxpat=<file>      ; PKCS#12 file pattern\n"
 #ifdef CRYPTOAPI
-"       store=<prop>     ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
+"       store=<prop>       ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
+"       storeCA            ; use CA cert in Windows cert store\n"
 #endif
-"       cipher=<ciphers> ; list of ciphers\n"
-"       lb<n>=<m>        ; load balancing based on CN\n"
+"       cipher=<ciphers>   ; list of ciphers\n"
+"       lb<n>=<m>          ; load balancing based on CN\n"
 	    );
 #endif
     } else {
@@ -8118,10 +8887,12 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->serial = -2;
     opts->callback = verify_callback;
     opts->sid_ctx = NULL;
+    opts->useSNI = 0;
     if (isserver) {
 	char path[BUFMAX];
 	snprintf(path, BUFMAX-1, "%s/stone.pem", X509_get_default_cert_dir());
 	opts->keyFile = opts->certFile = strdup(path);
+	opts->keyFilePat = opts->certFilePat = NULL;
 #if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_server_method();
 #elif !defined(OPENSSL_NO_SSL3)
@@ -8131,6 +8902,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 #endif
     } else {
 	opts->keyFile = opts->certFile = NULL;
+	opts->keyFilePat = opts->certFilePat = NULL;
 #if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_client_method();
 #elif !defined(OPENSSL_NO_SSL3)
@@ -8141,8 +8913,14 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     }
     opts->caFile = opts->caPath = NULL;
     opts->pfxFile = NULL;
+    opts->pfxFilePat = NULL;
+    opts->passFile = NULL;
+    opts->passFilePat = NULL;
     opts->passwd = NULL;
+    opts->servername = NULL;
+    opts->certIgnore = 0;
 #ifdef CRYPTOAPI
+    opts->certStoreCA = 0;
     opts->certStore = NULL;
 #endif
     opts->cipherList = getenv("SSL_CIPHER");
@@ -8238,35 +9016,56 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
     } else if (!strcmp(argv[argi], "uniq")) {
 	opts->serial = -1;
     } else if (!strncmp(argv[argi], "sid_ctx=", 8)) {
-	opts->sid_ctx = strdup(argv[argi]+8);
+	opts->sid_ctx = (unsigned char*)strdup(argv[argi]+8);
+    } else if (!strcmp(argv[argi], "sni")) {
+	opts->useSNI = 1;
+    } else if (!strncmp(argv[argi], "servername=", 11)) {
+	opts->servername = strdup(argv[argi]+11);
     } else if (!strncmp(argv[argi], "key=", 4)) {
 	opts->keyFile = strdup(argv[argi]+4);
+	opts->keyFilePat = NULL;
+	opts->pfxFile = NULL;
+    } else if (!strncmp(argv[argi], "keypat=", 7)) {
+	opts->keyFilePat = strdup(argv[argi]+7);
+	opts->pfxFile = NULL;
     } else if (!strncmp(argv[argi], "cert=", 5)) {
 	opts->certFile = strdup(argv[argi]+5);
+	opts->certFilePat = NULL;
+	opts->pfxFile = NULL;
+    } else if (!strncmp(argv[argi], "certpat=", 8)) {
+	opts->certFilePat = strdup(argv[argi]+8);
+	opts->pfxFile = NULL;
+    } else if (!strncmp(argv[argi], "certkey=", 8)) {
+	opts->keyFile = opts->certFile = strdup(argv[argi]+8);
+	opts->keyFilePat = opts->certFilePat = NULL;
+	opts->pfxFile = NULL;
+    } else if (!strncmp(argv[argi], "certkeypat=", 11)) {
+	opts->keyFilePat = opts->certFilePat = strdup(argv[argi]+11);
+	opts->pfxFile = NULL;
     } else if (!strncmp(argv[argi], "CAfile=", 7)) {
 	opts->caFile = strdup(argv[argi]+7);
     } else if (!strncmp(argv[argi], "CApath=", 7)) {
 	opts->caPath = strdup(argv[argi]+7);
     } else if (!strncmp(argv[argi], "pfx=", 4)) {
 	opts->pfxFile = strdup(argv[argi]+4);
+	opts->pfxFilePat = NULL;
+	opts->keyFile = opts->certFile = NULL;
+	opts->keyFilePat = opts->certFilePat = NULL;
+    } else if (!strncmp(argv[argi], "pfxpat=", 7)) {
+	opts->pfxFilePat = strdup(argv[argi]+7);
+	opts->keyFile = opts->certFile = NULL;
+	opts->keyFilePat = opts->certFilePat = NULL;
     } else if (!strncmp(argv[argi], "passfile=", 9)) {
-	FILE *fp = fopen(argv[argi]+9, "r");
-	char str[STRMAX+1];
-	int i;
-	if (!fp) {
-	    message(LOG_ERR, "Can't open passwd file: %s", argv[argi]+9);
-	    help(argv[0], "ssl");
-	    exit(1);
-	}
-	for (i=0; i < STRMAX; i++) {
-	    int c = getc(fp);
-	    if (c == '\r' || c == '\n' || c == EOF) break;
-	    str[i] = c;
-	}
-	str[i] = '\0';
-	fclose(fp);
-	opts->passwd = strdup(str);
+	opts->passFile = strdup(argv[argi]+9);
+	opts->passFilePat = NULL;
+    } else if (!strncmp(argv[argi], "passfilepat=", 12)) {
+	opts->passFilePat = strdup(argv[argi]+12);
+	opts->passFile = NULL;
+    } else if (!strncmp(argv[argi], "ignore", 6)) {
+	opts->certIgnore = 1;
 #ifdef CRYPTOAPI
+    } else if (!strncmp(argv[argi], "storeCA", 7)) {
+	opts->certStoreCA = 1;
     } else if (!strncmp(argv[argi], "store=", 6)) {
 	opts->certStore = strdup(argv[argi]+6);
 #endif
@@ -8730,7 +9529,7 @@ void addEventSource(char *name) {
     if (RegCreateKey(HKEY_LOCAL_MACHINE, key, &hk)) return;
     if (!GetModuleFileName(0, exeName, sizeof(exeName))) return;
     if (RegSetValueEx(hk, "EventMessageFile", 0, REG_EXPAND_SZ,
-		      exeName, strlen(exeName)+1)) return;
+		      (BYTE*)exeName, strlen(exeName)+1)) return;
     data = (EVENTLOG_ERROR_TYPE | EVENTLOG_WARNING_TYPE |
 	    EVENTLOG_INFORMATION_TYPE);
     if (RegSetValueEx(hk, "TypesSupported", 0, REG_DWORD,
@@ -8934,12 +9733,8 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (dproto & proto_base) proto |= proto_base_d;
 	    if (dproto & proto_nobackup) proto |= proto_nobackup;
 	}
-	if (!(proto & proto_udp_s) ^ !(proto & proto_udp_d)) {
-	    message(LOG_ERR, "UDP TCP transform is not implemented yet");
-	    exit(1);
-	}
 	stone = mkstone(host, serv, shost, sserv, j, &argv[k], proto);
-	if (proto & proto_udp_s) {
+	if ((proto & proto_udp_s) && (proto & proto_udp_d)) { /* UDP => UDP */
 	    Origin *origin = (Origin*)malloc(sizeof(Origin));
 	    if (origin == NULL) {
 	    memerr:
@@ -8969,8 +9764,10 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (PairTop) PairTop->prev = stone->pairs;
 	    PairTop = stone->pairs;
 	}
-	stone->next = stones;
-	stones = stone;
+	if (!stone->parent) {	/* stone is parent */
+	    stone->next = stones;
+	    stones = stone;
+	}
 	proto = sproto = dproto = 0;	/* default: TCP */
     }
 #ifndef USE_EPOLL
@@ -9148,7 +9945,8 @@ void daemonize(void) {
 #endif
 
 void initialize(int argc, char *argv[]) {
-    int i, j;
+    int i;
+    int j = 0;	/* dummy init to suppress warnings */
 #ifdef WINDOWS
     WSADATA WSAData;
     if (WSAStartup(MAKEWORD(1, 1), &WSAData)) {
