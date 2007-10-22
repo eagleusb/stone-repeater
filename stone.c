@@ -3047,9 +3047,6 @@ static int sendPairUDPbuf(Stone *stone, Pair *pair, char *buf, int len) {
     time(&pair->clock);
     if (p) p->clock = pair->clock;
     pair->tx += len;
-    if ((pair->xhost->mode & XHostsMode_Dump) > 0
-	|| ((pair->proto & proto_first_w) && Debug > 3))
-	message_buf(pair, len, "UDP");
     return 0;	/* success */
 }
 
@@ -3143,9 +3140,15 @@ int sendPairUDP(Pair *pair) {
 	if (ex != pair->b) ungetExBuf(ex);
 	if (pos >= len) {	/* complete the packet */
 	complete:
-	    if (!err) err = sendPairUDPbuf(stone, pair,
-					   (char*)(buf+UDP_HEAD_LEN),
-					   len-UDP_HEAD_LEN);
+	    if (!err) {
+		err = sendPairUDPbuf(stone, pair, (char*)(buf+UDP_HEAD_LEN),
+				     len-UDP_HEAD_LEN);
+		if (!err) {
+		    if ((pair->xhost->mode & XHostsMode_Dump) > 0
+			|| ((pair->proto & proto_first_w) && Debug > 3))
+			message_buf(pair, len, "tu");
+		}
+	    }
 	    if (cur != pair->b) ungetExBuf(cur);
 	    cur = NULL;
 	}
@@ -3810,7 +3813,11 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 	message(LOG_DEBUG, "%d TCP %d: connecting to TCP %d %s",
 		p1->stone->sd, p2->sd, p1->sd, addrport);
     }
-    ret = connect(p1->sd, dst, dstlen);
+    if (p1->proto & proto_dgram) {
+	ret = 0;	/* do nothing */
+    } else {
+	ret = connect(p1->sd, dst, dstlen);
+    }
     if (ret < 0) {
 #ifdef WINDOWS
 	errno = WSAGetLastError();
