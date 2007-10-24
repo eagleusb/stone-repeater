@@ -643,7 +643,9 @@ const int proto_shutdown =	  0x100000;	  /* sent shutdown */
 const int proto_close =	  	  0x200000;	  /* request to close */
 const int proto_eof =		  0x400000;	  /* EOF was received */
 const int proto_error =		  0x800000;	  /* error reported */
+#ifndef USE_EPOLL
 const int proto_thread =	 0x1000000;	  /* on thread */
+#endif
 const int proto_conninprog =	 0x2000000;	  /* connect in progress */
 const int proto_ohttp_s =	 0x4000000;	/* over http source */
 const int proto_ohttp_d =	 0x8000000;	/*           destination */
@@ -3781,6 +3783,9 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
     Pair *p2;
     time_t clock;
     char addrport[STRMAX+1];
+#ifdef USE_EPOLL
+    struct epoll_event ev;
+#endif
 #ifdef WINDOWS
     u_long param;
 #endif
@@ -3827,7 +3832,7 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 	    if (Debug > 3)
 		message(LOG_DEBUG, "%d TCP %d: connection in progress",
 			p1->stone->sd, p1->sd);
-	    return 1;
+	    goto done;
 	} else if (errno == EINTR) {
 	    if (Debug > 4)
 		message(LOG_DEBUG, "%d TCP %d: connect interrupted",
@@ -3866,6 +3871,18 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 	return -1;
     }
     connected(p1);
+done:
+#ifdef USE_EPOLL
+    ev.events = EPOLLONESHOT;
+    ev.data.ptr = p1;
+    if (Debug > 6)
+	message(LOG_DEBUG, "%d TCP %d: doconnect epoll_ctl %d ADD %x",
+		p1->stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
+    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
+	message(LOG_ERR, "%d TCP %d: doconnect epoll_ctl %d ADD err=%d",
+		p1->stone->sd, p1->sd, ePollFd, errno);
+    }
+#endif
     return 1;
 }
 
@@ -3930,48 +3947,18 @@ void asyncConn(Conn *conn) {
 	conn->lock = 0;
     }
     if (p1) {
-#ifdef USE_EPOLL
-	if (!(p1->proto & (proto_noconnect | proto_close))) {
-	    struct epoll_event ev;
-	    ev.events = EPOLLONESHOT;
-	    ev.data.ptr = p1;
-	    if (Debug > 6)
-		message(LOG_DEBUG, "%d TCP %d: asyncConn1 "
-			"epoll_ctl %d ADD %x",
-			p1->stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
-	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
-		message(LOG_ERR, "%d TCP %d: asyncConn1 "
-			"epoll_ctl %d ADD err=%d",
-			p1->stone->sd, p1->sd, ePollFd, errno);
-	    }
-	}
-	/* must be added to ePollFd before unset proto_thread */
-#endif
+#ifndef USE_EPOLL
 	p1->proto &= ~proto_thread;
+#endif
 	p1->proto |= proto_dirty;
 	p2 = p1->pair;
     } else {
 	p2 = NULL;
     }
     if (p2) {
-#ifdef USE_EPOLL
-	if (!(p2->proto & proto_close)) {
-	    struct epoll_event ev;
-	    ev.events = EPOLLONESHOT;
-	    ev.data.ptr = p2;
-	    if (Debug > 6)
-		message(LOG_DEBUG, "%d TCP %d: asyncConn2 "
-			"epoll_ctl %d ADD %x",
-			p2->stone->sd, p2->sd, ePollFd, (int)ev.data.ptr);
-	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
-		message(LOG_ERR, "%d TCP %d: asyncConn2 "
-			"epoll_ctl %d ADD err=%d",
-			p2->stone->sd, p2->sd, ePollFd, errno);
-	    }
-	}
-	/* must be added to ePollFd before unset proto_thread */
-#endif
+#ifndef USE_EPOLL
 	p2->proto &= ~proto_thread;
+#endif
 	p2->proto |= proto_dirty;
     }
     ASYNC_END;
@@ -3988,13 +3975,18 @@ int scanConns(void) {
 	if (p1) p2 = p1->pair;
 	if (p1 && !(p1->proto & proto_close) &&
 	    p2 && !(p2->proto & proto_close)) {
-	    if ((p2->proto & proto_connect) && conn->lock == 0 &&
-		!(p1->proto & proto_thread) &&
-		!(p2->proto & proto_thread)) {
+	    if ((p2->proto & proto_connect) && conn->lock == 0
+#ifndef USE_EPOLL
+		&& !(p1->proto & proto_thread)
+		&& !(p2->proto & proto_thread)
+#endif
+		) {
 		conn->lock = 1;		/* lock conn */
 		if (Debug > 4) message_conn(LOG_DEBUG, conn);
+#ifndef USE_EPOLL
 		p1->proto |= (proto_thread | proto_dirty);
 		p2->proto |= (proto_thread | proto_dirty);
+#endif
 		ASYNC(asyncConn, conn);
 	    }
 	} else {
@@ -4016,6 +4008,9 @@ Pair *acceptPair(Stone *stone) {
     struct sockaddr *from = (struct sockaddr*)&ss;
     socklen_t fromlen = sizeof(ss);
     Pair *pair;
+#ifdef USE_EPOLL
+    struct epoll_event ev;
+#endif
     SOCKET nsd = accept(stone->sd, from, &fromlen);
     if (InvalidSocket(nsd)) {
 #ifdef WINDOWS
@@ -4054,6 +4049,17 @@ Pair *acceptPair(Stone *stone) {
     pair->proto = ((stone->proto & proto_pair_s & ~proto_command) |
 		   proto_first_r | proto_first_w | command_source);
     pair->timeout = stone->timeout;
+#ifdef USE_EPOLL
+    ev.events = EPOLLONESHOT;
+    ev.data.ptr = pair;
+    if (Debug > 6)
+	message(LOG_DEBUG, "%d TCP %d: acceptPair epoll_ctl %d ADD %x",
+		stone->sd, pair->sd, ePollFd, (int)ev.data.ptr);
+    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, pair->sd, &ev) < 0) {
+	message(LOG_ERR, "%d TCP %d: acceptPair epoll_ctl %d ADD err=%d",
+		stone->sd, pair->sd, ePollFd, errno);
+    }
+#endif
     return pair;
 }
 
@@ -4663,7 +4669,9 @@ int scanClose(Pair *pairs) {	/* scan close request */
 	SOCKET sd;
 	p2 = p1;
 	p1 = p1->next;
+#ifndef USE_EPOLL
 	if (p2->proto & proto_thread) continue;
+#endif
 	if (p2->count > 0) {
 	    p2->count--;
 	    n++;
@@ -5402,16 +5410,6 @@ int doproxy(Pair *pair, char *host, char *serv) {
 	SOCKET nsd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
 	if (ValidSocket(nsd)) {
 	    Pair *p = pair->pair;
-#ifdef USE_EPOLL
-	    struct epoll_event ev;
-	    ev.events = EPOLLONESHOT;
-	    ev.data.ptr = pair;
-	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, nsd, &ev) < 0) {
-		message(LOG_ERR, "%d TCP %d: reopen "
-			"epoll_ctl %d ADD err=%d",
-			pair->stone->sd, nsd, ePollFd, errno);
-	    }
-#endif
 	    pair->sd = nsd;
 	    message(LOG_INFO, "%d TCP %d: close %d %08x, "
 		    "reopen %d as family=%d",
@@ -5500,18 +5498,6 @@ int proxyCommon(Pair *pair, char *parm, int start) {
 	message(LOG_DEBUG, "proxy %d -> http://%s:%s",
 		(r ? r->sd : INVALID_SOCKET), host, port);
     }
-#ifdef USE_EPOLL
-    if (pair->proto & proto_noconnect) {
-	struct epoll_event ev;
-	ev.events = EPOLLONESHOT;
-	ev.data.ptr = pair;
-	if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, pair->sd, &ev) < 0) {
-	    message(LOG_ERR, "%d TCP %d: proxyCommon "
-		    "epoll_ctl %d ADD err=%d",
-		    pair->stone->sd, pair->sd, ePollFd, errno);
-	}
-    }
-#endif
     pair->proto &= ~(proto_noconnect | state_mask);
     pair->proto |= (proto_dirty | 1);
     return doproxy(pair, host, port);
@@ -6155,13 +6141,11 @@ static void message_select(int pri, char *msg,
 
 /* main event loop */
 
-void proto2fdset(Pair *pair, int isthread,
-#ifdef USE_EPOLL
-		 int epfd
-#else
-		 fd_set *routp, fd_set *woutp, fd_set *eoutp
+void proto2fdset(
+#ifndef USE_EPOLL
+    int isthread, fd_set *routp, fd_set *woutp, fd_set *eoutp,
 #endif
-    ) {
+    Pair *pair) {
     SOCKET sd;
 #ifdef USE_EPOLL
     struct epoll_event ev;
@@ -6171,13 +6155,15 @@ void proto2fdset(Pair *pair, int isthread,
     if (!pair) return;
     sd = pair->sd;
     if (InvalidSocket(sd)) return;
+#ifndef USE_EPOLL
     if (!isthread && (pair->proto & proto_thread)) return;
+#endif
 #ifdef USE_SSL
     if (pair->ssl_flag & (sf_sb_on_r | sf_sb_on_w)) {
 #ifdef USE_EPOLL
 	if (pair->ssl_flag & sf_sb_on_r) ev.events |= EPOLLIN;
 	if (pair->ssl_flag & sf_sb_on_w) ev.events |= EPOLLOUT;
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	FD_CLR(sd, routp);
 	FD_CLR(sd, woutp);
@@ -6195,7 +6181,7 @@ void proto2fdset(Pair *pair, int isthread,
     } else if (pair->proto & proto_conninprog) {
 #ifdef USE_EPOLL
 	ev.events |= (EPOLLOUT | EPOLLPRI);
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	FdSet(sd, woutp);
 	FdSet(sd, eoutp);
@@ -6204,7 +6190,7 @@ void proto2fdset(Pair *pair, int isthread,
     } else if (pair->ssl_flag & sf_wb_on_r) {
 #ifdef USE_EPOLL
 	ev.events |= EPOLLIN;
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	FD_CLR(sd, woutp);
 	FdSet(sd, routp);
@@ -6212,7 +6198,7 @@ void proto2fdset(Pair *pair, int isthread,
     } else if (pair->ssl_flag & sf_rb_on_w) {
 #ifdef USE_EPOLL
 	ev.events |= EPOLLOUT;
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	FD_CLR(sd, routp);
 	FdSet(sd, woutp);
@@ -6230,11 +6216,11 @@ void proto2fdset(Pair *pair, int isthread,
 		struct epoll_event pev;
 		pev.events = EPOLLONESHOT;
 		pev.data.ptr = p;
-		epoll_ctl(epfd, EPOLL_CTL_MOD, psd, &pev);
+		epoll_ctl(ePollFd, EPOLL_CTL_MOD, psd, &pev);
 		if (Debug > 7)
 		    message(LOG_DEBUG, "%d TCP %d: proto2fdset2 "
 			    "epoll_ctl %d MOD %x events=%x",
-			    p->stone->sd, psd, epfd,
+			    p->stone->sd, psd, ePollFd,
 			    (int)pev.data.ptr, pev.events);
 #else
 		FD_CLR(psd, routp);
@@ -6245,7 +6231,7 @@ void proto2fdset(Pair *pair, int isthread,
 #ifdef USE_EPOLL
 	if (pair->ssl_flag & (sf_cb_on_r)) ev.events |= EPOLLIN;
 	if (pair->ssl_flag & (sf_cb_on_w)) ev.events |= EPOLLOUT;
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	FD_CLR(sd, routp);
 	FD_CLR(sd, woutp);
@@ -6256,7 +6242,7 @@ void proto2fdset(Pair *pair, int isthread,
 #ifdef USE_EPOLL
 	if (pair->ssl_flag & (sf_ab_on_r)) ev.events |= EPOLLIN;
 	if (pair->ssl_flag & (sf_ab_on_w)) ev.events |= EPOLLOUT;
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	FD_CLR(sd, routp);
 	FD_CLR(sd, woutp);
@@ -6287,7 +6273,7 @@ void proto2fdset(Pair *pair, int isthread,
 	if (isset)
 #ifdef USE_EPOLL
 	    ev.events |= EPOLLPRI;
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sd, &ev);
+	epoll_ctl(ePollFd, EPOLL_CTL_MOD, sd, &ev);
 #else
 	    FdSet(sd, eoutp);
 #endif
@@ -6296,7 +6282,7 @@ void proto2fdset(Pair *pair, int isthread,
     if (Debug > 7)
 	message(LOG_DEBUG, "%d TCP %d: proto2fdset "
 		"epoll_ctl %d MOD %x events=%x",
-		pair->stone->sd, sd, epfd, (int)ev.data.ptr, ev.events);
+		pair->stone->sd, sd, ePollFd, (int)ev.data.ptr, ev.events);
 #endif
     pair->proto &= ~proto_dirty;
 }
@@ -6663,7 +6649,7 @@ void doReadWrite(Pair *pair) {	/* pair must be source side */
 	ro = ri;
 	wo = wi;
 	eo = ei;
-	for (i=0; i < npairs; i++) proto2fdset(p[i], 1, &ro, &wo, &eo);
+	for (i=0; i < npairs; i++) proto2fdset(1, &ro, &wo, &eo, p[i]);
 	if (Debug > 10)
 	    message_select(LOG_DEBUG, "selectReadWrite1", &ro, &wo, &eo);
 	if (select(FD_SETSIZE, &ro, &wo, &eo, &tv) <= 0) goto exit_loop;
@@ -6768,37 +6754,7 @@ int doAcceptConnect(Pair *p1) {
 	    return 0;	/* pair is disposed */
 	}
     }
-#ifdef USE_EPOLL
-    if (!(p1->proto & proto_close)) {
-	struct epoll_event ev;
-	ev.events = EPOLLONESHOT;
-	if (!(p1->proto & proto_dgram)) {
-	    ev.data.ptr = p1;
-	    if (Debug > 6)
-		message(LOG_DEBUG, "%d TCP %d: doAcceptConnect1 "
-			"epoll_ctl %d ADD %x",
-			stone->sd, p1->sd, ePollFd, (int)ev.data.ptr);
-	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p1->sd, &ev) < 0) {
-		message(LOG_ERR, "%d TCP %d: doAcceptConnect1 "
-			"epoll_ctl %d ADD err=%d",
-			stone->sd, p1->sd, ePollFd, errno);
-	    }
-	}
-	if (!(p2->proto & (proto_noconnect | proto_close))) {
-	    ev.data.ptr = p2;
-	    if (Debug > 6)
-		message(LOG_DEBUG, "%d TCP %d: doAcceptConnect2 "
-			"epoll_ctl %d ADD %x",
-			stone->sd, p2->sd, ePollFd, (int)ev.data.ptr);
-	    if (epoll_ctl(ePollFd, EPOLL_CTL_ADD, p2->sd, &ev) < 0) {
-		message(LOG_ERR, "%d TCP %d: doAcceptConnect2 "
-			"epoll_ctl %d ADD err=%d",
-			stone->sd, p2->sd, ePollFd, errno);
-	    }
-	}
-    }
-    /* must be added to ePollFd before unset proto_thread */
-#else
+#ifndef USE_EPOLL
     if (ret > 0) {
 	p1->proto |= (proto_thread | proto_dirty);
 	p2->proto |= (proto_thread | proto_dirty);
@@ -7022,11 +6978,11 @@ int scanPairs(
 	    pairs = pair;
 	    continue;
 	}
-	if (!(pair->proto & (proto_thread | proto_dgram))
-	    && ValidSocket(sd)) {
+	if (!(pair->proto & proto_dgram) && ValidSocket(sd)) {
 	    time_t clock;
 	    int idle = 1;	/* assume no events happen on sd */
 #ifndef USE_EPOLL
+	    if (pair->proto & proto_thread) continue;
 	    if (FD_ISSET(sd, rop) || FD_ISSET(sd, wop) || FD_ISSET(sd, eop)) {
 		Pair *p = pair->pair;
 		if (p && (p->proto & proto_dgram)) {
@@ -7673,8 +7629,8 @@ void repeater(void) {
     struct epoll_event evs[EVSMAX];
     for (pair=PairTop; pair != NULL; pair=pair->next)
 	if (pair->clock != -1 &&	/* not top */
-	    !(pair->proto & proto_thread) && (pair->proto & proto_dirty))
-	    proto2fdset(pair, 0, ePollFd);
+	    (pair->proto & proto_dirty))
+	    proto2fdset(pair);
     if (conns.next || trash.next || spin > 0 || AsyncCount > 0) {
 	if (AsyncCount == 0 && spin > 0) spin--;
 	timeout = TICK_SELECT / 1000;
@@ -7696,7 +7652,7 @@ void repeater(void) {
     for (pair=PairTop; pair != NULL; pair=pair->next)
 	if (pair->clock != -1 &&	/* not top */
 	    !(pair->proto & proto_thread))
-	    proto2fdset(pair, 0, &rout, &wout, &eout);
+	    proto2fdset(0, &rout, &wout, &eout, pair);
     if (conns.next || trash.next || spin > 0 || AsyncCount > 0) {
 	if (AsyncCount == 0 && spin > 0) spin--;
 	timeout = &tv;
