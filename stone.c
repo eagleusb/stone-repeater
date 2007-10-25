@@ -6978,7 +6978,7 @@ int scanPairs(
 	    pairs = pair;
 	    continue;
 	}
-	if (!(pair->proto & proto_dgram) && ValidSocket(sd)) {
+	if (ValidSocket(sd)) {
 	    time_t clock;
 	    int idle = 1;	/* assume no events happen on sd */
 #ifndef USE_EPOLL
