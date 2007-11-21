@@ -349,7 +349,7 @@ typedef struct {
     int vflags;
     long off;
     long serial;
-    const SSL_METHOD *meth;
+    /* const */ SSL_METHOD *meth;
     int (*callback)(int, X509_STORE_CTX *);
     unsigned char *sid_ctx;
     int useSNI;
@@ -941,24 +941,22 @@ void message(int pri, char *fmt, ...) {
     vsnprintf(str+pos, LONGSTRMAX-pos, fmt, ap);
     va_end(ap);
     str[LONGSTRMAX] = '\0';
+    if (LogFp) fprintf(LogFp, "%s\n", str);
 #ifndef NO_SYSLOG
-    if (Syslog) {
+    else if (Syslog) {
 	if (Syslog == 1
 	    || pri != LOG_DEBUG) syslog(pri, "%s", str);
 	if (Syslog > 1) fprintf(stdout, "%s\n", str);	/* daemontools */
-    } else
-#else
-#ifdef NT_SERVICE
-    if (NTServiceLog) {
+    }
+#elif defined(NT_SERVICE)
+    else if (NTServiceLog) {
 	LPCTSTR msgs[] = {str, NULL};
 	int type = EVENTLOG_INFORMATION_TYPE;
 	if (pri <= LOG_ERR) type = EVENTLOG_ERROR_TYPE;
 	else if (pri <= LOG_NOTICE) type = EVENTLOG_WARNING_TYPE;
 	ReportEvent(NTServiceLog, type, 0, EVLOG, NULL, 1, 0, msgs, NULL);
-    } else
+    }
 #endif
-#endif
-	if (LogFp) fprintf(LogFp, "%s\n", str);
 }
 
 void message_time(Pair *pair, int pri, char *fmt, ...) {
