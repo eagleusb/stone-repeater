@@ -423,7 +423,7 @@ typedef struct {
     socklen_t len;
     struct sockaddr addr;
 } SockAddr;
-#define SockAddrBaseSize	(sizeof(SockAddr) - sizeof(struct sockaddr))
+#define SockAddrBaseSize	((int)&((SockAddr*)NULL)->addr)
 
 typedef struct _XHosts {
     struct _XHosts *next;
@@ -2452,11 +2452,15 @@ int modPairDest(Pair *p1, struct sockaddr *dst, socklen_t dstlenmax) {
 	    unsigned char **match;
 	    if (Debug > 2) {
 		char str[SSL_MAX_SSL_SESSION_ID_LENGTH * 2 + 1];
+		int len = sess->session_id_length;
 		int i;
-		for (i=0; i < sess->session_id_length; i++)
+		if (len > SSL_MAX_SSL_SESSION_ID_LENGTH)
+		    len = SSL_MAX_SSL_SESSION_ID_LENGTH;
+		for (i=0; i < len; i++)
 		    sprintf(&str[i*2], "%02x", sess->session_id[i]);
-		message(LOG_DEBUG, "%d TCP %d: SSL session ID=%s",
-			p2->stone->sd, p2->sd, str);
+		str[i*2] = '\0';
+		message(LOG_DEBUG, "%d TCP %d: SSL session ID=%s len=%d",
+			p2->stone->sd, p2->sd, str, sess->session_id_length);
 	    }
 	    match = SSL_SESSION_get_ex_data(sess, MatchIndex);
 	    if (match && p2->stone->ssl_server) {
@@ -2466,7 +2470,7 @@ int modPairDest(Pair *p1, struct sockaddr *dst, socklen_t dstlenmax) {
 		if (0 <= lbparm && lbparm <= 9) s = match[lbparm];
 		else s = match[1];
 		if (!s) s = match[0];
-		if (lbmod) {
+		if (s && lbmod) {
 		    int offset2 = 0;
 		    offset = 0;
 		    while (*s) {
@@ -3798,6 +3802,7 @@ int doconnect(Pair *p1, struct sockaddr *sa, socklen_t salen) {
 			   p1->stone->sd, p1->sd);
     ret = modPairDest(p1, dst, sizeof(ss));
     if (ret > 0) dstlen = ret;	/* dest is modified */
+    else if (ret == -2) return ret;	/* dest is not detemined yet */
     /*
       now destination is determined, engage
     */
@@ -3905,7 +3910,14 @@ int reqconn(Pair *pair,		/* request pair to connect to destination */
 	return 0;
     }
     ret = doconnect(pair, dst, dstlen);
-    if (ret < 0) return -1;	/* error */
+    if (ret < 0) {
+	if (ret == -2) {
+	    /* must read more to determine dest */
+	    p->proto |= (proto_select_r | proto_dirty);
+	    return 0;
+	}
+	return -1;	/* error */
+    }
     if (ret > 0) return ret;	/* connected or connection in progress */
     conn = malloc(sizeof(Conn));
     if (!conn) {
@@ -3936,13 +3948,18 @@ void asyncConn(Conn *conn) {
     ASYNC_BEGIN;
     if (Debug > 8) message(LOG_DEBUG, "asyncConn");
     p1 = conn->pair;
-    if (p1 == NULL ||
-	doconnect(p1, &conn->dst->addr, conn->dst->len) != 0) {
-	if (p1) p1->count -= REF_UNIT;	/* no more request to connect */
+    if (p1 == NULL) {
 	conn->pair = NULL;
 	conn->lock = -1;
     } else {
-	conn->lock = 0;
+	int ret = doconnect(p1, &conn->dst->addr, conn->dst->len);
+	if (ret == 0 || ret == -2) {
+	    conn->lock = 0;
+	} else {	/* no more request to connect */
+	    if (p1) p1->count -= REF_UNIT;
+	    conn->pair = NULL;
+	    conn->lock = -1;
+	}
     }
     if (p1) {
 #ifndef USE_EPOLL
@@ -6753,7 +6770,7 @@ int doAcceptConnect(Pair *p1) {
 	}
     }
 #ifndef USE_EPOLL
-    if (ret > 0) {
+    if (ret >= 0) {
 	p1->proto |= (proto_thread | proto_dirty);
 	p2->proto |= (proto_thread | proto_dirty);
 	doReadWrite(p1);
