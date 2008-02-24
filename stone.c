@@ -1,6 +1,6 @@
 /*
  * stone.c	simple repeater
- * Copyright(c)1995-2007 by Hiroaki Sengoku <sengoku@gcd.org>
+ * Copyright(c)1995-2008 by Hiroaki Sengoku <sengoku@gcd.org>
  * Version 1.0	Jan 28, 1995
  * Version 1.1	Jun  7, 1995
  * Version 1.2	Aug 20, 1995
@@ -91,7 +91,7 @@
  * -DWINDOWS	  Windows95/98/NT
  * -DNT_SERVICE	  WindowsNT/2000 native service
  */
-#define VERSION	"2.3d"
+#define VERSION	"2.3e"
 static char *CVS_ID =
 "@(#) $Id$";
 
