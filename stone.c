@@ -6259,9 +6259,9 @@ void proto2fdset(
 		epoll_ctl(ePollFd, EPOLL_CTL_MOD, psd, &pev);
 		if (Debug > 7)
 		    message(LOG_DEBUG, "%d TCP %d: proto2fdset2 "
-			    "epoll_ctl %d MOD %x events=%x",
+			    "epoll_ctl %d MOD %lx events=%x",
 			    p->stone->sd, psd, ePollFd,
-			    (int)pev.data.ptr, pev.events);
+			    (long)pev.data.ptr, pev.events);
 #else
 		FD_CLR(psd, routp);
 		FD_CLR(psd, woutp);
@@ -7091,8 +7091,8 @@ static int newMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
     if (match) {
 	int i;
 	for (i=0; i <= NMATCH_MAX; i++) match[i] = NULL;
-	if (Debug > 4) message(LOG_DEBUG, "newMatch %d: %x",
-			       NewMatchCount++, (int)match);
+	if (Debug > 4) message(LOG_DEBUG, "newMatch %d: %lx",
+			       NewMatchCount++, (long)match);
 	return CRYPTO_set_ex_data(ad, idx, match);
     }
     return 0;
@@ -7105,8 +7105,8 @@ static void freeMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
     for (i=0; i <= NMATCH_MAX; i++) {
 	if (match[i]) free(match[i]);
     }
-    if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %x",
-			   --NewMatchCount, (int)match);
+    if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %lx",
+			   --NewMatchCount, (long)match);
     free(match);
 }
 
