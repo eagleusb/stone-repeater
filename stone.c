@@ -3579,7 +3579,7 @@ int doSSL_shutdown(Pair *pair, int how) {
 		if (errno == 0) {
 		    ret = 1;	/* success ? */
 		} else if (errno == EINTR || errno == EAGAIN) {
-		    pair->ssl_flag |= (sf_sb_on_r | sf_sb_on_r);
+		    pair->ssl_flag |= (sf_sb_on_r | sf_sb_on_w);
 		    if (Debug > 8)
 			message(LOG_DEBUG, "%d TCP %d: SSL_shutdown "
 				"interrupted sf=%x", pair->stone->sd, sd,
