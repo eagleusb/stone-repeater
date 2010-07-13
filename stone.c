@@ -942,15 +942,14 @@ void message(int pri, char *fmt, ...) {
     vsnprintf(str+pos, LONGSTRMAX-pos, fmt, ap);
     va_end(ap);
     str[LONGSTRMAX] = '\0';
-    if (LogFp) fprintf(LogFp, "%s\n", str);
 #ifndef NO_SYSLOG
-    else if (Syslog) {
+    if (Syslog) {
 	if (Syslog == 1
 	    || pri != LOG_DEBUG) syslog(pri, "%s", str);
 	if (Syslog > 1) fprintf(stdout, "%s\n", str);	/* daemontools */
     }
 #elif defined(NT_SERVICE)
-    else if (NTServiceLog) {
+    if (NTServiceLog) {
 	LPCTSTR msgs[] = {str, NULL};
 	int type = EVENTLOG_INFORMATION_TYPE;
 	if (pri <= LOG_ERR) type = EVENTLOG_ERROR_TYPE;
@@ -958,6 +957,7 @@ void message(int pri, char *fmt, ...) {
 	ReportEvent(NTServiceLog, type, 0, EVLOG, NULL, 1, 0, msgs, NULL);
     }
 #endif
+    else if (LogFp) fprintf(LogFp, "%s\n", str);
 }
 
 void message_time(Pair *pair, int pri, char *fmt, ...) {
