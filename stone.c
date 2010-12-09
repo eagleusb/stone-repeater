@@ -822,12 +822,12 @@ void bcopy(const void *b1, void *b2, int len) {
 #endif
 
 #ifdef NO_RINDEX
-char *rindex(char *p, int ch) {
-    char *save = NULL;
+char *rindex(const char *p, int ch) {
+    const char *save = NULL;
     do {
 	if (*p == ch) save = p;
     } while (*p++);
-    return save;
+    return (char*)save;
 }
 #endif
 
@@ -947,7 +947,7 @@ void message(int pri, char *fmt, ...) {
 	if (Syslog == 1
 	    || pri != LOG_DEBUG) syslog(pri, "%s", str);
 	if (Syslog > 1) fprintf(stdout, "%s\n", str);	/* daemontools */
-    }
+    } else
 #elif defined(NT_SERVICE)
     if (NTServiceLog) {
 	LPCTSTR msgs[] = {str, NULL};
@@ -955,9 +955,9 @@ void message(int pri, char *fmt, ...) {
 	if (pri <= LOG_ERR) type = EVENTLOG_ERROR_TYPE;
 	else if (pri <= LOG_NOTICE) type = EVENTLOG_WARNING_TYPE;
 	ReportEvent(NTServiceLog, type, 0, EVLOG, NULL, 1, 0, msgs, NULL);
-    }
+    } else
 #endif
-    else if (LogFp) fprintf(LogFp, "%s\n", str);
+    if (LogFp) fprintf(LogFp, "%s\n", str);
 }
 
 void message_time(Pair *pair, int pri, char *fmt, ...) {
@@ -9360,7 +9360,7 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 #ifdef THREAD_UNSAFE
 	    struct group *group = getgrnam(argv[argi]);
 	    if (group) {
-		SetGID = group->gr_uid;
+		SetGID = group->gr_gid;
 	    }
 #else
 	    struct group grbuf;
