@@ -325,6 +325,11 @@ int CryptoAPI_verify_certificate(X509 *x509);
 #define OPENSSL_NO_TLSEXT
 #endif
 
+#ifdef ANDROID
+#include <openssl/pem.h>
+#include "keystore_get.h"
+#endif
+
 typedef struct {
     int verbose;
     int shutdown_mode;
@@ -350,7 +355,10 @@ typedef struct {
     int vflags;
     long off;
     long serial;
-    /* const */ SSL_METHOD *meth;
+#ifdef CONST_SSL_METHOD
+    const
+#endif
+    SSL_METHOD *meth;
     int (*callback)(int, X509_STORE_CTX *);
     unsigned char *sid_ctx;
     int useSNI;
@@ -369,6 +377,9 @@ typedef struct {
     int certIgnore;
 #ifdef CRYPTOAPI
     int certStoreCA;
+    char *certStore;
+#endif
+#ifdef ANDROID
     char *certStore;
 #endif
     char *cipherList;
@@ -4400,7 +4411,7 @@ int acceptCheck(Pair *pair1) {
     fslen = 0;
     ident[0] = '\0';
     bcopy(pair1->t->buf, &fromlen, sizeof(fromlen));	/* restore */
-    if (0 < fromlen && fromlen <= sizeof(ss)) {
+    if (0 < fromlen && fromlen <= (socklen_t)sizeof(ss)) {
 	bcopy(pair1->t->buf + sizeof(fromlen), from, fromlen);
     } else {
 	message(LOG_ERR, "%d TCP %d: acceptCheck Can't happen fromlen=%d",
@@ -4623,7 +4634,7 @@ int strnUser(char *buf, int limit, Pair *pair, int which) {
 	}
 	switch (which) {
 	case 1:	/* gid */
-	    snprintf(str, STRMAX, "%d", (cred ? cred->gid : -1));
+	    snprintf(str, STRMAX, "%d", (cred ? (int)cred->gid : -1));
 	    break;
 	case 2:	/* user name */
 	    *str = '\0';
@@ -4656,7 +4667,7 @@ int strnUser(char *buf, int limit, Pair *pair, int which) {
 	    }
 	    break;
 	default:	/* uid */
-	    snprintf(str, STRMAX, "%d", (cred ? cred->uid : -1));
+	    snprintf(str, STRMAX, "%d", (cred ? (int)cred->uid : -1));
 	    break;
 	}
     }
@@ -7436,6 +7447,71 @@ static int ssl_servername_callback(SSL *ssl, int *ad, void *arg) {
 }
 #endif
 
+#ifdef ANDROID
+static BIO *keystore_BIO(const char *key) {
+    BIO *bio = NULL;
+    char val[KEYSTORE_MESSAGE_SIZE];
+    int len = keystore_get(key, strlen(key), val);
+    if (len > 0 && (bio=BIO_new(BIO_s_mem()))) {
+	BIO_write(bio, val, len);
+    } else {
+	message(LOG_NOTICE, "Can't get keystore: %s", key);
+    }
+    return bio;
+}
+
+static void use_keystore(SSL_CTX *ctx, char *name) {
+    BIO *bio;
+    STACK_OF(X509_INFO) *stack = NULL;
+    X509 *cert = NULL;
+    EVP_PKEY *key = NULL;
+    char *kname = (char*)malloc(strlen(name)+10);
+    if (!kname) {
+    memerr:
+	message(LOG_CRIT, "Out of memory");
+	exit(1);
+    }
+    strcpy(kname, "CACERT_");
+    strcat(kname, name);
+    if ((bio=keystore_BIO(kname))
+	&& (stack=PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL))) {
+	int i;
+	for (i=0; i < sk_X509_INFO_num(stack); i++) {
+	    X509_INFO *info = sk_X509_INFO_value(stack, i);
+	    if (!info) continue;
+	    if (info->x509) X509_STORE_add_cert(ctx->cert_store, info->x509);
+	    if (info->crl) X509_STORE_add_crl(ctx->cert_store, info->crl);
+	}
+	sk_X509_INFO_pop_free(stack, X509_INFO_free);
+    }
+    if (bio) BIO_free(bio);
+    strcpy(kname, "USRCERT_");
+    strcat(kname, name);
+    if ((bio=keystore_BIO(kname))
+	&& (cert=PEM_read_bio_X509(bio, NULL, NULL, NULL))) {
+	if (!SSL_CTX_use_certificate(ctx, cert)) {
+	    message(LOG_ERR, "SSL_CTX_use_certificate(%s) %s",
+		    kname, ERR_error_string(ERR_get_error(), NULL));
+	    exit(1);
+	}
+	X509_free(cert);
+    }
+    if (bio) BIO_free(bio);
+    strcpy(kname, "USRPKEY_");
+    strcat(kname, name);
+    if ((bio=keystore_BIO(kname))
+	&& (key=PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL))) {
+	if (!SSL_CTX_use_PrivateKey(ctx, key) ) {
+	    message(LOG_ERR, "SSL_CTX_use_PrivateKey(%s) %s",
+		    kname, ERR_error_string(ERR_get_error(), NULL));
+	    exit(1);
+	}
+	EVP_PKEY_free(key);
+    }
+    if (bio) BIO_free(bio);
+}
+#endif
+
 StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     StoneSSL *ss;
     int err;
@@ -7550,6 +7626,9 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
 	    goto error;
         }
     }
+#endif
+#ifdef ANDROID
+    if (opts->certStore) use_keystore(ss->ctx, opts->certStore);
 #endif
     if (opts->cipherList
 	&& !SSL_CTX_set_cipher_list(ss->ctx, opts->cipherList)) {
@@ -8594,6 +8673,9 @@ void help(char *com, char *sub) {
 "       store=<prop>       ; \"SUBJ:<substr>\" or \"THUMB:<hex>\"\n"
 "       storeCA            ; use CA cert in Windows cert store\n"
 #endif
+#ifdef ANDROID
+"       store=<key>        ; keystore\n"
+#endif
 "       cipher=<ciphers>   ; list of ciphers\n"
 "       lb<n>=<m>          ; load balancing based on CN\n"
 	    );
@@ -8984,6 +9066,9 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     opts->certStoreCA = 0;
     opts->certStore = NULL;
 #endif
+#ifdef ANDROID
+    opts->certStore = NULL;
+#endif
     opts->cipherList = getenv("SSL_CIPHER");
     for (i=0; i < DEPTH_MAX; i++) opts->regexp[i] = NULL;
     opts->lbmod = 0;
@@ -9127,6 +9212,10 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 #ifdef CRYPTOAPI
     } else if (!strncmp(argv[argi], "storeCA", 7)) {
 	opts->certStoreCA = 1;
+    } else if (!strncmp(argv[argi], "store=", 6)) {
+	opts->certStore = strdup(argv[argi]+6);
+#endif
+#ifdef ANDROID
     } else if (!strncmp(argv[argi], "store=", 6)) {
 	opts->certStore = strdup(argv[argi]+6);
 #endif
