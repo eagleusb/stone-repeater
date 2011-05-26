@@ -275,12 +275,22 @@ int FdSetBug = 0;
 #endif
 
 #ifdef NO_SYSLOG
+#ifdef ANDROID
+#include <android/log.h>
+#define LOG_CRIT	ANDROID_LOG_FATAL
+#define LOG_ERR		ANDROID_LOG_ERROR
+#define LOG_WARNING	ANDROID_LOG_WARN
+#define LOG_NOTICE	ANDROID_LOG_INFO
+#define LOG_INFO	ANDROID_LOG_DEBUG
+#define LOG_DEBUG	ANDROID_LOG_VERBOSE
+#else
 #define LOG_CRIT	2	/* critical conditions */
 #define LOG_ERR		3	/* error conditions */
 #define LOG_WARNING	4	/* warning conditions */
 #define LOG_NOTICE	5	/* normal but signification condition */
 #define LOG_INFO	6	/* informational */
 #define LOG_DEBUG	7	/* debug-level messages */
+#endif
 #else	/* SYSLOG */
 #include <syslog.h>
 #endif
@@ -713,6 +723,8 @@ int AddrFlag = 0;
 #ifndef NO_SYSLOG
 int Syslog = 0;
 char SyslogName[STRMAX+1];
+#elif defined(ANDROID)
+int Syslog = 0;
 #endif
 FILE *LogFp = NULL;
 char *LogFileName = NULL;
@@ -928,7 +940,7 @@ void message(int pri, char *fmt, ...) {
     int pos = 0;
     unsigned long thid = 0;
     va_list ap;
-#ifndef NO_SYSLOG
+#if !defined(NO_SYSLOG) || defined(ANDROID)
     if (!Syslog)
 #endif
     {
@@ -958,6 +970,12 @@ void message(int pri, char *fmt, ...) {
     if (Syslog) {
 	if (Syslog == 1
 	    || pri != LOG_DEBUG) syslog(pri, "%s", str);
+	if (Syslog > 1) fprintf(stdout, "%s\n", str);	/* daemontools */
+    } else
+#elif defined(ANDROID)
+    if (Syslog) {
+	if (Syslog == 1
+	    || pri != LOG_DEBUG) __android_log_write(pri, "stone", str);
 	if (Syslog > 1) fprintf(stdout, "%s\n", str);	/* daemontools */
     } else
 #elif defined(NT_SERVICE)
@@ -8532,7 +8550,7 @@ void help(char *com, char *sub) {
 #ifndef NO_FORK
 "      -f <n>            ; # of child processes\n"
 #endif
-#ifndef NO_SYSLOG
+#if !defined(NO_SYSLOG) || defined(ANDROID)
 "      -l                ; use syslog\n"
 "      -ll               ; run under daemontools\n"
 #endif
@@ -9312,7 +9330,7 @@ int dohyphen(char opt, int argc, char *argv[], int argi) {
 			    | (((XHostsTrue->mode & XHostsMode_Dump) + 1)
 			       & XHostsMode_Dump));
 	break;
-#ifndef NO_SYSLOG
+#if !defined(NO_SYSLOG) || defined(ANDROID)
     case 'l':
 	Syslog++;
 	break;
@@ -10127,7 +10145,7 @@ void daemonize(void) {
 	message(LOG_WARNING, "Can't close stdin err=%d", errno);
     if (close(1) != 0)
 	message(LOG_WARNING, "Can't close stdout err=%d", errno);
-#ifndef NO_SYSLOG
+#if !defined(NO_SYSLOG) || defined(ANDROID)
     if (Syslog > 1) Syslog = 1;
 #endif
     if (!LogFileName) LogFp = NULL;
