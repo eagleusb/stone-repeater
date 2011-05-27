@@ -349,6 +349,9 @@ typedef struct {
     SSL_CTX *ctx;
     regex_t *re[DEPTH_MAX];
     char *name;
+#ifdef ANDROID
+    char *keystore;
+#endif
     unsigned char lbmod;
     unsigned char lbparm;
     unsigned char sslparm;
@@ -3472,6 +3475,74 @@ int doSSL_accept(Pair *pair) {
     return ret;
 }
 
+#ifdef ANDROID
+static BIO *keystore_BIO(const char *key) {
+    BIO *bio = NULL;
+    char val[KEYSTORE_MESSAGE_SIZE];
+    int len = keystore_get(key, strlen(key), val);
+    if (len > 0 && (bio=BIO_new(BIO_s_mem()))) {
+	BIO_write(bio, val, len);
+    } else {
+	message(LOG_NOTICE, "Can't get keystore: %s", key);
+    }
+    return bio;
+}
+
+static int use_keystore(SSL_CTX *ctx, char *name) {
+    BIO *bio;
+    STACK_OF(X509_INFO) *stack = NULL;
+    X509 *cert = NULL;
+    EVP_PKEY *key = NULL;
+    char *kname = (char*)malloc(strlen(name)+10);
+    int nkeys = 0;
+    if (!kname) {
+    memerr:
+	message(LOG_CRIT, "Out of memory");
+	exit(1);
+    }
+    strcpy(kname, "CACERT_");
+    strcat(kname, name);
+    if ((bio=keystore_BIO(kname))
+	&& (stack=PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL))) {
+	int i;
+	for (i=0; i < sk_X509_INFO_num(stack); i++) {
+	    X509_INFO *info = sk_X509_INFO_value(stack, i);
+	    if (!info) continue;
+	    if (info->x509) X509_STORE_add_cert(ctx->cert_store, info->x509);
+	    if (info->crl) X509_STORE_add_crl(ctx->cert_store, info->crl);
+	}
+	sk_X509_INFO_pop_free(stack, X509_INFO_free);
+    }
+    if (bio) BIO_free(bio);
+    strcpy(kname, "USRCERT_");
+    strcat(kname, name);
+    if ((bio=keystore_BIO(kname))
+	&& (cert=PEM_read_bio_X509(bio, NULL, NULL, NULL))) {
+	if (!SSL_CTX_use_certificate(ctx, cert)) {
+	    message(LOG_ERR, "SSL_CTX_use_certificate(%s) %s",
+		    kname, ERR_error_string(ERR_get_error(), NULL));
+	    exit(1);
+	}
+	X509_free(cert);
+    }
+    if (bio) BIO_free(bio);
+    strcpy(kname, "USRPKEY_");
+    strcat(kname, name);
+    if ((bio=keystore_BIO(kname))
+	&& (key=PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL))) {
+	nkeys++;
+	if (!SSL_CTX_use_PrivateKey(ctx, key) ) {
+	    message(LOG_ERR, "SSL_CTX_use_PrivateKey(%s) %s",
+		    kname, ERR_error_string(ERR_get_error(), NULL));
+	    exit(1);
+	}
+	EVP_PKEY_free(key);
+    }
+    if (bio) BIO_free(bio);
+    return nkeys;
+}
+#endif
+
 int doSSL_connect(Pair *pair) {
     int ret;
     int err;
@@ -3482,6 +3553,13 @@ int doSSL_connect(Pair *pair) {
     if (InvalidSocket(sd)) return -1;
     ssl = pair->ssl;
     if (!ssl) {
+#ifdef ANDROID
+	if (pair->stone->ssl_client->keystore) {
+	    int nkeys = use_keystore(pair->stone->ssl_client->ctx,
+				     pair->stone->ssl_client->keystore);
+	    if (nkeys > 0) pair->stone->ssl_client->keystore = NULL;
+	}
+#endif
 	ssl = SSL_new(pair->stone->ssl_client->ctx);
 	if (!ssl) {
 	    message(LOG_ERR, "%d TCP %d: SSL_new failed", pair->stone->sd, sd);
@@ -7466,71 +7544,6 @@ static int ssl_servername_callback(SSL *ssl, int *ad, void *arg) {
 }
 #endif
 
-#ifdef ANDROID
-static BIO *keystore_BIO(const char *key) {
-    BIO *bio = NULL;
-    char val[KEYSTORE_MESSAGE_SIZE];
-    int len = keystore_get(key, strlen(key), val);
-    if (len > 0 && (bio=BIO_new(BIO_s_mem()))) {
-	BIO_write(bio, val, len);
-    } else {
-	message(LOG_NOTICE, "Can't get keystore: %s", key);
-    }
-    return bio;
-}
-
-static void use_keystore(SSL_CTX *ctx, char *name) {
-    BIO *bio;
-    STACK_OF(X509_INFO) *stack = NULL;
-    X509 *cert = NULL;
-    EVP_PKEY *key = NULL;
-    char *kname = (char*)malloc(strlen(name)+10);
-    if (!kname) {
-    memerr:
-	message(LOG_CRIT, "Out of memory");
-	exit(1);
-    }
-    strcpy(kname, "CACERT_");
-    strcat(kname, name);
-    if ((bio=keystore_BIO(kname))
-	&& (stack=PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL))) {
-	int i;
-	for (i=0; i < sk_X509_INFO_num(stack); i++) {
-	    X509_INFO *info = sk_X509_INFO_value(stack, i);
-	    if (!info) continue;
-	    if (info->x509) X509_STORE_add_cert(ctx->cert_store, info->x509);
-	    if (info->crl) X509_STORE_add_crl(ctx->cert_store, info->crl);
-	}
-	sk_X509_INFO_pop_free(stack, X509_INFO_free);
-    }
-    if (bio) BIO_free(bio);
-    strcpy(kname, "USRCERT_");
-    strcat(kname, name);
-    if ((bio=keystore_BIO(kname))
-	&& (cert=PEM_read_bio_X509(bio, NULL, NULL, NULL))) {
-	if (!SSL_CTX_use_certificate(ctx, cert)) {
-	    message(LOG_ERR, "SSL_CTX_use_certificate(%s) %s",
-		    kname, ERR_error_string(ERR_get_error(), NULL));
-	    exit(1);
-	}
-	X509_free(cert);
-    }
-    if (bio) BIO_free(bio);
-    strcpy(kname, "USRPKEY_");
-    strcat(kname, name);
-    if ((bio=keystore_BIO(kname))
-	&& (key=PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL))) {
-	if (!SSL_CTX_use_PrivateKey(ctx, key) ) {
-	    message(LOG_ERR, "SSL_CTX_use_PrivateKey(%s) %s",
-		    kname, ERR_error_string(ERR_get_error(), NULL));
-	    exit(1);
-	}
-	EVP_PKEY_free(key);
-    }
-    if (bio) BIO_free(bio);
-}
-#endif
-
 StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     StoneSSL *ss;
     int err;
@@ -7647,7 +7660,11 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     }
 #endif
 #ifdef ANDROID
-    if (opts->certStore) use_keystore(ss->ctx, opts->certStore);
+    ss->keystore = NULL;
+    if (opts->certStore) {
+	int nkeys = use_keystore(ss->ctx, opts->certStore);
+	if (nkeys <= 0) ss->keystore = opts->certStore;
+    }
 #endif
     if (opts->cipherList
 	&& !SSL_CTX_set_cipher_list(ss->ctx, opts->cipherList)) {
