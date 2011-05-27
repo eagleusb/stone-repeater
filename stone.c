@@ -6113,6 +6113,56 @@ int healthQUIT(Pair *pair, char *parm, int start) {
     return -1;
 }
 
+int healthCommon(char *comm, Pair *pair, char *parm, int start) {
+    ExBuf *ex = pair->b;
+    char buf[LONGSTRMAX];
+    int i;
+    int j = 0;
+    int s = 0;
+    buf[0] = '\0';
+    for (i=0; i < ex->len; i++) {
+	char c = ex->buf[ex->start + i];
+	if (s < 5) {
+	    if (toupper(c) == "HOST:"[s]) {
+		s++;
+	    } else {
+		s = 10;	/* skip to next line */
+	    }
+	} else if (s == 5) {
+	    if (c != ' ') s++;
+	} else if (s == 10) {
+	    if (c == '\r' || c == '\n') s++;
+	} else if (s == 11) {
+	    if (c != '\r' && c != '\n') {
+		s = 0;
+		i--;	/* unget */
+	    }
+	}
+	if (s == 6) {
+	    if (j >= LONGSTRMAX-2 || c == '\r' || c == '\n') {
+		buf[j++] = ' ';
+		buf[j] = '\0';
+		break;
+	    }
+	    buf[j++] = c;
+	}
+    }
+    if (*parm) message(LOG_INFO, "%s%s %s", buf, comm, parm);
+    return -1;
+}
+
+int healthGET(Pair *pair, char *parm, int start) {
+    return healthCommon("GET", pair, parm, start);
+}
+
+int healthPOST(Pair *pair, char *parm, int start) {
+    return healthCommon("POST", pair, parm, start);
+}
+
+int healthHEAD(Pair *pair, char *parm, int start) {
+    return healthCommon("HEAD", pair, parm, start);
+}
+
 int healthErr(Pair *pair, char *parm, int start) {
     if (*parm) message(LOG_ERR, "Unknown health command: %s", parm);
     return -1;
@@ -6128,6 +6178,9 @@ Comm healthComm[] = {
     { "STONE", healthSTONE },
     { "LIMIT", healthLIMIT },
     { "QUIT", healthQUIT },
+    { "GET", healthGET },
+    { "POST", healthPOST },
+    { "HEAD", healthHEAD },
     { NULL, healthErr },
 };
 
