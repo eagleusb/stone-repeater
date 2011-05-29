@@ -6148,8 +6148,8 @@ int healthCommon(char *comm, Pair *pair, char *parm, int start) {
 	}
     }
     if (*parm) message(LOG_INFO, "%s%s %s", buf, comm, parm);
-    commOutput(pair, "HTTP/1.0 200 OK\r\n\r\n");
-    return -1;
+    commOutput(pair, "HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n");
+    return -2;
 }
 
 int healthGET(Pair *pair, char *parm, int start) {
