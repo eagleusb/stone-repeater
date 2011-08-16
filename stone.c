@@ -8327,6 +8327,7 @@ Stone *mkstone(
     char *dhost,	/* destination hostname */
     char *dserv,	/* destination port */
     char *host,		/* listening host */
+    char *intf,		/* listening interface */
     char *serv,		/* listening port */
     int nhosts,		/* # of hosts to permit */
     char *hosts[],	/* hosts to permit */
@@ -8450,6 +8451,20 @@ Stone *mkstone(
 	    setsockopt(stone->sd, SOL_SOCKET, SO_REUSEADDR,
 		       (char*)&i, sizeof(i));
 	}
+#ifdef SO_BINDTODEVICE
+	if (intf) {
+	    if (setsockopt(stone->sd, SOL_SOCKET, SO_BINDTODEVICE,
+			   intf, strlen(intf)) < 0) {
+#ifdef WINDOWS
+		errno = WSAGetLastError();
+#endif
+		message(LOG_ERR, "stone %d: Can't set sockopt "
+			"BINDTODEVICE %s err=%d", stone->sd,
+			intf, errno);
+		exit(1);
+	    }
+	}
+#endif
 	if ((st=getStone(sa, salen, proto))) {
 	    closesocket(stone->sd);
 	    stone->parent = st;
@@ -8692,7 +8707,7 @@ void help(char *com, char *sub) {
 		" | apop"
 #endif
 		" | base | block | nobackup\n"
-		"sport: [<host>:]<port#>[/<exts>[,<exts>]...]\n"
+		"sport: [[<host>][%%<intf>]:]<port#>[/<exts>[,<exts>]...]\n"
 		"exts:  tcp | udp"
 #ifdef USE_SSL
 		" | ssl"
@@ -9901,6 +9916,7 @@ int doopts(int argc, char *argv[]) {
 void doargs(int argc, int i, char *argv[]) {
     Stone *stone;
     char *host, *shost;
+    char *sintf = NULL;
     char *serv, *sserv;
     int proto, sproto, dproto;
     char *p;
@@ -9940,6 +9956,14 @@ void doargs(int argc, int i, char *argv[]) {
 	    j = getdist(shost, &sproto);
 	    if (j > 0) {
 		if (j > 1) sserv = shost + j; else sserv = NULL;
+		for (p=shost; *p; p++) {
+		    if (*p == '%') {	/* with interface */
+			*p = '\0';
+			sintf = p+1;
+			break;
+		    }
+		}
+		if (!*shost) shost = NULL;
 	    } else if (j == 0) {
 		sserv = shost;
 		shost = NULL;
@@ -10014,7 +10038,7 @@ void doargs(int argc, int i, char *argv[]) {
 	    if (dproto & proto_base) proto |= proto_base_d;
 	    if (dproto & proto_nobackup) proto |= proto_nobackup;
 	}
-	stone = mkstone(host, serv, shost, sserv, j, &argv[k], proto);
+	stone = mkstone(host, serv, shost, sintf, sserv, j, &argv[k], proto);
 	if ((proto & proto_udp_s) && (proto & proto_udp_d)) { /* UDP => UDP */
 	    Origin *origin = (Origin*)malloc(sizeof(Origin));
 	    if (origin == NULL) {
