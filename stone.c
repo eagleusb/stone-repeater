@@ -4556,25 +4556,16 @@ int acceptCheck(Pair *pair1) {
     if (AccFp) {
 	char str[STRMAX+1];
 	char tstr[STRMAX+1];
-	short port = 0;
 	time_t clock;
 	time(&clock);
-	if (from->sa_family == AF_INET) {
-	    port = ntohs(((struct sockaddr_in*)from)->sin_port);
-	}
-#ifdef AF_INET6
-	else if (from->sa_family == AF_INET6) {
-	    port = ntohs(((struct sockaddr_in6*)from)->sin6_port);
-	}
-#endif
 	addr2str(from, fromlen, str, STRMAX, NI_NUMERICHOST);
 	str[STRMAX] = '\0';
 	strntime(tstr, STRMAX, &clock, -1);
 	tstr[STRMAX] = '\0';
 	addrport2strOnce(from, fromlen, (stone->proto & proto_stone_s),
 			 fromstr+fslen, STRMAX*2-fslen, 0);
-	fprintf(AccFp, "%s%d[%d] %s[%s]%d\n",
-		tstr, stone->port, stone->sd, fromstr, str, port);
+	fprintf(AccFp, "%s%d[%d] %s[%s]\n",
+		tstr, stone->port, stone->sd, fromstr, str);
 		
     }
     if ((xhost->mode & XHostsMode_Dump) > 0 || Debug > 1) {
