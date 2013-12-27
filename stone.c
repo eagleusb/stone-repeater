@@ -83,13 +83,14 @@
  * -DNO_SOCKLEN_T without socklen_t
  * -DNO_ADDRINFO  without getaddrinfo
  * -DNO_FAMILY_T  without sa_family_t
- * -DADDRCACHE    cache address used in proxy
+ * -DADDRCACHE	  cache address used in proxy
  * -DUSE_EPOLL	  use epoll(4) (Linux)
- * -DPTHREAD      use Posix Thread
+ * -DPTHREAD	  use Posix Thread
  * -DPRCTL	  use prctl(2) - operations on a process
  * -DOS2	  OS/2 with EMX
  * -DWINDOWS	  Windows95/98/NT
  * -DNT_SERVICE	  WindowsNT/2000 native service
+ * -DUSE_TPROXY	  use TProxy
  */
 #define VERSION	"2.3e"
 static char *CVS_ID =
@@ -218,6 +219,10 @@ typedef void *(*aync_start_routine) (void *);
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#ifdef USE_TPROXY
+#define IP_TRANSPARENT	19
+#define IP_ORIGDSTADDR	20
+#endif
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -4891,7 +4896,6 @@ int scanClose(Pair *pairs) {	/* scan close request */
     }
     p1 = trash.next;
     while (p1 != NULL) {
-	SOCKET sd;
 	p2 = p1;
 	p1 = p1->next;
 #ifndef USE_EPOLL
@@ -4902,7 +4906,6 @@ int scanClose(Pair *pairs) {	/* scan close request */
 	    n++;
 	    continue;
 	}
-	sd = p2->sd;
 	if (p2->proto & (proto_select_r | proto_select_w)) {
 	    p2->proto &= ~(proto_select_r | proto_select_w);
 	    p2->proto |= proto_dirty;
@@ -8461,6 +8464,21 @@ Stone *mkstone(
 		message(LOG_ERR, "stone %d: Can't set sockopt "
 			"BINDTODEVICE %s err=%d", stone->sd,
 			intf, errno);
+		exit(1);
+	    }
+	}
+#endif
+#ifdef USE_TPROXY
+	{
+	    int i = 1;
+	    if (setsockopt(stone->sd, SOL_IP, IP_TRANSPARENT,
+			   (char*)&i, sizeof(i)) < 0) {
+#ifdef WINDOWS
+		errno = WSAGetLastError();
+#endif
+		message(LOG_ERR, "stone %d: Can't set sockopt "
+			"IP_TRANSPARENT %d err=%d", stone->sd,
+			i, errno);
 		exit(1);
 	    }
 	}
