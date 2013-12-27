@@ -3483,10 +3483,10 @@ int doSSL_accept(Pair *pair) {
 #ifdef ANDROID
 static BIO *keystore_BIO(const char *key) {
     BIO *bio = NULL;
-    char val[KEYSTORE_MESSAGE_SIZE];
-    int len = keystore_get(key, strlen(key), val);
+    uint8_t *value = NULL;
+    int len = keystore_get(key, strlen(key), &value);
     if (len > 0 && (bio=BIO_new(BIO_s_mem()))) {
-	BIO_write(bio, val, len);
+	BIO_write(bio, value, len);
     } else {
 	message(LOG_NOTICE, "Can't get keystore: %s", key);
     }
