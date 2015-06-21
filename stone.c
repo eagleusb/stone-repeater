@@ -327,7 +327,6 @@ int FdSetBug = 0;
 #include <openssl/err.h>
 #include <openssl/pkcs12.h>
 #include <openssl/rand.h>
-extern const char *SSL_version_str;
 
 #ifdef CRYPTOAPI
 int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
@@ -8612,7 +8611,7 @@ void help(char *com, char *sub) {
     message(LOG_INFO, "%s",
 	    "Copyright(C)2007 by Hiroaki Sengoku <sengoku@gcd.org>");
 #ifdef USE_SSL
-    message(LOG_INFO, "using %s http://www.openssl.org/", SSL_version_str);
+    message(LOG_INFO, "using %s http://www.openssl.org/", SSLeay_version(SSLEAY_VERSION));
 #ifdef CRYPTOAPI
     message(LOG_INFO, "%s",
 	    "using cryptoapi.c by Peter 'Luna' Runestig <peter@runestig.com>");
