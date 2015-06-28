@@ -118,22 +118,28 @@ typedef void (*FuncPtr)(void*);
 #include <process.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#if !defined(EINPROGRESS) && defined(WSAEWOULDBLOCK)
+#ifdef WSAEWOULDBLOCK
+#undef EINPROGRESS
 #define EINPROGRESS     WSAEWOULDBLOCK
 #endif
-#if !defined(EMSGSIZE) && defined(WSAEMSGSIZE)
+#ifdef WSAEMSGSIZE
+#undef EMSGSIZE
 #define	EMSGSIZE	WSAEMSGSIZE
 #endif
-#if !defined(EADDRINUSE) && defined(WSAEADDRINUSE)
+#ifdef WSAEADDRINUSE
+#undef EADDRINUSE
 #define	EADDRINUSE	WSAEADDRINUSE
 #endif
-#if !defined(ECONNABORTED) && defined(WSAECONNABORTED)
+#ifdef WSAECONNABORTED
+#undef ECONNABORTED
 #define	ECONNABORTED	WSAECONNABORTED
 #endif
-#if !defined(ECONNRESET) && defined(WSAECONNRESET)
+#ifdef WSAECONNRESET
+#undef ECONNRESET
 #define	ECONNRESET	WSAECONNRESET
 #endif
-#if !defined(EISCONN) && defined(WSAEISCONN)
+#ifdef WSAEISCONN
+#undef EISCONN
 #define	EISCONN		WSAEISCONN
 #endif
 #include <time.h>
@@ -818,7 +824,7 @@ HANDLE NTServiceThreadHandle = NULL;
 #endif
 
 #ifdef NO_VSNPRINTF
-int vsnprintf(char *str, size_t len, char *fmt, va_list ap) {
+int vsnprintf(char *str, size_t len, const char *fmt, va_list ap) {
     int ret;
     ret = vsprintf(str, fmt, ap);
     if (strlen(str) >= len) {
@@ -953,7 +959,7 @@ void message(int pri, char *fmt, ...) {
     {
 	struct timeval tv;
 	if (gettimeofday(&tv, NULL) >= 0) {
-	    strntime(str+pos, LONGSTRMAX-pos, &tv.tv_sec, tv.tv_usec);
+	    strntime(str+pos, LONGSTRMAX-pos, (time_t*)&tv.tv_sec, tv.tv_usec);
 	}
 	str[LONGSTRMAX] = '\0';
 	pos = strlen(str);
