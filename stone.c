@@ -142,6 +142,9 @@ typedef void (*FuncPtr)(void*);
 #undef EISCONN
 #define	EISCONN		WSAEISCONN
 #endif
+#ifdef MSG_TRUNC
+#undef MSG_TRUNC
+#endif
 #include <time.h>
 #ifdef NT_SERVICE
 #include <windows.h>
