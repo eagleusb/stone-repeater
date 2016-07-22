@@ -3930,7 +3930,7 @@ void connected(Pair *pair) {
     time(&lastEstablished);
     /* now successfully connected */
 #ifdef USE_SSL
-    if (pair->stone->proto & proto_ssl_d) {
+    if ((pair->stone->proto & proto_ssl_d) || (pair->ssl_flag & sf_cb_on_r)) {
 	if (doSSL_connect(pair) < 0) {
 	    /* SSL_connect fails, shutdown pairs */
 	    if (!(p->proto & proto_shutdown))
@@ -5679,19 +5679,28 @@ int proxyCONNECT(Pair *pair, char *parm, int start) {
 }
 
 int proxyCommon(Pair *pair, char *parm, int start) {
-    char *port = "80";	/* default port of http:// */
+    char *port = NULL;
     char *host;
     ExBuf *ex;
     char *top;
     char *p, *q;
     int i;
+    int https = 0;
     ex = pair->b;	/* bottom */
     top = &ex->buf[start];
     for (i=0; i < METHOD_LEN_MAX; i++) {
 	if (parm[i] == ':') break;
     }
-    if (strncmp(parm, "http", i) != 0
-	|| parm[i+1] != '/' || parm[i+2] != '/') {
+    if (strncmp(parm, "http", i) == 0) {
+	port = "80";	/* default port of http:// */
+#ifdef USE_SSL
+    } else if (strncmp(parm, "https", i) == 0) {
+	https = 1;
+	port = "443";	/* default port of https:// */
+	pair->ssl_flag |= sf_cb_on_r;
+#endif
+    }
+    if (!port || parm[i+1] != '/' || parm[i+2] != '/') {
 	message(LOG_ERR, "Unknown URL format: %s", parm);
 	return -1;
     }
@@ -5720,8 +5729,9 @@ int proxyCommon(Pair *pair, char *parm, int start) {
     ex->start = 0;
     if (Debug > 1) {
 	Pair *r = pair->pair;
-	message(LOG_DEBUG, "proxy %d -> http://%s:%s",
-		(r ? r->sd : INVALID_SOCKET), host, port);
+	message(LOG_DEBUG, "proxy %d -> http%s://%s:%s",
+		(r ? r->sd : INVALID_SOCKET),
+		(https ? "s" : ""), host, port);
     }
     pair->proto &= ~(proto_noconnect | state_mask);
     pair->proto |= (proto_dirty | 1);
@@ -8542,7 +8552,8 @@ Stone *mkstone(
     } else {
 	stone->ssl_server = NULL;
     }
-    if (proto & proto_ssl_d) {	/* client side SSL */
+    if ((proto & proto_ssl_d)	/* client side SSL */
+	|| (proto & proto_command) == command_proxy) {
 	exPatOpts(&ClientOpts, host, dhost);
 	stone->ssl_client = mkStoneSSL(&ClientOpts, 0);
 	if (!(stone->ssl_client->name && *stone->ssl_client->name))
@@ -9157,7 +9168,9 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 	snprintf(path, BUFMAX-1, "%s/stone.pem", X509_get_default_cert_dir());
 	opts->keyFile = opts->certFile = strdup(path);
 	opts->keyFilePat = opts->certFilePat = NULL;
-#if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
+#if !defined(OPENSSL_NO_TLS1)
+	opts->meth = TLSv1_server_method();
+#elif !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_server_method();
 #elif !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv3_server_method();
@@ -9167,7 +9180,9 @@ void sslopts_default(SSLOpts *opts, int isserver) {
     } else {
 	opts->keyFile = opts->certFile = NULL;
 	opts->keyFilePat = opts->certFilePat = NULL;
-#if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
+#if !defined(OPENSSL_NO_TLS1)
+	opts->meth = TLSv1_client_method();
+#elif !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_client_method();
 #elif !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv3_client_method();
