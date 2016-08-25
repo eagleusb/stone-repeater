@@ -8785,10 +8785,10 @@ void help(char *com, char *sub) {
 #ifndef OPENSSL_NO_TLS1
 "       no_tls1            ; turn off TLSv1\n"
 #endif
-#ifndef OPENSSL_NO_TLS1
+#ifndef OPENSSL_NO_TLS1_2
 "       no_tls1.2          ; turn off TLSv1.2\n"
 #endif
-#ifndef OPENSSL_NO_TLS1
+#ifndef OPENSSL_NO_TLS1_1
 "       no_tls1.1          ; turn off TLSv1.1\n"
 #endif
 #ifndef OPENSSL_NO_SSL3
@@ -9329,7 +9329,7 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
     } else if (!strcmp(argv[argi], "no_tls1.2")) {
 	opts->off |= SSL_OP_NO_TLSv1_2;
 #endif
-#ifndef OPENSSL_NO_TLS1
+#ifndef OPENSSL_NO_TLS1_1
     } else if (!strcmp(argv[argi], "no_tls1.1")) {
 	opts->off |= SSL_OP_NO_TLSv1_1;
 #endif
