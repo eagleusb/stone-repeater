@@ -8770,15 +8770,33 @@ void help(char *com, char *sub) {
 #ifndef OPENSSL_NO_TLS1
 "       tls1               ; just use TLSv1\n"
 #endif
+#ifndef OPENSSL_NO_TLS1_2
+"       tls1.2             ; just use TLSv1.2\n"
+#endif
+#ifndef OPENSSL_NO_TLS1_1
+"       tls1.1             ; just use TLSv1.1\n"
+#endif
 #ifndef OPENSSL_NO_SSL3
 "       ssl3               ; just use SSLv3\n"
 #endif
 #ifndef OPENSSL_NO_SSL2
 "       ssl2               ; just use SSLv2\n"
 #endif
+#ifndef OPENSSL_NO_TLS1
 "       no_tls1            ; turn off TLSv1\n"
+#endif
+#ifndef OPENSSL_NO_TLS1
+"       no_tls1.2          ; turn off TLSv1.2\n"
+#endif
+#ifndef OPENSSL_NO_TLS1
+"       no_tls1.1          ; turn off TLSv1.1\n"
+#endif
+#ifndef OPENSSL_NO_SSL3
 "       no_ssl3            ; turn off SSLv3\n"
+#endif
+#ifndef OPENSSL_NO_SSL2
 "       no_ssl2            ; turn off SSLv2\n"
+#endif
 #ifndef OPENSSL_NO_TLSEXT
 "       sni                ; Server Name Indication\n"
 "       servername=<str>   ; Server Name\n"
@@ -9170,6 +9188,10 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 	opts->keyFilePat = opts->certFilePat = NULL;
 #if !defined(OPENSSL_NO_TLS1)
 	opts->meth = TLSv1_server_method();
+#elif !defined(OPENSSL_NO_TLS1_2)
+	opts->meth = TLSv1_2_server_method();
+#elif !defined(OPENSSL_NO_TLS1_1)
+	opts->meth = TLSv1_1_server_method();
 #elif !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_server_method();
 #elif !defined(OPENSSL_NO_SSL3)
@@ -9182,6 +9204,10 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 	opts->keyFilePat = opts->certFilePat = NULL;
 #if !defined(OPENSSL_NO_TLS1)
 	opts->meth = TLSv1_client_method();
+#elif !defined(OPENSSL_NO_TLS1_2)
+	opts->meth = TLSv1_2_client_method();
+#elif !defined(OPENSSL_NO_TLS1_1)
+	opts->meth = TLSv1_1_client_method();
 #elif !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_client_method();
 #elif !defined(OPENSSL_NO_SSL3)
@@ -9275,6 +9301,16 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 	if (isserver) opts->meth = TLSv1_server_method();
 	else opts->meth = TLSv1_client_method();
 #endif
+#ifndef OPENSSL_NO_TLS1_2
+    } else if (!strcmp(argv[argi], "tls1.2")) {
+	if (isserver) opts->meth = TLSv1_2_server_method();
+	else opts->meth = TLSv1_2_client_method();
+#endif
+#ifndef OPENSSL_NO_TLS1_1
+    } else if (!strcmp(argv[argi], "tls1.1")) {
+	if (isserver) opts->meth = TLSv1_1_server_method();
+	else opts->meth = TLSv1_1_client_method();
+#endif
 #ifndef OPENSSL_NO_SSL3
     } else if (!strcmp(argv[argi], "ssl3")) {
 	if (isserver) opts->meth = SSLv3_server_method();
@@ -9285,12 +9321,26 @@ int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
 	if (isserver) opts->meth = SSLv2_server_method();
 	else opts->meth = SSLv2_client_method();
 #endif
+#ifndef OPENSSL_NO_TLS1
     } else if (!strcmp(argv[argi], "no_tls1")) {
 	opts->off |= SSL_OP_NO_TLSv1;
+#endif
+#ifndef OPENSSL_NO_TLS1_2
+    } else if (!strcmp(argv[argi], "no_tls1.2")) {
+	opts->off |= SSL_OP_NO_TLSv1_2;
+#endif
+#ifndef OPENSSL_NO_TLS1
+    } else if (!strcmp(argv[argi], "no_tls1.1")) {
+	opts->off |= SSL_OP_NO_TLSv1_1;
+#endif
+#ifndef OPENSSL_NO_SSL3
     } else if (!strcmp(argv[argi], "no_ssl3")) {
 	opts->off |= SSL_OP_NO_SSLv3;
+#endif
+#ifndef OPENSSL_NO_SSL2
     } else if (!strcmp(argv[argi], "no_ssl2")) {
 	opts->off |= SSL_OP_NO_SSLv2;
+#endif
 #ifdef SSL_OP_CIPHER_SERVER_PREFERENCE
     } else if (!strcmp(argv[argi], "serverpref")) {
 	opts->off |= SSL_OP_CIPHER_SERVER_PREFERENCE;
