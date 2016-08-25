@@ -9186,35 +9186,45 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 	snprintf(path, BUFMAX-1, "%s/stone.pem", X509_get_default_cert_dir());
 	opts->keyFile = opts->certFile = strdup(path);
 	opts->keyFilePat = opts->certFilePat = NULL;
-#if !defined(OPENSSL_NO_TLS1)
-	opts->meth = TLSv1_server_method();
-#elif !defined(OPENSSL_NO_TLS1_2)
-	opts->meth = TLSv1_2_server_method();
-#elif !defined(OPENSSL_NO_TLS1_1)
-	opts->meth = TLSv1_1_server_method();
-#elif !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_server_method();
-#elif !defined(OPENSSL_NO_SSL3)
-	opts->meth = SSLv3_server_method();
-#elif !defined(OPENSSL_NO_SSL2)
-	opts->meth = SSLv2_server_method();
+	opts->off = (0
+#ifdef OPENSSL_NO_SSL2
+		     | SSL_OP_NO_SSLv2
 #endif
+#ifdef OPENSSL_NO_SSL3
+		     | SSL_OP_NO_SSLv3
+#endif
+#ifdef OPENSSL_NO_TLS1
+		     | SSL_OP_NO_TLSv1
+#endif
+#ifdef OPENSSL_NO_TLS1_2
+		     | SSL_OP_NO_TLSv1_2
+#endif
+#ifdef OPENSSL_NO_TLS1_1
+		     | SSL_OP_NO_TLSv1_1
+#endif
+	    );
     } else {
 	opts->keyFile = opts->certFile = NULL;
 	opts->keyFilePat = opts->certFilePat = NULL;
-#if !defined(OPENSSL_NO_TLS1)
-	opts->meth = TLSv1_client_method();
-#elif !defined(OPENSSL_NO_TLS1_2)
-	opts->meth = TLSv1_2_client_method();
-#elif !defined(OPENSSL_NO_TLS1_1)
-	opts->meth = TLSv1_1_client_method();
-#elif !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL3)
 	opts->meth = SSLv23_client_method();
-#elif !defined(OPENSSL_NO_SSL3)
-	opts->meth = SSLv3_client_method();
-#elif !defined(OPENSSL_NO_SSL2)
-	opts->meth = SSLv2_client_method();
+	opts->off = (0
+#ifdef OPENSSL_NO_SSL2
+		     | SSL_OP_NO_SSLv2
 #endif
+#ifdef OPENSSL_NO_SSL3
+		     | SSL_OP_NO_SSLv3
+#endif
+#ifdef OPENSSL_NO_TLS1
+		     | SSL_OP_NO_TLSv1
+#endif
+#ifdef OPENSSL_NO_TLS1_2
+		     | SSL_OP_NO_TLSv1_2
+#endif
+#ifdef OPENSSL_NO_TLS1_1
+		     | SSL_OP_NO_TLSv1_1
+#endif
+	    );
     }
     opts->caFile = opts->caPath = NULL;
     opts->pfxFile = NULL;
