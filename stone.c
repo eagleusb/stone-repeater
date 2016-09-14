@@ -352,6 +352,9 @@ int CryptoAPI_verify_certificate(X509 *x509);
 #ifdef ANDROID
 #include <openssl/pem.h>
 #include "keystore_get.h"
+#ifndef SSL_in_accept_init
+#define SSL_in_accept_init(a) (SSL_state(a) & SSL_ST_ACCEPT)
+#endif
 #endif
 
 typedef struct {
@@ -7741,7 +7744,7 @@ StoneSSL *mkStoneSSL(SSLOpts *opts, int isserver) {
     for (i=0; i < DEPTH_MAX; i++) {
 	if (opts->regexp[i]) {
 	    ss->re[i] = malloc(sizeof(regex_t));
-	    if (!ss->re) goto memerr;
+	    if (!ss->re[i]) goto memerr;
 	    err = regcomp(ss->re[i], opts->regexp[i], REG_EXTENDED|REG_ICASE);
 	    if (err) {
 		message(LOG_ERR, "RegEx compiling error %d", err);
