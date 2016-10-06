@@ -161,8 +161,8 @@ typedef void (*FuncPtr)(void*);
 #define FD_SET_BUG
 #undef EINTR
 #define EINTR	WSAEINTR
+#define NO_BZERO
 #define NO_BCOPY
-#define bzero(b,n)	memset(b,0,n)
 #define	usleep(usec)	Sleep(usec)
 #define ASYNC(func,arg)	{\
     if (Debug > 7) message(LOG_DEBUG, "ASYNC: %d", AsyncCount);\
@@ -175,6 +175,7 @@ typedef void (*FuncPtr)(void*);
     }\
 }
 #else	/* ! WINDOWS */
+#include <strings.h>
 #include <pwd.h>
 #include <sys/param.h>
 #ifdef OS2
@@ -337,6 +338,10 @@ int FdSetBug = 0;
 #include <openssl/pkcs12.h>
 #include <openssl/rand.h>
 
+#ifndef OPENSSL_NO_SSL2
+#define OPENSSL_NO_SSL2
+#endif
+
 #ifdef CRYPTOAPI
 int SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop);
 int CryptoAPI_verify_certificate(X509 *x509);
@@ -424,6 +429,11 @@ int PairIndex;
 int MatchIndex;
 int NewMatchCount = 0;
 #ifdef WINDOWS
+#define OPENSSL_NO_TLS1_1
+#define OPENSSL_NO_TLS1_2
+#include <openssl/applink.c>
+#pragma comment(lib, "libeay32.lib")
+#pragma comment(lib, "ssleay32.lib")
 HANDLE *SSLMutex = NULL;
 #else
 #ifdef PTHREAD
@@ -850,6 +860,10 @@ int snprintf(char *str, size_t len, char *fmt, ...) {
     va_end(ap);
     return ret;
 }
+#endif
+
+#ifdef NO_BZERO
+#define bzero(b,n)	memset(b,0,n)
 #endif
 
 #ifdef NO_BCOPY
@@ -1702,6 +1716,7 @@ XHosts *checkXhost(XHosts *xhosts, struct sockaddr *sa, socklen_t salen) {
 	    match = !match;
 	    continue;
 	}
+	(void)salen;
 	if (sa->sa_family == AF_INET
 	    && xhosts->xhost.addr.sa_family == AF_INET) {
 	    if (xhosts->mbits > 0) {
@@ -2599,52 +2614,35 @@ int modPairDest(Pair *p1, struct sockaddr *dst, socklen_t dstlenmax) {
 #ifdef USE_SSL
     ssl = p2->ssl;
     if (ssl) {
-	SSL_SESSION *sess = SSL_get1_session(ssl);
-	if (sess) {
-	    unsigned char **match;
-	    if (Debug > 2) {
-		char str[SSL_MAX_SSL_SESSION_ID_LENGTH * 2 + 1];
-		int len = sess->session_id_length;
-		int i;
-		if (len > SSL_MAX_SSL_SESSION_ID_LENGTH)
-		    len = SSL_MAX_SSL_SESSION_ID_LENGTH;
-		for (i=0; i < len; i++)
-		    sprintf(&str[i*2], "%02x", sess->session_id[i]);
-		str[i*2] = '\0';
-		message(LOG_DEBUG, "%d TCP %d: SSL session ID=%s len=%d",
-			p2->stone->sd, p2->sd, str, sess->session_id_length);
-	    }
-	    match = SSL_SESSION_get_ex_data(sess, MatchIndex);
-	    if (match && p2->stone->ssl_server) {
-		int lbparm = p2->stone->ssl_server->lbparm;
-		int lbmod = p2->stone->ssl_server->lbmod;
-		unsigned char *s;
-		if (0 <= lbparm && lbparm <= 9) s = match[lbparm];
-		else s = match[1];
-		if (!s) s = match[0];
-		if (s && lbmod) {
-		    int offset2 = 0;
-		    offset = 0;
-		    while (*s) {
-			if (offset2 >= 0) {
-			    if ('0' <= *s && *s <= '9') {
-				offset2 = offset2 * 10 + (*s - '0');
-			    } else {
-				offset2 = -1;
-			    }
+	unsigned char **match = SSL_get_ex_data(ssl, MatchIndex);
+	if (match && p2->stone->ssl_server) {
+	    int lbparm = p2->stone->ssl_server->lbparm;
+	    int lbmod = p2->stone->ssl_server->lbmod;
+	    unsigned char *s;
+	    if (0 <= lbparm && lbparm <= 9) s = match[lbparm];
+	    else s = match[1];
+	    if (!s) s = match[0];
+	    if (s && lbmod) {
+		int offset2 = 0;
+		offset = 0;
+		while (*s) {
+		    if (offset2 >= 0) {
+			if ('0' <= *s && *s <= '9') {
+			    offset2 = offset2 * 10 + (*s - '0');
+			} else {
+			    offset2 = -1;
 			}
-			offset <<= 6;
-			offset += (*s & 0x3f);
-			s++;
 		    }
-		    if (offset2 > 0) offset = offset2;
-		    offset %= lbmod;
-		    if (Debug > 2)
-			message(LOG_DEBUG, "%d TCP %d: pair %d lb%d=%d",
-				p1->stone->sd, p1->sd, p2->sd, lbparm, offset);
+		    offset <<= 6;
+		    offset += (*s & 0x3f);
+		    s++;
 		}
+		if (offset2 > 0) offset = offset2;
+		offset %= lbmod;
+		if (Debug > 2)
+		    message(LOG_DEBUG, "%d TCP %d: pair %d lb%d=%d",
+			    p1->stone->sd, p1->sd, p2->sd, lbparm, offset);
 	    }
-	    SSL_SESSION_free(sess);
 	}
     }
 #endif
@@ -3019,6 +3017,9 @@ int scanUDP(
     int all;
     time_t now;
     time(&now);
+#ifndef USE_EPOLL
+    (void)eop;
+#endif
     if (origins) {
 	all = 0;
     } else {
@@ -3436,8 +3437,9 @@ int doSSL_accept(Pair *pair) {
 	    SSL_CTX *ctx = pair->stone->ssl_server->ctx;
 	    message(LOG_DEBUG, "%d TCP %d: SSL_accept succeeded "
 		    "sess=%ld accept=%ld hits=%ld", pair->stone->sd, sd,
-		    SSL_CTX_sess_number(ctx), SSL_CTX_sess_accept(ctx),
-		    SSL_CTX_sess_hits(ctx));
+		    (long)SSL_CTX_sess_number(ctx),
+		    (long)SSL_CTX_sess_accept(ctx),
+		    (long)SSL_CTX_sess_hits(ctx));
 	}
 	if (pair->stone->ssl_server->verbose) printSSLinfo(LOG_DEBUG, ssl);
 	return ret;
@@ -3521,7 +3523,7 @@ static int use_keystore(SSL_CTX *ctx, char *name) {
     if ((bio=keystore_BIO(kname))
 	&& (stack=PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL))) {
 	int i;
-	for (i=0; i < sk_X509_INFO_num(stack); i++) {
+	for (i=0; i < (int)sk_X509_INFO_num(stack); i++) {
 	    X509_INFO *info = sk_X509_INFO_value(stack, i);
 	    if (!info) continue;
 	    if (info->x509) X509_STORE_add_cert(ctx->cert_store, info->x509);
@@ -3595,6 +3597,8 @@ int doSSL_connect(Pair *pair) {
 #endif
     pair->ssl_flag &= ~(sf_cb_on_r | sf_cb_on_w);
     pair->proto |= proto_dirty;
+    if (Debug > 8) message(LOG_DEBUG, "%d TCP %d: proto=%x SSL_connect",
+			   pair->stone->sd, pair->sd, pair->proto);
     ret = SSL_connect(ssl);
     if (ret > 0) {	/* success */
 	Pair *p = pair->pair;
@@ -3605,8 +3609,9 @@ int doSSL_connect(Pair *pair) {
 	    SSL_CTX *ctx = pair->stone->ssl_client->ctx;
 	    message(LOG_DEBUG, "%d TCP %d: SSL_connect succeeded "
 		    "sess=%ld connect=%ld hits=%ld", pair->stone->sd, sd,
-		    SSL_CTX_sess_number(ctx), SSL_CTX_sess_connect(ctx),
-		    SSL_CTX_sess_hits(ctx));
+		    (long)SSL_CTX_sess_number(ctx),
+		    (long)SSL_CTX_sess_connect(ctx),
+		    (long)SSL_CTX_sess_hits(ctx));
 	    message_pair(LOG_DEBUG, pair);
 	}
 	if (pair->stone->ssl_client->verbose) printSSLinfo(LOG_DEBUG, ssl);
@@ -3626,6 +3631,10 @@ int doSSL_connect(Pair *pair) {
 	    errno = WSAGetLastError();
 #endif
 	    if (errno == 0) {
+		if (Debug > 8)
+		    message(LOG_DEBUG, "%d TCP %d: SSL_connect "
+			    "success ? sf=%x",
+			    pair->stone->sd, sd, pair->ssl_flag);
 		return 1;	/* success ? */
 	    } else if (errno == EINTR || errno == EAGAIN) {
 		pair->ssl_flag |= (sf_cb_on_r | sf_cb_on_r);
@@ -3844,6 +3853,16 @@ void freePair(Pair *pair) {
 	    message(LOG_DEBUG, "%d TCP %d: SSL close notify was not sent",
 		    pair->stone->sd, sd);
 	    SSL_set_shutdown(ssl, (state | SSL_SENT_SHUTDOWN));
+	}
+	char **match = SSL_get_ex_data(ssl, MatchIndex);
+	if (match) {
+	    int i;
+	    for (i=0; i <= NMATCH_MAX; i++) {
+		if (match[i]) free(match[i]);
+	    }
+	    if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %lx",
+				   --NewMatchCount, (long)match);
+	    free(match);
 	}
 	SSL_free(ssl);
 	if (pair->stone->proto & proto_ssl_s) {
@@ -4789,7 +4808,6 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 #ifdef USE_SSL
     char **match = NULL;
     SSL *ssl = pair->ssl;
-    SSL_SESSION *sess = NULL;
     int cond;
 #endif
     p = *pp;
@@ -4805,9 +4823,7 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 	    }
 	    if ('0' <= c && c <= '9') {
 		if (ssl && !match) {
-		    sess = SSL_get1_session(ssl);
-		    if (sess)
-			match = SSL_SESSION_get_ex_data(sess, MatchIndex);
+		    match = SSL_get_ex_data(ssl, MatchIndex);
 		    if (!match) ssl = NULL;
 		    /* now (match || ssl == NULL) holds */
 		}
@@ -4877,9 +4893,6 @@ int strnparse(char *buf, int limit, char **pp, Pair *pair, char term) {
 	}
 	if (buf) buf[i++] = c;
     }
-#ifdef USE_SSL
-    if (sess) SSL_SESSION_free(sess);
-#endif
     if (buf) buf[i] = '\0';
     *pp = p;
     return i;
@@ -5674,6 +5687,7 @@ int proxyCONNECT(Pair *pair, char *parm, int start) {
 	port = q + 1;
 	*q = '\0';
     }
+    (void)start;
     pair->b->len += pair->b->start;
     pair->b->start = 0;
     p = pair->pair;
@@ -5757,6 +5771,8 @@ int proxyPOST(Pair *pair, char *parm, int start) {
 }
 
 int proxyErr(Pair *pair, char *parm, int start) {
+    (void)pair;
+    (void)start;
     message(LOG_ERR, "Unknown method: %s", parm);
     return -1;
 }
@@ -5779,6 +5795,7 @@ int popUSER(Pair *pair, char *parm, int start) {
 		pair->stone->sd, pair->sd);
 	return -1;
     }
+    (void)start;
     data = ex->buf + DATA_HEAD_LEN;
     if (Debug) message(LOG_DEBUG, ": USER %s", parm);
     ulen = strlen(parm);
@@ -5824,6 +5841,7 @@ int popPASS(Pair *pair, char *parm, int start) {
 	return -1;
     }
     strcat(str, parm);
+    (void)start;
     ex = pair->b;	/* bottom */
     sprintf(ex->buf, "APOP %s ", data);
     ulen = strlen(ex->buf);
@@ -5842,12 +5860,14 @@ int popPASS(Pair *pair, char *parm, int start) {
 }
 
 int popAUTH(Pair *pair, char *parm, int start) {
+    (void)start;
     if (Debug) message(LOG_DEBUG, ": AUTH %s", parm);
     commOutput(pair, "-ERR authorization first\r\n");
     return -2;	/* read more */
 }
 
 int popCAPA(Pair *pair, char *parm, int start) {
+    (void)start;
     if (Debug) message(LOG_DEBUG, ": CAPA %s", parm);
     commOutput(pair, "-ERR authorization first\r\n");
     return -2;	/* read more */
@@ -5862,6 +5882,8 @@ int popAPOP(Pair *pair, char *parm, int start) {
 }
 
 int popErr(Pair *pair, char *parm, int start) {
+    (void)pair;
+    (void)start;
     message(LOG_ERR, "Unknown POP command: %s", parm);
     return -1;
 }
@@ -5894,6 +5916,7 @@ Pair *identd(int cport, struct sockaddr *ssa, socklen_t ssalen) {
 	if (getpeername(sd, sa, &salen) < 0) {
 	    continue;
 	}
+	(void)ssalen;
 	if (!saComp(sa, ssa)) continue;
 	return pair;
     }
@@ -5908,6 +5931,7 @@ int identdQUERY(Pair *pair, char *parm, int start) {
     struct sockaddr *sa = (struct sockaddr*)&ss;
     socklen_t salen = sizeof(ss);
     Pair *p = pair->pair;
+    (void)start;
     strcpy(mesg, "ERROR : NO-USER");
     if (p) {
 	SOCKET sd = p->sd;
@@ -5941,6 +5965,8 @@ int identdQUERY(Pair *pair, char *parm, int start) {
 }
 
 int identdQUIT(Pair *pair, char *parm, int start) {
+    (void)pair;
+    (void)start;
     if (Debug) message(LOG_DEBUG, "identd QUIT %s", parm);
     return -1;
 }
@@ -5993,16 +6019,19 @@ int limitCommon(Pair *pair, int var, int limit, char *str) {
 }
 
 int limitPair(Pair *pair, char *parm, int start) {
+    (void)start;
     return limitCommon(pair, nPairs(PairTop), atoi(parm), "pair");
 }
 
 int limitConn(Pair *pair, char *parm, int start) {
+    (void)start;
     return limitCommon(pair, nConns(), atoi(parm), "conn");
 }
 
 int limitEstablished(Pair *pair, char *parm, int start) {
     time_t now;
     time(&now);
+    (void)start;
     return limitCommon(pair, (int)(now - lastEstablished),
 		       atoi(parm), "established");
 }
@@ -6010,15 +6039,18 @@ int limitEstablished(Pair *pair, char *parm, int start) {
 int limitReadWrite(Pair *pair, char *parm, int start) {
     time_t now;
     time(&now);
+    (void)start;
     return limitCommon(pair, (int)(now - lastReadWrite),
 		       atoi(parm), "readwrite");
 }
 
 int limitAsync(Pair *pair, char *parm, int start) {
+    (void)start;
     return limitCommon(pair, AsyncCount, atoi(parm), "async");
 }
 
 int limitErr(Pair *pair, char *parm, int start) {
+    (void)start;
     if (Debug) message(LOG_ERR, ": Illegal LIMIT %s", parm);
     commOutput(pair, "500 Illegal LIMIT\r\n");
     return -2;	/* read more */
@@ -6041,6 +6073,7 @@ int healthHELO(Pair *pair, char *parm, int start) {
 	     nConns(), nOrigins());
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": HELO %s: %s", parm, str);
+    (void)start;
     commOutput(pair, "250 stone:%s debug=%d %s\r\n",
 	       VERSION, Debug, str);
     return -2;	/* read more */
@@ -6055,6 +6088,7 @@ int healthSTAT(Pair *pair, char *parm, int start) {
 	     AsyncCount, mc);
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": STAT %s: %s", parm, str);
+    (void)start;
     commOutput(pair, "250 stone:%s debug=%d %s\r\n",
 	       VERSION, Debug, str);
     return -2;	/* read more */
@@ -6067,6 +6101,7 @@ int healthFREE(Pair *pair, char *parm, int start) {
 	     nFreePairs, nFreeExBuf, nFreeExBot, nFreePktBuf);
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": FREE %s: %s", parm, str);
+    (void)start;
     commOutput(pair, "250 stone:%s debug=%d %s\r\n",
 	       VERSION, Debug, str);
     return -2;	/* read more */
@@ -6081,18 +6116,23 @@ int healthCLOCK(Pair *pair, char *parm, int start) {
 	     (int)(now - lastEstablished), (int)(now - lastReadWrite));
     str[LONGSTRMAX] = '\0';
     if (Debug) message(LOG_DEBUG, ": CLOCK %s: %s", parm, str);
+    (void)start;
     commOutput(pair, "250 stone:%s debug=%d %s\r\n",
 	       VERSION, Debug, str);
     return -2;	/* read more */
 }
 
 int healthCVS_ID(Pair *pair, char *parm, int start) {
+    (void)parm;
+    (void)start;
     commOutput(pair, "200 stone %s %s\r\n", VERSION, CVS_ID);
     return -2;	/* read more */
 }
 
 int healthCONFIG(Pair *pair, char *parm, int start) {
     int i;
+    (void)parm;
+    (void)start;
     for (i=1; i < ConfigArgc; i++)
 	commOutput(pair, "200%c%s\n", (i < ConfigArgc-1 ? '-' : ' '),
 		   ConfigArgv[i]);
@@ -6102,6 +6142,8 @@ int healthCONFIG(Pair *pair, char *parm, int start) {
 int healthSTONE(Pair *pair, char *parm, int start) {
     Stone *stone;
     char str[STRMAX+1];
+    (void)parm;
+    (void)start;
     for (stone=stones; stone != NULL; stone=stone->next) {
 	Stone *child;
 	for (child=stone->children; child != NULL; child=child->children)
@@ -6124,6 +6166,8 @@ int healthLIMIT(Pair *pair, char *parm, int start) {
 }
 
 int healthQUIT(Pair *pair, char *parm, int start) {
+    (void)pair;
+    (void)start;
     if (Debug) message(LOG_DEBUG, ": QUIT %s", parm);
     return -1;
 }
@@ -6135,6 +6179,7 @@ int healthCommon(char *comm, Pair *pair, char *parm, int start) {
     int j = 0;
     int s = 0;
     buf[0] = '\0';
+    (void)start;
     for (i=0; i < ex->len; i++) {
 	char c = ex->buf[ex->start + i];
 	if (s < 5) {
@@ -6180,6 +6225,8 @@ int healthHEAD(Pair *pair, char *parm, int start) {
 }
 
 int healthErr(Pair *pair, char *parm, int start) {
+    (void)pair;
+    (void)start;
     if (*parm) message(LOG_ERR, "Unknown health command: %s", parm);
     return -1;
 }
@@ -7342,31 +7389,6 @@ int scanStones(fd_set *rop, fd_set *wop, fd_set *eop) {
 /* stone */
 
 #ifdef USE_SSL
-static int newMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
-			      int idx, long argl, void *argp) {
-    char **match = malloc(sizeof(char*) * (NMATCH_MAX+1));
-    if (match) {
-	int i;
-	for (i=0; i <= NMATCH_MAX; i++) match[i] = NULL;
-	if (Debug > 4) message(LOG_DEBUG, "newMatch %d: %lx",
-			       NewMatchCount++, (long)match);
-	return CRYPTO_set_ex_data(ad, idx, match);
-    }
-    return 0;
-}
-
-static void freeMatch(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
-		      int idx, long argl, void *argp) {
-    char **match = ptr;
-    int i;
-    for (i=0; i <= NMATCH_MAX; i++) {
-	if (match[i]) free(match[i]);
-    }
-    if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %lx",
-			   --NewMatchCount, (long)match);
-    free(match);
-}
-
 static int hostcmp(char *pat, char *host) {
     char a, b;
     while (*pat) {
@@ -7395,7 +7417,7 @@ static int hostcheck(Pair *pair, X509 *cert, char *host) {
 	&& (ext=X509_get_ext(cert, i))
 	&& (ialt=X509V3_EXT_d2i(ext))) {
 	int done = 0;
-	for (i=0; !done && i < sk_GENERAL_NAME_num(ialt); i++) {
+	for (i=0; !done && i < (int)sk_GENERAL_NAME_num(ialt); i++) {
 	    GENERAL_NAME *gen = sk_GENERAL_NAME_value(ialt, i);
 	    if (gen->type == GEN_DNS && gen->d.ia5) {
 		int len = gen->d.ia5->length;
@@ -7526,50 +7548,59 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
     re = ss->re[DEPTH_MAX - depthmax + depth];
     if (!re) re = ss->re[depth];
     if (depth < DEPTH_MAX && re) {
-	SSL_SESSION *sess = NULL;
 	regmatch_t pmatch[NMATCH_MAX];
-	char **match;
 	err = regexec(re, p, (size_t)NMATCH_MAX, pmatch, 0);
 	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: regexec%d=%d",
 			       pair->stone->sd, pair->sd, depth, err);
 	if (err) return 0;	/* not match */
-	sess = SSL_get1_session(ssl);
-	if (sess && (match = SSL_SESSION_get_ex_data(sess, MatchIndex))) {
-	    int i;
-	    int j = 1;
-	    if (serial >= 0) {
-		char str[STRMAX+1];
-		int len;
-		snprintf(str, STRMAX, "%lx", serial);
-		len = strlen(str);
-		if (match[0]) free(match[0]);
-		match[0] = malloc(len+1);
-		if (match[0]) {
-		    strncpy(match[0], str, len);
-		    match[0][len] = '\0';
-		}
+	char **match = SSL_get_ex_data(ssl, MatchIndex);
+	if (!match) {
+	    match = malloc(sizeof(char*) * (NMATCH_MAX+1));
+	    if (match) {
+		int i;
+		for (i=0; i <= NMATCH_MAX; i++)
+		    match[i] = NULL;
+		if (Debug > 4)
+		    message(LOG_DEBUG, "newMatch %d: %lx",
+			    NewMatchCount++, (long)match);
+		SSL_set_ex_data(ssl, MatchIndex, match);
 	    }
-	    for (i=1; i <= NMATCH_MAX; i++) {
-		if (match[i]) continue;
-		if (pmatch[j].rm_so >= 0) {
-		    int len = pmatch[j].rm_eo - pmatch[j].rm_so;
-		    match[i] = malloc(len+1);
-		    if (match[i]) {
-			strncpy(match[i], p + pmatch[j].rm_so, len);
-			match[i][len] = '\0';
-			if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: \\%d=%s",
-					       pair->stone->sd, pair->sd,
-					       i, match[i]);
-		    }
-		    j++;
-		}
-	    }
-	} else {
-	    message(LOG_ERR,
-		    "%d TCP %d: SSL callback can't get session's ex_data",
-		    pair->stone->sd, pair->sd);
 	}
-	if (sess) SSL_SESSION_free(sess);
+	if (!match) {
+	    message(LOG_ERR,
+		    "%d TCP %d: SSL callback can't get ex_data",
+		    pair->stone->sd, pair->sd);
+	    return 0;
+	}
+	int i;
+	int j = 1;
+	if (serial >= 0) {
+	    char str[STRMAX+1];
+	    int len;
+	    snprintf(str, STRMAX, "%lx", serial);
+	    len = strlen(str);
+	    if (match[0]) free(match[0]);
+	    match[0] = malloc(len+1);
+	    if (match[0]) {
+		strncpy(match[0], str, len);
+		match[0][len] = '\0';
+	    }
+	}
+	for (i=1; i <= NMATCH_MAX; i++) {
+	    if (match[i]) continue;
+	    if (pmatch[j].rm_so >= 0) {
+		int len = pmatch[j].rm_eo - pmatch[j].rm_so;
+		match[i] = malloc(len+1);
+		if (match[i]) {
+		    strncpy(match[i], p + pmatch[j].rm_so, len);
+		    match[i][len] = '\0';
+		    if (Debug > 4) message(LOG_DEBUG, "%d TCP %d: \\%d=%s",
+					   pair->stone->sd, pair->sd,
+					   i, match[i]);
+		}
+		j++;
+	    }
+	}
     } else {
 	if (Debug > 3) message(LOG_DEBUG, "%d TCP %d: re%d=NULL",
 			       pair->stone->sd, pair->sd, depth);
@@ -7578,6 +7609,7 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 }
 
 static int passwd_callback(char *buf, int size, int rwflag, void *passwd) {
+    (void)rwflag;
     strncpy(buf, (char *)(passwd), size);
     buf[size-1] = '\0';
     return(strlen(buf));
@@ -7609,6 +7641,8 @@ static int ssl_servername_callback(SSL *ssl, int *ad, void *arg) {
 	    return SSL_TLSEXT_ERR_OK;
 	}
     }
+    (void)ad;
+    (void)arg;
     return SSL_TLSEXT_ERR_ALERT_FATAL;
 }
 #endif
@@ -8328,6 +8362,7 @@ int mkPortXhosts(int argc, int i, char *argv[]) {
 Stone *getStone(struct sockaddr *sa, socklen_t salen, int proto) {
     Stone *stone;
     proto &= proto_udp_s;
+    (void)salen;
     for (stone=stones; stone != NULL; stone=stone->next) {
 	if ((stone->proto & proto_udp_s) == proto
 	    && saComp(&stone->listen->addr, sa)) {
@@ -8806,7 +8841,7 @@ void help(char *com, char *sub) {
 #endif
 "       bugs               ; SSL implementation bug workarounds\n"
 #ifdef SSL_OP_CIPHER_SERVER_PREFERENCE
-"       serverpref         ; use server's cipher preferences (SSLv2)\n"
+"       serverpref         ; use server's cipher preferences\n"
 #endif
 "       shutdown=<mode>    ; accurate, nowait, unclean\n"
 "       sid_ctx=<str>      ; set session ID context\n"
@@ -9252,6 +9287,7 @@ void sslopts_default(SSLOpts *opts, int isserver) {
 }
 
 int sslopts(int argc, int argi, char *argv[], SSLOpts *opts, int isserver) {
+    (void)argc;
     if (!strcmp(argv[argi], "default")) {
 	sslopts_default(opts, isserver);
     } else if (!strcmp(argv[argi], "verbose")) {
@@ -10363,8 +10399,7 @@ void initialize(int argc, char *argv[]) {
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
     PairIndex = SSL_get_ex_new_index(0, "Pair index", NULL, NULL, NULL);
-    MatchIndex = SSL_SESSION_get_ex_new_index(0, "Match index",
-					      newMatch, NULL, freeMatch);
+    MatchIndex = SSL_get_ex_new_index(0, "Match index", NULL, NULL, NULL);
     RAND_poll();
     if (!RAND_status()) {
 	message(LOG_WARNING, "Can't collect enough random seeds");
