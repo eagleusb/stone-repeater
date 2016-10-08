@@ -475,7 +475,7 @@ typedef struct {
     socklen_t len;
     struct sockaddr addr;
 } SockAddr;
-#define SockAddrBaseSize	((int)(long)&((SockAddr*)NULL)->addr)
+#define SockAddrBaseSize	((int)(long long)&((SockAddr*)NULL)->addr)
 
 typedef struct _XHosts {
     struct _XHosts *next;
@@ -1115,10 +1115,10 @@ void message_buf(Pair *pair, int len, char *str) {	/* dump for debug */
     head[STRMAX] = '\0';
     if ((pair->proto & proto_command) == command_source) {
 	snprintf(head, STRMAX, "%d %s%d<%d",
-		 pair->stone->sd, str, pair->sd, p->sd);
+		 (int)pair->stone->sd, str, (int)pair->sd, (int)p->sd);
     } else {
 	snprintf(head, STRMAX, "%d %s%d>%d",
-		 pair->stone->sd, str, p->sd, pair->sd);
+		 (int)pair->stone->sd, str, (int)p->sd, (int)pair->sd);
     }
     packet_dump(head, pair->t->buf + pair->t->start, len, pair->xhost);
 }
@@ -2480,11 +2480,11 @@ char *stone2str(Stone *stone, char *str, int strlen) {
     src[STRMAX] = '\0';
     proto = stone->proto;
     if ((proto & proto_command) == command_proxy) {
-	snprintf(str, strlen, "stone %d: proxy <- %s", stone->sd, src);
+	snprintf(str, strlen, "stone %d: proxy <- %s", (int)stone->sd, src);
     } else if ((proto & proto_command) == command_health) {
-	snprintf(str, strlen, "stone %d: health <- %s", stone->sd, src);
+	snprintf(str, strlen, "stone %d: health <- %s", (int)stone->sd, src);
     } else if ((proto & proto_command) == command_identd) {
-	snprintf(str, strlen, "stone %d: identd <- %s", stone->sd, src);
+	snprintf(str, strlen, "stone %d: identd <- %s", (int)stone->sd, src);
     } else {
 	char dst[STRMAX+1];
 	if (stone->ndsts > 0) {
@@ -2495,7 +2495,7 @@ char *stone2str(Stone *stone, char *str, int strlen) {
 	    snprintf(dst, STRMAX, "(%s:%s)",
 		     (char*)stone->dsts[0], (char*)stone->dsts[1]);
 	}
-	snprintf(str, strlen, "stone %d: %s <- %s", stone->sd, dst, src);
+	snprintf(str, strlen, "stone %d: %s <- %s", (int)stone->sd, dst, src);
     }
     str[strlen] = '\0';
     return str;
@@ -2982,7 +2982,8 @@ int sendUDP(PktBuf *pb) {
     }
     if ((origin->xhost->mode & XHostsMode_Dump) > 0) {
 	char head[STRMAX+1];
-	snprintf(head, STRMAX, "%d UDP%s%d:", stone->sd, dirstr, origin->sd);
+	snprintf(head, STRMAX, "%d UDP%s%d:",
+		 (int)stone->sd, dirstr, (int)origin->sd);
 	head[STRMAX] = '\0';
 	packet_dump(head, pb->buf, pb->len, origin->xhost);
     }
@@ -3222,11 +3223,11 @@ int sendPairUDP(Pair *pair) {
     if ((pair->proto & proto_command) == command_source) {
 	Pair *p = pair->pair;
 	snprintf(prefix, STRMAX, "%d UDP<TCP%d:",
-		 stone->sd, (p ? p->sd : -1));
+		 (int)stone->sd, (p ? (int)p->sd : -1));
     } else {
 	Pair *p = pair->pair;
 	snprintf(prefix, STRMAX, "%d TCP%d>UDP%d:",
-		 stone->sd, (p ? p->sd : -1), pair->sd);
+		 (int)stone->sd, (p ? (int)p->sd : -1), (int)pair->sd);
     }
     while (next) {
 	ex = next;
@@ -3860,8 +3861,8 @@ void freePair(Pair *pair) {
 	    for (i=0; i <= NMATCH_MAX; i++) {
 		if (match[i]) free(match[i]);
 	    }
-	    if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %lx",
-				   --NewMatchCount, (long)match);
+	    if (Debug > 4) message(LOG_DEBUG, "freeMatch %d: %llx",
+				   --NewMatchCount, (long long)match);
 	    free(match);
 	}
 	SSL_free(ssl);
@@ -4595,7 +4596,7 @@ int acceptCheck(Pair *pair1) {
 	addrport2strOnce(from, fromlen, (stone->proto & proto_stone_s),
 			 fromstr+fslen, STRMAX*2-fslen, 0);
 	fprintf(AccFp, "%s%d[%d] %s[%s]\n",
-		tstr, stone->port, stone->sd, fromstr, str);
+		tstr, stone->port, (int)stone->sd, fromstr, str);
 		
     }
     if ((xhost->mode & XHostsMode_Dump) > 0 || Debug > 1) {
@@ -7556,21 +7557,18 @@ static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 	char **match = SSL_get_ex_data(ssl, MatchIndex);
 	if (!match) {
 	    match = malloc(sizeof(char*) * (NMATCH_MAX+1));
-	    if (match) {
-		int i;
-		for (i=0; i <= NMATCH_MAX; i++)
-		    match[i] = NULL;
-		if (Debug > 4)
-		    message(LOG_DEBUG, "newMatch %d: %lx",
-			    NewMatchCount++, (long)match);
-		SSL_set_ex_data(ssl, MatchIndex, match);
+	    if (!match) {
+		message(LOG_ERR,
+			"%d TCP %d: SSL callback can't get ex_data",
+			pair->stone->sd, pair->sd);
+		return 0;
 	    }
-	}
-	if (!match) {
-	    message(LOG_ERR,
-		    "%d TCP %d: SSL callback can't get ex_data",
-		    pair->stone->sd, pair->sd);
-	    return 0;
+	    int i;
+	    for (i=0; i <= NMATCH_MAX; i++)
+		match[i] = NULL;
+	    if (Debug > 4) message(LOG_DEBUG, "newMatch %d: %llx",
+				   NewMatchCount++, (long long)match);
+	    SSL_set_ex_data(ssl, MatchIndex, match);
 	}
 	int i;
 	int j = 1;
@@ -8605,11 +8603,13 @@ Stone *mkstone(
 	mesg = str;
 	if ((proto & proto_command) == command_proxy) {
 	    snprintf(mesg, STRMAX, "stone %d: using proxy by ",
-		     stone->sd);
+		     (int)stone->sd);
 	} else if ((proto & proto_command) == command_health) {
-	    snprintf(mesg, STRMAX, "stone %d: health check by ", stone->sd);
+	    snprintf(mesg, STRMAX, "stone %d: health check by ",
+		     (int)stone->sd);
 	} else if ((proto & proto_command) == command_identd) {
-	    snprintf(mesg, STRMAX, "stone %d: ident query by ", stone->sd);
+	    snprintf(mesg, STRMAX, "stone %d: ident query by ",
+		     (int)stone->sd);
 	} else {
 	    char addrport[STRMAX+1];
 	    if (stone->ndsts > 0) {
@@ -8622,7 +8622,7 @@ Stone *mkstone(
 			 (char*)stone->dsts[0], (char*)stone->dsts[1]);
 	    }
 	    snprintf(mesg, STRMAX, "stone %d: connecting to %s by ",
-		     stone->sd, addrport);
+		     (int)stone->sd, addrport);
 	}
     }
     family = AF_INET;
